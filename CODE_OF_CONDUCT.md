@@ -12,7 +12,7 @@ tolerated.
 
 ## Reporting Issues
 
-To report inappropriate behavior, contact [paul@basicmachines.co].
+To report inappropriate behavior.
 
 ## Consequences
 

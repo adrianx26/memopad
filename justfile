@@ -1,4 +1,4 @@
-# MemoPad - Modern Command Runner
+﻿# MemoPad - Modern Command Runner
 
 # Install dependencies
 install:
@@ -256,7 +256,7 @@ release version:
     echo ""
     echo "📝 REMINDER: Post-release tasks:"
     echo "   1. docs.basicmemory.com - Add release notes to src/pages/latest-releases.mdx"
-    echo "   2. basicmachines.co - Update version in src/components/sections/hero.tsx"
+    echo "   2. xxx - Update version in src/components/sections/hero.tsx"
     echo "   3. MCP Registry - Run: mcp-publisher publish"
     echo "   See: .claude/commands/release/release.md for detailed instructions"
 
@@ -328,7 +328,7 @@ beta version:
     echo ""
     echo "📝 REMINDER: For stable releases, update documentation sites:"
     echo "   1. docs.basicmemory.com - Add release notes to src/pages/latest-releases.mdx"
-    echo "   2. basicmachines.co - Update version in src/components/sections/hero.tsx"
+    echo "   2. xxx - Update version in src/components/sections/hero.tsx"
     echo "   See: .claude/commands/release/release.md for detailed instructions"
 
 # List all available recipes

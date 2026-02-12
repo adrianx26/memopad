@@ -1,4 +1,4 @@
-# MemoPad Installation Guide for LLMs
+﻿# MemoPad Installation Guide for LLMs
 
 This guide is specifically designed to help AI assistants like Cline install and configure MemoPad. Follow these
 steps in order.
@@ -125,4 +125,4 @@ If you encounter issues:
    cat ~/.memopad/memopad.log
    ```
 
-For more detailed information, refer to the [full documentation](https://memory.basicmachines.co/).
+For more detailed information, refer to the [full documentation](https://memory.xxx/).

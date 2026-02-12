@@ -1,4 +1,4 @@
-# CHANGELOG
+﻿# CHANGELOG
 
 ## [Unreleased] - 2026-02-04
 
@@ -1647,12 +1647,12 @@ uv tool install basic-memory --pre
 - Add extra logic for permalink generation with mixed Latin unicode and Chinese characters
   ([`73ea91f`](https://github.com/basicmachines-co/basic-memory/commit/73ea91fe0d1f7ab89b99a1b691d59fe608b7fcbb))
 
-Signed-off-by: phernandez <paul@basicmachines.co>
+Signed-off-by: phernandez <paul@xxx>
 
 - Modify recent_activity args to be strings instead of enums
   ([`3c1cc34`](https://github.com/basicmachines-co/basic-memory/commit/3c1cc346df519e703fae6412d43a92c7232c6226))
 
-Signed-off-by: phernandez <paul@basicmachines.co>
+Signed-off-by: phernandez <paul@xxx>
 
 
 ## v0.12.2 (2025-04-08)
@@ -1663,7 +1663,7 @@ Signed-off-by: phernandez <paul@basicmachines.co>
   ([#91](https://github.com/basicmachines-co/basic-memory/pull/91),
   [`2934176`](https://github.com/basicmachines-co/basic-memory/commit/29341763318408ea8f1e954a41046c4185f836c6))
 
-Signed-off-by: phernandez <paul@basicmachines.co>
+Signed-off-by: phernandez <paul@xxx>
 
 
 ## v0.12.1 (2025-04-07)
@@ -1709,7 +1709,7 @@ Signed-off-by: phernandez <paul@basicmachines.co>
   ([#76](https://github.com/basicmachines-co/basic-memory/pull/76),
   [`43cbb7b`](https://github.com/basicmachines-co/basic-memory/commit/43cbb7b38cc0482ac0a41b6759320e3588186e43))
 
-- Updated basicmachines.co links to be https
+- Updated xxx links to be https
   ([#69](https://github.com/basicmachines-co/basic-memory/pull/69),
   [`40ea28b`](https://github.com/basicmachines-co/basic-memory/commit/40ea28b0bfc60012924a69ecb76511daa4c7d133))
 
@@ -1733,13 +1733,13 @@ Signed-off-by: phernandez <paul@basicmachines.co>
   ([#65](https://github.com/basicmachines-co/basic-memory/pull/65),
   [`0743ade`](https://github.com/basicmachines-co/basic-memory/commit/0743ade5fc07440f95ecfd816ba7e4cfd74bca12))
 
-Signed-off-by: phernandez <paul@basicmachines.co>
+Signed-off-by: phernandez <paul@xxx>
 
 - Make logs for each process - mcp, sync, cli
   ([#64](https://github.com/basicmachines-co/basic-memory/pull/64),
   [`f1c9570`](https://github.com/basicmachines-co/basic-memory/commit/f1c95709cbffb1b88292547b0b8f29fcca22d186))
 
-Signed-off-by: phernandez <paul@basicmachines.co>
+Signed-off-by: phernandez <paul@xxx>
 
 ### Documentation
 
@@ -1753,13 +1753,13 @@ Signed-off-by: phernandez <paul@basicmachines.co>
   ([#67](https://github.com/basicmachines-co/basic-memory/pull/67),
   [`069c0a2`](https://github.com/basicmachines-co/basic-memory/commit/069c0a21c630784e1bf47d2b7de5d6d1f6fadd7a))
 
-Signed-off-by: phernandez <paul@basicmachines.co>
+Signed-off-by: phernandez <paul@xxx>
 
 - Rename search tool to search_notes
   ([#66](https://github.com/basicmachines-co/basic-memory/pull/66),
   [`b278276`](https://github.com/basicmachines-co/basic-memory/commit/b27827671dc010be3e261b8b221aca6b7f836661))
 
-Signed-off-by: phernandez <paul@basicmachines.co>
+Signed-off-by: phernandez <paul@xxx>
 
 
 ## v0.10.1 (2025-03-25)
@@ -1794,7 +1794,7 @@ Added tests to verify this behavior, which resolves issue #37 where the project 
 
 Co-Authored-By: Claude <noreply@anthropic.com>
 
-Signed-off-by: phernandez <paul@basicmachines.co>
+Signed-off-by: phernandez <paul@xxx>
 
 - Move ai_assistant_guide.md into package resources to fix #39
   ([`390ff9d`](https://github.com/basicmachines-co/basic-memory/commit/390ff9d31ccee85bef732e8140b5eeecd7ee176f))
@@ -1818,7 +1818,7 @@ This change relocates the AI assistant guide from the static directory into the 
 
 Co-Authored-By: Claude <noreply@anthropic.com>
 
-Signed-off-by: phernandez <paul@basicmachines.co>
+Signed-off-by: phernandez <paul@xxx>
 
 - Preserve custom frontmatter fields when updating notes
   ([`78f234b`](https://github.com/basicmachines-co/basic-memory/commit/78f234b1806b578a0a833e8ee4184015b7369a97))
@@ -1848,26 +1848,26 @@ Added test case that verifies this behavior by creating a note with custom front
 
 Co-Authored-By: Claude <noreply@anthropic.com>
 
-Signed-off-by: phernandez <paul@basicmachines.co>
+Signed-off-by: phernandez <paul@xxx>
 
 ### Chores
 
 - Remove duplicate code in entity_service.py from bad merge
   ([`681af5d`](https://github.com/basicmachines-co/basic-memory/commit/681af5d4505dadc40b4086630f739d76bac9201d))
 
-Signed-off-by: phernandez <paul@basicmachines.co>
+Signed-off-by: phernandez <paul@xxx>
 
 ### Documentation
 
 - Add help docs to mcp cli tools
   ([`731b502`](https://github.com/basicmachines-co/basic-memory/commit/731b502d36cec253d114403d73b48fab3c47786e))
 
-Signed-off-by: phernandez <paul@basicmachines.co>
+Signed-off-by: phernandez <paul@xxx>
 
 - Add mcp badge, update cli reference, llms-install.md
   ([`b26afa9`](https://github.com/basicmachines-co/basic-memory/commit/b26afa927f98021246cd8b64858e57333595ea90))
 
-Signed-off-by: phernandez <paul@basicmachines.co>
+Signed-off-by: phernandez <paul@xxx>
 
 - Update CLAUDE.md ([#33](https://github.com/basicmachines-co/basic-memory/pull/33),
   [`dfaf0fe`](https://github.com/basicmachines-co/basic-memory/commit/dfaf0fea9cf5b97d169d51a6276ec70162c21a7e))
@@ -1880,7 +1880,7 @@ fix spelling in CLAUDE.md: enviroment -> environment Signed-off-by: Ikko Eltocie
 - Move project stats into projct subcommand
   ([`2a881b1`](https://github.com/basicmachines-co/basic-memory/commit/2a881b1425c73947f037fbe7ac5539c015b62526))
 
-Signed-off-by: phernandez <paul@basicmachines.co>
+Signed-off-by: phernandez <paul@xxx>
 
 
 ## v0.10.0 (2025-03-15)
@@ -1890,7 +1890,7 @@ Signed-off-by: phernandez <paul@basicmachines.co>
 - Ai_resource_guide.md path
   ([`da97353`](https://github.com/basicmachines-co/basic-memory/commit/da97353cfc3acc1ceb0eca22ac6af326f77dc199))
 
-Signed-off-by: phernandez <paul@basicmachines.co>
+Signed-off-by: phernandez <paul@xxx>
 
 - Ai_resource_guide.md path
   ([`c4732a4`](https://github.com/basicmachines-co/basic-memory/commit/c4732a47b37dd2e404139fb283b65556c81ce7c9))
@@ -1898,19 +1898,19 @@ Signed-off-by: phernandez <paul@basicmachines.co>
 - Ai_resource_guide.md path
   ([`2e9d673`](https://github.com/basicmachines-co/basic-memory/commit/2e9d673e54ad6a63a971db64f01fc2f4e59c2e69))
 
-Signed-off-by: phernandez <paul@basicmachines.co>
+Signed-off-by: phernandez <paul@xxx>
 
 - Don't sync *.tmp files on watch ([#31](https://github.com/basicmachines-co/basic-memory/pull/31),
   [`6b110b2`](https://github.com/basicmachines-co/basic-memory/commit/6b110b28dd8ba705ebfc0bcb41faf2cb993da2c3))
 
 Fixes #30
 
-Signed-off-by: phernandez <paul@basicmachines.co>
+Signed-off-by: phernandez <paul@xxx>
 
 - Drop search_index table on db reindex
   ([`31cca6f`](https://github.com/basicmachines-co/basic-memory/commit/31cca6f913849a0ab8fc944803533e3072e9ef88))
 
-Signed-off-by: phernandez <paul@basicmachines.co>
+Signed-off-by: phernandez <paul@xxx>
 
 - Improve utf-8 support for file reading/writing
   ([#32](https://github.com/basicmachines-co/basic-memory/pull/32),
@@ -1918,14 +1918,14 @@ Signed-off-by: phernandez <paul@basicmachines.co>
 
 fixes #29
 
-Signed-off-by: phernandez <paul@basicmachines.co>
+Signed-off-by: phernandez <paul@xxx>
 
 ### Chores
 
 - Remove logfire
   ([`9bb8a02`](https://github.com/basicmachines-co/basic-memory/commit/9bb8a020c3425a02cb3a88f6f02adcd281bccee2))
 
-Signed-off-by: phernandez <paul@basicmachines.co>
+Signed-off-by: phernandez <paul@xxx>
 
 ### Documentation
 
@@ -1933,7 +1933,7 @@ Signed-off-by: phernandez <paul@basicmachines.co>
   ([#28](https://github.com/basicmachines-co/basic-memory/pull/28),
   [`9af913d`](https://github.com/basicmachines-co/basic-memory/commit/9af913da4fba7bb4908caa3f15f2db2aa03777ec))
 
-Signed-off-by: phernandez <paul@basicmachines.co>
+Signed-off-by: phernandez <paul@xxx>
 
 - Update CLAUDE.md with GitHub integration capabilities
   ([#25](https://github.com/basicmachines-co/basic-memory/pull/25),
@@ -1950,7 +1950,7 @@ This PR updates the CLAUDE.md file to document the GitHub integration capabiliti
 
 This PR adds support for deploying Basic Memory on the Smithery platform.
 
-Signed-off-by: bm-claudeai <claude@basicmachines.co>
+Signed-off-by: bm-claudeai <claude@xxx>
 
 
 ## v0.9.0 (2025-03-07)
@@ -1966,7 +1966,7 @@ fix: ai_resource_guide.md path
 
 chore: remove logfire
 
-Signed-off-by: phernandez <paul@basicmachines.co>
+Signed-off-by: phernandez <paul@xxx>
 
 ### Documentation
 
@@ -1978,7 +1978,7 @@ Signed-off-by: phernandez <paul@basicmachines.co>
 - Add project_info tool ([#19](https://github.com/basicmachines-co/basic-memory/pull/19),
   [`d2bd75a`](https://github.com/basicmachines-co/basic-memory/commit/d2bd75a949cc4323cb376ac2f6cb39f47c78c428))
 
-Signed-off-by: phernandez <paul@basicmachines.co>
+Signed-off-by: phernandez <paul@xxx>
 
 - Beta work ([#17](https://github.com/basicmachines-co/basic-memory/pull/17),
   [`e6496df`](https://github.com/basicmachines-co/basic-memory/commit/e6496df595f3cafde6cc836384ee8c60886057a5))
@@ -2035,7 +2035,7 @@ This PR is part of our ongoing effort to improve the MCP's interaction quality w
 
 ---------
 
-Co-authored-by: phernandez <phernandez@basicmachines.co>
+Co-authored-by: phernandez <phernandez@xxx>
 
 - Add new `canvas` tool to create json canvas files in obsidian.
   ([#14](https://github.com/basicmachines-co/basic-memory/pull/14),
@@ -2045,7 +2045,7 @@ Add new `canvas` tool to create json canvas files in obsidian.
 
 ---------
 
-Co-authored-by: phernandez <phernandez@basicmachines.co>
+Co-authored-by: phernandez <phernandez@xxx>
 
 - Incremental sync on watch ([#13](https://github.com/basicmachines-co/basic-memory/pull/13),
   [`37a01b8`](https://github.com/basicmachines-co/basic-memory/commit/37a01b806d0758029d34a862e76d44c7e5d538a5))
@@ -2102,7 +2102,7 @@ Co-authored-by: phernandez <phernandez@basicmachines.co>
 - Configure logfire telemetry ([#12](https://github.com/basicmachines-co/basic-memory/pull/12),
   [`6da1438`](https://github.com/basicmachines-co/basic-memory/commit/6da143898bd45cdab8db95b5f2b75810fbb741ba))
 
-Co-authored-by: phernandez <phernandez@basicmachines.co>
+Co-authored-by: phernandez <phernandez@xxx>
 
 
 ## v0.5.0 (2025-02-18)
@@ -2113,7 +2113,7 @@ Co-authored-by: phernandez <phernandez@basicmachines.co>
   ([#11](https://github.com/basicmachines-co/basic-memory/pull/11),
   [`0689e7a`](https://github.com/basicmachines-co/basic-memory/commit/0689e7a730497827bf4e16156ae402ddc5949077))
 
-Co-authored-by: phernandez <phernandez@basicmachines.co>
+Co-authored-by: phernandez <phernandez@xxx>
 
 
 ## v0.4.3 (2025-02-18)
@@ -2123,7 +2123,7 @@ Co-authored-by: phernandez <phernandez@basicmachines.co>
 - Re do enhanced read note format ([#10](https://github.com/basicmachines-co/basic-memory/pull/10),
   [`39bd5ca`](https://github.com/basicmachines-co/basic-memory/commit/39bd5ca08fd057220b95a8b5d82c5e73a1f5722b))
 
-Co-authored-by: phernandez <phernandez@basicmachines.co>
+Co-authored-by: phernandez <phernandez@xxx>
 
 
 ## v0.4.2 (2025-02-17)
@@ -2147,7 +2147,7 @@ Co-authored-by: phernandez <phernandez@basicmachines.co>
 - Import chatgpt conversation data ([#9](https://github.com/basicmachines-co/basic-memory/pull/9),
   [`56f47d6`](https://github.com/basicmachines-co/basic-memory/commit/56f47d6812982437f207629e6ac9a82e0e56514e))
 
-Co-authored-by: phernandez <phernandez@basicmachines.co>
+Co-authored-by: phernandez <phernandez@xxx>
 
 - Import claude.ai data ([#8](https://github.com/basicmachines-co/basic-memory/pull/8),
   [`a15c346`](https://github.com/basicmachines-co/basic-memory/commit/a15c346d5ebd44344b76bad877bb4d1073fcbc3b))
@@ -2156,7 +2156,7 @@ Import Claude.ai conversation and project data to basic-memory Markdown format.
 
 ---------
 
-Co-authored-by: phernandez <phernandez@basicmachines.co>
+Co-authored-by: phernandez <phernandez@xxx>
 
 
 ## v0.3.0 (2025-02-15)
@@ -2355,7 +2355,7 @@ Co-authored-by: phernandez <phernandez@basicmachines.co>
 
 ---------
 
-Co-authored-by: phernandez <phernandez@basicmachines.co>
+Co-authored-by: phernandez <phernandez@xxx>
 
 
 ## v0.1.2 (2025-02-14)

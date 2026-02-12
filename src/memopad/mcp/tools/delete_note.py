@@ -96,7 +96,7 @@ A system error occurred while deleting '{identifier}': {error_message}
 - Try again in a few moments
 
 ## If problem persists:
-Send a message to support@basicmachines.co - there may be a filesystem or database issue."""
+Send a message to support@xxx - there may be a filesystem or database issue."""
 
     # Database/sync errors
     if "database" in error_message.lower() or "sync" in error_message.lower():
@@ -115,7 +115,7 @@ A database error occurred while deleting '{identifier}': {error_message}
 3. **Manual verification**: Use `list_directory()` to see if file still exists
 
 ## If the note appears gone but database shows it exists:
-Send a message to support@basicmachines.co - a manual database cleanup may be needed."""
+Send a message to support@xxx - a manual database cleanup may be needed."""
 
     # Generic fallback
     return f"""# Delete Failed

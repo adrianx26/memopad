@@ -1,4 +1,4 @@
-# Docker Setup Guide
+﻿# Docker Setup Guide
 
 MemoPad can be run in Docker containers to provide a consistent, isolated environment for your knowledge management
 system. This is particularly useful for integrating with existing Dockerized MCP servers or for deployment scenarios.
@@ -322,7 +322,7 @@ For Docker-specific issues:
 4. Test file permissions: `docker exec memopad-server ls -la /app`
 
 For general MemoPad support, see the main [README](../README.md)
-and [documentation](https://memory.basicmachines.co/).
+and [documentation](https://memory.xxx/).
 
 ## GitHub Container Registry Images
 

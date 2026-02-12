@@ -1,4 +1,4 @@
-# /release - Create Stable Release
+﻿# /release - Create Stable Release
 
 Create a stable release using the automated justfile target with comprehensive validation.
 
@@ -108,7 +108,7 @@ After PyPI release is published, update the MCP registry:
 
 #### Website Updates
 
-**1. basicmachines.co** (`/Users/drew/code/basicmachines.co`)
+**1. xxx** (`/Users/drew/code/xxx`)
    - **Goal**: Update version number displayed on the homepage
    - **Location**: Search for "Basic Memory v0." in the codebase to find version displays
    - **What to update**:
@@ -123,7 +123,7 @@ After PyPI release is published, update the MCP registry:
      5. Update feature highlights with 3-5 key features from this release (extract from CHANGELOG.md)
      6. Commit changes: `git commit -m "chore: update to v{VERSION}"`
      7. Push branch: `git push origin release/v{VERSION}`
-   - **Deploy**: Follow deployment process for basicmachines.co
+   - **Deploy**: Follow deployment process for xxx
 
 **2. docs.basicmemory.com** (`/Users/drew/code/docs.basicmemory.com`)
    - **Goal**: Add new release notes section to the latest-releases page

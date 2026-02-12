@@ -266,7 +266,7 @@ This usually means the database and filesystem are out of sync.
 # Check if note exists in Basic Memory
 read_note("{identifier}")
 
-# If it exists, the file is missing on disk - send a message to support@basicmachines.co
+# If it exists, the file is missing on disk - send a message to support@xxx
 # If it doesn't exist, use search to find the correct identifier
 search_notes("{identifier}")
 ```"""
@@ -289,7 +289,7 @@ A system error occurred while moving '{identifier}': {error_message}
 ## Alternative approaches:
 - Copy content to new location: Use `read_note("{identifier}")` then `write_note()` 
 - Use a different destination folder that you know works
-- Send a message to support@basicmachines.co if the problem persists
+- Send a message to support@xxx if the problem persists
 
 ## Backup approach:
 ```
