@@ -1,0 +1,99 @@
+﻿"""utility functions for commands"""
+
+import asyncio
+from typing import Optional, TypeVar, Coroutine, Any
+
+from mcp.server.fastmcp.exceptions import ToolError
+import typer
+
+from rich.console import Console
+
+from memopad import db
+from memopad.mcp.async_client import get_client
+
+from memopad.mcp.tools.utils import call_post, call_get
+from memopad.mcp.project_context import get_active_project
+from memopad.schemas import ProjectInfoResponse
+
+console = Console()
+
+T = TypeVar("T")
+
+
+def run_with_cleanup(coro: Coroutine[Any, Any, T]) -> T:
+    """Run an async coroutine with proper database cleanup.
+
+    This helper ensures database connections are cleaned up before the
+    event loop closes, preventing process hangs in CLI commands.
+
+    Args:
+        coro: The coroutine to run
+
+    Returns:
+        The result of the coroutine
+    """
+
+    async def _with_cleanup() -> T:
+        try:
+            return await coro
+        finally:
+            await db.shutdown_db()
+
+    return asyncio.run(_with_cleanup())
+
+
+async def run_sync(
+    project: Optional[str] = None,
+    force_full: bool = False,
+    run_in_background: bool = True,
+):
+    """Run sync operation via API endpoint.
+
+    Args:
+        project: Optional project name
+        force_full: If True, force a full scan bypassing watermark optimization
+        run_in_background: If True, return immediately; if False, wait for completion
+    """
+
+    try:
+        async with get_client() as client:
+            project_item = await get_active_project(client, project, None)
+            url = f"/v2/projects/{project_item.external_id}/sync"
+            params = []
+            if force_full:
+                params.append("force_full=true")
+            if not run_in_background:
+                params.append("run_in_background=false")
+            if params:
+                url += "?" + "&".join(params)
+            response = await call_post(client, url)
+            data = response.json()
+            # Background mode returns {"message": "..."}, foreground returns SyncReportResponse
+            if "message" in data:
+                console.print(f"[green]{data['message']}[/green]")
+            else:
+                # Foreground mode - show summary of sync results
+                total = data.get("total", 0)
+                new_count = len(data.get("new", []))
+                modified_count = len(data.get("modified", []))
+                deleted_count = len(data.get("deleted", []))
+                console.print(
+                    f"[green]Synced {total} files[/green] "
+                    f"(new: {new_count}, modified: {modified_count}, deleted: {deleted_count})"
+                )
+    except (ToolError, ValueError) as e:
+        console.print(f"[red]Sync failed: {e}[/red]")
+        raise typer.Exit(1)
+
+
+async def get_project_info(project: str):
+    """Get project information via API endpoint."""
+
+    try:
+        async with get_client() as client:
+            project_item = await get_active_project(client, project, None)
+            response = await call_get(client, f"/v2/projects/{project_item.external_id}/info")
+            return ProjectInfoResponse.model_validate(response.json())
+    except (ToolError, ValueError) as e:
+        console.print(f"[red]Sync failed: {e}[/red]")
+        raise typer.Exit(1)

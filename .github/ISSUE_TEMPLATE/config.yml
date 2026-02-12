@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Basic Memory Discussions
+    url: https://github.com/adrianx26/memopad/discussions
+    about: For questions, ideas, or more open-ended discussions
+  - name: Documentation
+    url: https://github.com/adrianx26/memopad#readme
+    about: Please check the documentation first before reporting an issue

@@ -1,0 +1,140 @@
+﻿"""Repository for managing projects in Basic Memory."""
+
+from pathlib import Path
+from typing import Optional, Sequence, Union
+
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from memopad import db
+from memopad.models.project import Project
+from memopad.repository.repository import Repository
+
+
+class ProjectRepository(Repository[Project]):
+    """Repository for Project model.
+
+    Projects represent collections of knowledge entities grouped together.
+    Each entity, observation, and relation belongs to a specific project.
+    """
+
+    def __init__(self, session_maker: async_sessionmaker[AsyncSession]):
+        """Initialize with session maker."""
+        super().__init__(session_maker, Project)
+
+    async def get_by_name(self, name: str) -> Optional[Project]:
+        """Get project by name (exact match).
+
+        Args:
+            name: Unique name of the project
+        """
+        query = self.select().where(Project.name == name)
+        return await self.find_one(query)
+
+    async def get_by_name_case_insensitive(self, name: str) -> Optional[Project]:
+        """Get project by name (case-insensitive match).
+
+        Args:
+            name: Project name (case-insensitive)
+
+        Returns:
+            Project if found, None otherwise
+        """
+        query = self.select().where(Project.name.ilike(name))
+        return await self.find_one(query)
+
+    async def get_by_permalink(self, permalink: str) -> Optional[Project]:
+        """Get project by permalink.
+
+        Args:
+            permalink: URL-friendly identifier for the project
+        """
+        query = self.select().where(Project.permalink == permalink)
+        return await self.find_one(query)
+
+    async def get_by_path(self, path: Union[Path, str]) -> Optional[Project]:
+        """Get project by filesystem path.
+
+        Args:
+            path: Path to the project directory (will be converted to string internally)
+        """
+        query = self.select().where(Project.path == Path(path).as_posix())
+        return await self.find_one(query)
+
+    async def get_by_id(self, project_id: int) -> Optional[Project]:
+        """Get project by numeric ID.
+
+        Args:
+            project_id: Numeric project ID
+
+        Returns:
+            Project if found, None otherwise
+        """
+        async with db.scoped_session(self.session_maker) as session:
+            return await self.select_by_id(session, project_id)
+
+    async def get_by_external_id(self, external_id: str) -> Optional[Project]:
+        """Get project by external UUID.
+
+        Args:
+            external_id: External UUID identifier
+
+        Returns:
+            Project if found, None otherwise
+        """
+        query = self.select().where(Project.external_id == external_id)
+        return await self.find_one(query)
+
+    async def get_default_project(self) -> Optional[Project]:
+        """Get the default project (the one marked as is_default=True)."""
+        query = self.select().where(Project.is_default.is_(True))
+        return await self.find_one(query)
+
+    async def get_active_projects(self) -> Sequence[Project]:
+        """Get all active projects."""
+        query = self.select().where(Project.is_active == True)  # noqa: E712
+        result = await self.execute_query(query)
+        return list(result.scalars().all())
+
+    async def set_as_default(self, project_id: int) -> Optional[Project]:
+        """Set a project as the default and unset previous default.
+
+        Args:
+            project_id: ID of the project to set as default
+
+        Returns:
+            The updated project if found, None otherwise
+        """
+        async with db.scoped_session(self.session_maker) as session:
+            # First, clear the default flag for all projects using direct SQL
+            await session.execute(
+                text("UPDATE project SET is_default = NULL WHERE is_default IS NOT NULL")
+            )
+            await session.flush()
+
+            # Set the new default project
+            target_project = await self.select_by_id(session, project_id)
+            if target_project:
+                target_project.is_default = True
+                await session.flush()
+                return target_project
+            return None  # pragma: no cover
+
+    async def update_path(self, project_id: int, new_path: str) -> Optional[Project]:
+        """Update project path.
+
+        Args:
+            project_id: ID of the project to update
+            new_path: New filesystem path for the project
+
+        Returns:
+            The updated project if found, None otherwise
+        """
+        async with db.scoped_session(self.session_maker) as session:
+            project = await self.select_by_id(session, project_id)
+            if project:
+                project.path = new_path
+                await session.flush()
+                return project
+            return None

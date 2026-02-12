@@ -1,0 +1,10 @@
+cff-version: 1.0.1
+message: "If you use this project, please cite it as follows:"
+authors:
+  - family-names: "Adrian"
+    given-names: "Petrescu"
+    affiliation: "Memo Pad"
+title: "MemoPad"
+version: "0.0.1"
+date-released: "2025-02-03"
+url: "https://github.com/adrianx26/memopad/"

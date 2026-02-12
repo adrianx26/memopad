@@ -1,0 +1,25 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.adrianx26/memopad",
+  "description": "Local-first knowledge management with bi-directional LLM sync via Markdown files.",
+  "repository": {
+    "url": "https://github.com/adrianx26/memopad.git",
+    "source": "github"
+  },
+  "version": "0.18.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "memopad",
+      "version": "0.18.0",
+      "runtimeHint": "uvx",
+      "runtimeArguments": [
+        {"type": "positional", "value": "memopad"},
+        {"type": "positional", "value": "mcp"}
+      ],
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
