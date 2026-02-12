@@ -6,6 +6,7 @@ all tools with the MCP server.
 """
 
 # Import tools to register them with MCP
+from memopad.mcp.tools.assimilate import assimilate
 from memopad.mcp.tools.delete_note import delete_note
 from memopad.mcp.tools.read_content import read_content
 from memopad.mcp.tools.build_context import build_context
@@ -28,6 +29,7 @@ from memopad.mcp.tools.project_management import (
 from memopad.mcp.tools.chatgpt_tools import search, fetch
 
 __all__ = [
+    "assimilate",
     "build_context",
     "canvas",
     "create_memory_project",
