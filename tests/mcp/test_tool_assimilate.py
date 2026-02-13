@@ -14,6 +14,11 @@ from memopad.mcp.tools.assimilate import (
     _build_agent_profiles_note,
     _build_skills_rules_note,
     _build_concepts_note,
+    _build_soul_files_note,
+    _build_tools_functions_note,
+    _build_algorithms_note,
+    _build_decision_structure_note,
+    _build_functional_diagram_note,
 )
 
 
@@ -132,6 +137,38 @@ class TestDetectContentType:
         types = detect_content_type("https://example.com/docs", text)
         assert "concepts" in types
 
+    def test_detects_soul_file(self):
+        types = detect_content_type("https://example.com/soul.md", "Agent identity and personality")
+        assert "soul_file" in types
+
+    def test_detects_soul_file_by_content(self):
+        types = detect_content_type("https://example.com/page", "This defines core_values and principles for the agent")
+        assert "soul_file" in types
+
+    def test_detects_tools_functions(self):
+        types = detect_content_type("https://example.com/tools/search.py", "@mcp.tool decorator used here")
+        assert "tools_functions" in types
+
+    def test_detects_tools_functions_by_content(self):
+        types = detect_content_type("https://example.com/page", "register_tool and api_endpoint definitions")
+        assert "tools_functions" in types
+
+    def test_detects_algorithms(self):
+        types = detect_content_type("https://example.com/algo.py", "binary_search algorithm with O(log n) complexity")
+        assert "algorithms" in types
+
+    def test_detects_algorithms_by_content(self):
+        types = detect_content_type("https://example.com/page", "dynamic_programming optimization with memoization")
+        assert "algorithms" in types
+
+    def test_detects_decision_structure(self):
+        types = detect_content_type("https://example.com/fsm.py", "state_machine implementation with finite_state transitions")
+        assert "decision_structure" in types
+
+    def test_detects_decision_structure_by_content(self):
+        types = detect_content_type("https://example.com/page", "rule_engine for routing_logic and decision_table handling")
+        assert "decision_structure" in types
+
     def test_no_false_positives(self):
         types = detect_content_type("https://example.com/random", "Just a normal page with nothing special")
         assert types == []
@@ -162,7 +199,7 @@ class TestNoteBuilders:
         data = self._make_data()
         note = _build_overview_note("https://example.com", data)
         assert "Assimilated: https://example.com" in note
-        assert "Pages crawled: 1" in note
+        assert "Pages processed: 1" in note
         assert "GitHub links found: 2" in note
 
     def test_github_links_note(self):
@@ -200,6 +237,94 @@ class TestNoteBuilders:
         note = _build_concepts_note(data)
         assert note is not None
         assert "Concepts" in note
+
+    # --- New note builder tests ---
+
+    def test_soul_files_note(self):
+        data = self._make_data(content_types=["soul_file"])
+        note = _build_soul_files_note(data)
+        assert note is not None
+        assert "Soul Files" in note
+        assert "identity" in note.lower() or "soul" in note.lower()
+
+    def test_soul_files_note_empty(self):
+        data = self._make_data(content_types=[])
+        note = _build_soul_files_note(data)
+        assert note is None
+
+    def test_tools_functions_note(self):
+        data = self._make_data(content_types=["tools_functions"])
+        note = _build_tools_functions_note(data)
+        assert note is not None
+        assert "Tools" in note
+        assert "Functions" in note
+
+    def test_tools_functions_note_empty(self):
+        data = self._make_data(content_types=[])
+        note = _build_tools_functions_note(data)
+        assert note is None
+
+    def test_algorithms_note(self):
+        data = self._make_data(content_types=["algorithms"])
+        note = _build_algorithms_note(data)
+        assert note is not None
+        assert "Algorithms" in note
+
+    def test_algorithms_note_empty(self):
+        data = self._make_data(content_types=[])
+        note = _build_algorithms_note(data)
+        assert note is None
+
+    def test_decision_structure_note(self):
+        data = self._make_data(content_types=["decision_structure"])
+        note = _build_decision_structure_note(data)
+        assert note is not None
+        assert "Decision Structures" in note
+
+    def test_decision_structure_note_empty(self):
+        data = self._make_data(content_types=[])
+        note = _build_decision_structure_note(data)
+        assert note is None
+
+    def test_functional_diagram_note(self):
+        data = {
+            "pages": [
+                {
+                    "url": "https://example.com/README.md",
+                    "text": "Main readme content",
+                    "content_types": ["config_docs"],
+                    "links": {"internal": [], "github": [], "external": []},
+                },
+                {
+                    "url": "https://example.com/src/main.py",
+                    "text": "Main entry point",
+                    "content_types": ["tools_functions"],
+                    "links": {"internal": [], "github": [], "external": []},
+                },
+                {
+                    "url": "https://example.com/src/utils.py",
+                    "text": "Utility functions",
+                    "content_types": ["algorithms"],
+                    "links": {"internal": [], "github": [], "external": []},
+                },
+            ],
+            "all_github_links": [],
+            "all_external_links": [],
+            "errors": [],
+        }
+        note = _build_functional_diagram_note(data)
+        assert note is not None
+        assert "Functional Diagram" in note
+        assert "```mermaid" in note
+        assert "graph TD" in note
+        assert "README.md" in note
+        assert "main.py" in note
+        assert "utils.py" in note
+
+    def test_functional_diagram_note_empty(self):
+        data = {"pages": [], "all_github_links": [], "all_external_links": [], "errors": []}
+        note = _build_functional_diagram_note(data)
+        assert note is None
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +366,7 @@ async def test_assimilate_stores_notes(app, test_project, monkeypatch):
         "errors": [],
     }
 
-    async def mock_crawl(url, max_depth=2, max_pages=30):
+    async def mock_crawl(url, max_depth=10, max_pages=0):
         return mock_data
 
     monkeypatch.setattr(assimilate_mod, "crawl", mock_crawl)
@@ -250,7 +375,7 @@ async def test_assimilate_stores_notes(app, test_project, monkeypatch):
 
     assert "Assimilation Complete" in result
     assert f"project: {test_project.name}" in result
-    assert "pages_crawled: 1" in result
+    assert "items_processed: 1" in result
     assert "notes_stored:" in result
     assert "Overview" in result
     assert f"[Session: Using project '{test_project.name}']" in result

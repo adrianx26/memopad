@@ -172,6 +172,37 @@ CONFIG_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+SOUL_PATTERNS = re.compile(
+    r"(soul\.md|SOUL\.md|identity\.md|persona|personality|core[_-]?values|"
+    r"purpose\.md|mission|manifesto|beliefs|principles|ethos|"
+    r"character\.md|worldview|philosophy\.md|creed)",
+    re.IGNORECASE,
+)
+
+TOOLS_FUNCTIONS_PATTERNS = re.compile(
+    r"(@tool|@mcp\.tool|def\s+tool_|function[_-]?calling|api[_-]?endpoint|"
+    r"register[_-]?tool|tool[_-]?schema|openapi|swagger|handler|"
+    r"@app\.(get|post|put|delete|patch)|@router\.|def\s+handle_|"
+    r"tools/|functions/|endpoints/|api/)",
+    re.IGNORECASE,
+)
+
+ALGORITHMS_PATTERNS = re.compile(
+    r"(algorithm|sorting|binary[_-]?search|traversal|dynamic[_-]?programming|"
+    r"recursion|backtracking|greedy|dijkstra|breadth[_-]?first|depth[_-]?first|"
+    r"hashing|optimization|time[_-]?complexity|space[_-]?complexity|"
+    r"O\(n|O\(log|divide[_-]?and[_-]?conquer|memoization)",
+    re.IGNORECASE,
+)
+
+DECISION_PATTERNS = re.compile(
+    r"(decision[_-]?tree|state[_-]?machine|fsm|finite[_-]?state|"
+    r"workflow[_-]?engine|branching[_-]?logic|conditional[_-]?flow|"
+    r"routing[_-]?logic|dispatch|strategy[_-]?pattern|policy[_-]?engine|"
+    r"rule[_-]?engine|control[_-]?flow|switch[_-]?case|decision[_-]?table)",
+    re.IGNORECASE,
+)
+
 
 def detect_content_type(url: str, text: str) -> list[str]:
     """Identify what kind of useful content a page contains."""
@@ -184,6 +215,14 @@ def detect_content_type(url: str, text: str) -> list[str]:
         types.append("skills_rules")
     if CONFIG_PATTERNS.search(combined):
         types.append("config_docs")
+    if SOUL_PATTERNS.search(combined):
+        types.append("soul_file")
+    if TOOLS_FUNCTIONS_PATTERNS.search(combined):
+        types.append("tools_functions")
+    if ALGORITHMS_PATTERNS.search(combined):
+        types.append("algorithms")
+    if DECISION_PATTERNS.search(combined):
+        types.append("decision_structure")
 
     # Detect conceptual content
     concept_keywords = [
@@ -208,7 +247,7 @@ def _is_github_repo(url: str) -> bool:
     parsed = urlparse(url)
     return "github.com" in parsed.netloc and len(parsed.path.strip("/").split("/")) >= 2
 
-async def _clone_github_repo(url: str, max_files: int = 50) -> dict:
+async def _clone_github_repo(url: str, max_files: int = 0) -> dict:
     """Clone a GitHub repository and extract relevant files."""
     import subprocess
     
@@ -251,7 +290,8 @@ async def _clone_github_repo(url: str, max_files: int = 50) -> dict:
         found_files.sort(key=priority)
         
         # Limit processed files
-        found_files = found_files[:max_files]
+        if max_files > 0:
+            found_files = found_files[:max_files]
         
         for file_path in found_files:
             try:
@@ -325,7 +365,7 @@ async def _fetch_page(
 
 
 async def crawl(
-    start_url: str, max_depth: int = 2, max_pages: int = 30
+    start_url: str, max_depth: int = 10, max_pages: int = 0
 ) -> dict:
     """Crawl starting from a URL, returning structured results.
 
@@ -352,7 +392,7 @@ async def crawl(
     }
 
     async with httpx.AsyncClient(headers=headers) as http_client:
-        while queue and len(pages) < max_pages:
+        while queue and (max_pages == 0 or len(pages) < max_pages):
             url, depth = queue.pop(0)
 
             # Normalize trailing slash
@@ -506,6 +546,183 @@ def _build_concepts_note(data: dict) -> str | None:
     return header + "\n".join(sections)
 
 
+def _build_soul_files_note(data: dict) -> str | None:
+    """Build note for discovered soul/identity files."""
+    sections = []
+    for page in data["pages"]:
+        if "soul_file" in page.get("content_types", []):
+            sections.append(f"## From: {page['url']}\n")
+            sections.append(page["text"][:5000])
+            sections.append("")
+
+    if not sections:
+        return None
+
+    header = "# Soul Files & Identity\n\n"
+    header += "- [category] Extracted soul files, identity definitions, personality, values, and purpose statements\n\n"
+    return header + "\n".join(sections)
+
+
+def _build_tools_functions_note(data: dict) -> str | None:
+    """Build note for discovered tools, functions, and API definitions."""
+    sections = []
+    for page in data["pages"]:
+        if "tools_functions" in page.get("content_types", []):
+            sections.append(f"## From: {page['url']}\n")
+            sections.append(page["text"][:5000])
+            sections.append("")
+
+    if not sections:
+        return None
+
+    header = "# Tools & Functions\n\n"
+    header += "- [category] Extracted tool definitions, function registrations, API endpoints, and handlers\n\n"
+    return header + "\n".join(sections)
+
+
+def _build_algorithms_note(data: dict) -> str | None:
+    """Build note for discovered algorithm implementations."""
+    sections = []
+    for page in data["pages"]:
+        if "algorithms" in page.get("content_types", []):
+            sections.append(f"## From: {page['url']}\n")
+            sections.append(page["text"][:5000])
+            sections.append("")
+
+    if not sections:
+        return None
+
+    header = "# Algorithms & Implementations\n\n"
+    header += "- [category] Extracted algorithm implementations, data structures, and computational logic\n\n"
+    return header + "\n".join(sections)
+
+
+def _build_decision_structure_note(data: dict) -> str | None:
+    """Build note for discovered decision structures and state machines."""
+    sections = []
+    for page in data["pages"]:
+        if "decision_structure" in page.get("content_types", []):
+            sections.append(f"## From: {page['url']}\n")
+            sections.append(page["text"][:5000])
+            sections.append("")
+
+    if not sections:
+        return None
+
+    header = "# Decision Structures\n\n"
+    header += "- [category] Extracted decision trees, state machines, routing logic, and control flow patterns\n\n"
+    return header + "\n".join(sections)
+
+
+def _build_functional_diagram_note(data: dict) -> str | None:
+    """Build a Mermaid flowchart diagram of the assimilated content structure.
+
+    Analyzes all pages/files to create a schematic showing:
+    - Components grouped by content type
+    - Relationships between files based on directory structure
+    - Color-coded nodes by category
+    """
+    if not data["pages"]:
+        return None
+
+    # Color map for content types
+    type_colors = {
+        "config_docs": "#4CAF50",      # green
+        "agent_profile": "#9C27B0",    # purple
+        "skills_rules": "#FF9800",     # orange
+        "concepts": "#2196F3",         # blue
+        "soul_file": "#E91E63",        # pink
+        "tools_functions": "#00BCD4",  # cyan
+        "algorithms": "#FF5722",       # deep orange
+        "decision_structure": "#795548",  # brown
+    }
+
+    nodes = []
+    edges = []
+    styles = []
+    seen_ids = set()
+
+    # Build a node for each page
+    for i, page in enumerate(data["pages"]):
+        url = page["url"]
+        # Create a readable short label from the URL
+        parsed = urlparse(url)
+        path = parsed.path.strip("/")
+        label = path.split("/")[-1] if path else parsed.netloc
+        if not label:
+            label = url[:40]
+        # Sanitize label for Mermaid (remove special chars)
+        label = re.sub(r'["\'\[\]{}()<>|&;]', '', label)
+        if len(label) > 40:
+            label = label[:37] + "..."
+
+        node_id = f"N{i}"
+        seen_ids.add(node_id)
+
+        types_str = ", ".join(page.get("content_types", [])) or "general"
+        nodes.append(f'    {node_id}["{label}\\n({types_str})"]')
+
+        # Style by primary content type
+        ctypes = page.get("content_types", [])
+        if ctypes:
+            primary_type = ctypes[0]
+            if primary_type in type_colors:
+                styles.append(f"    style {node_id} fill:{type_colors[primary_type]},color:#fff")
+
+    # Build edges: connect files in the same directory hierarchy
+    # Group pages by directory prefix
+    dir_groups: dict[str, list[int]] = {}
+    for i, page in enumerate(data["pages"]):
+        parsed = urlparse(page["url"])
+        parts = parsed.path.strip("/").split("/")
+        if len(parts) > 1:
+            parent_dir = "/".join(parts[:-1])
+        else:
+            parent_dir = "root"
+        dir_groups.setdefault(parent_dir, []).append(i)
+
+    # Connect first node in each group to other nodes in same group
+    for dir_name, indices in dir_groups.items():
+        if len(indices) > 1:
+            root_idx = indices[0]
+            for child_idx in indices[1:]:
+                edges.append(f"    N{root_idx} --> N{child_idx}")
+
+    # Also connect root-level items to first sub-items
+    root_indices = dir_groups.get("root", [])
+    other_roots = [idx_list[0] for key, idx_list in dir_groups.items()
+                   if key != "root" and idx_list]
+    if root_indices and other_roots:
+        for sub_root in other_roots[:10]:  # Limit connections to avoid clutter
+            edges.append(f"    N{root_indices[0]} --> N{sub_root}")
+
+    # Build the Mermaid block
+    mermaid_lines = ["graph TD"]
+    mermaid_lines.extend(nodes[:50])  # Cap at 50 nodes for readability
+    mermaid_lines.extend(edges[:80])  # Cap edges
+    mermaid_lines.extend(styles[:50])
+
+    mermaid_block = "\n".join(mermaid_lines)
+
+    # Build legend
+    legend_lines = ["\n## Legend\n"]
+    for ctype, color in type_colors.items():
+        legend_lines.append(f"- 🟢 **{ctype}**: `{color}`")
+
+    lines = [
+        "# Functional Diagram\n",
+        "- [category] Auto-generated schematic of assimilated content structure\n",
+        f"- [stats] Total components: {len(data['pages'])}",
+        f"- [stats] Content categories: {len(set(t for p in data['pages'] for t in p.get('content_types', [])))}\n",
+        "```mermaid",
+        mermaid_block,
+        "```",
+    ]
+    lines.extend(legend_lines)
+
+    return "\n".join(lines)
+
+
 def _build_github_links_note(data: dict) -> str | None:
     """Build the GitHub links index note."""
     if not data["all_github_links"]:
@@ -537,18 +754,25 @@ def _build_github_links_note(data: dict) -> str | None:
 
     Notes are stored under <domain>/ in the target project.
 
+    Also auto-detects:
+    - Soul files (identity, personality, values)
+    - Tools & function definitions
+    - Algorithm implementations
+    - Decision structures & state machines
+    - Generates a functional/schematic Mermaid diagram
+
     Args:
         url: The URL to assimilate (e.g. "https://github.com/org/repo")
         project: Project to store notes in. Optional - uses default if not specified.
-        max_depth: How many link-hops deep to crawl (default: 2)
-        max_pages: Maximum number of pages to fetch (default: 30)
+        max_depth: How many link-hops deep to crawl (default: 10)
+        max_pages: Maximum pages to fetch (default: 0 = unlimited)
     """,
 )
 async def assimilate(
     url: str,
     project: Optional[str] = None,
-    max_depth: int = 2,
-    max_pages: int = 30,
+    max_depth: int = 10,
+    max_pages: int = 0,
     context: Context | None = None,
 ) -> str:
     """Assimilate knowledge from a URL into memopad.
@@ -563,8 +787,8 @@ async def assimilate(
     Args:
         url: The starting URL to crawl and assimilate
         project: Project name to store notes in. Optional.
-        max_depth: Maximum crawl depth from start URL (default: 2)
-        max_pages: Maximum total pages to crawl (default: 30)
+        max_depth: Maximum crawl depth from start URL (default: 10)
+        max_pages: Maximum total pages to crawl (default: 0 = unlimited)
         context: Optional FastMCP context for performance caching.
 
     Returns:
@@ -627,6 +851,26 @@ async def assimilate(
     concepts_note = _build_concepts_note(data)
     if concepts_note:
         notes_to_write.append(("Concepts and Ideas", concepts_note))
+
+    soul_note = _build_soul_files_note(data)
+    if soul_note:
+        notes_to_write.append(("Soul Files", soul_note))
+
+    tools_note = _build_tools_functions_note(data)
+    if tools_note:
+        notes_to_write.append(("Tools and Functions", tools_note))
+
+    algo_note = _build_algorithms_note(data)
+    if algo_note:
+        notes_to_write.append(("Algorithms", algo_note))
+
+    decision_note = _build_decision_structure_note(data)
+    if decision_note:
+        notes_to_write.append(("Decision Structures", decision_note))
+
+    diagram_note = _build_functional_diagram_note(data)
+    if diagram_note:
+        notes_to_write.append(("Functional Diagram", diagram_note))
 
     github_note = _build_github_links_note(data)
     if github_note:
