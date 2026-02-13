@@ -209,8 +209,10 @@ def ensure_initialization(app_config: MemoPadConfig) -> None:
     # The ProactorEventLoop can raise "IndexError: pop from an empty deque" during
     # event loop cleanup when there are pending handles. SelectorEventLoop is more
     # stable for our use case (no subprocess pipes or named pipes needed).
-    if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    # On Windows, use SelectorEventLoop to avoid ProactorEventLoop cleanup issues
+    # The ProactorEventLoop can raise "IndexError: pop from an empty deque" during
+    # event loop cleanup when there are pending handles. SelectorEventLoop is more
+    # stable for our use case (no subprocess pipes or named pipes needed).
 
     asyncio.run(_init_and_cleanup())
     logger.info("Initialization completed successfully")

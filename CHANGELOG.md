@@ -57,6 +57,12 @@ This release includes a comprehensive rebranding from "Basic Memory" to "MemoPad
   - Fix "Error rendering prompt recent_activity" error
   - Change `TimeFrame` to `str` in prompt type annotations for FastMCP compatibility
 
+### Bug Fixes
+
+- **#FIX**: Resolve MCP server initialization error on Windows
+  - Remove `WindowsSelectorEventLoopPolicy` override in `db.py` and `initialization.py`
+  - Ensure correct `WindowsProactorEventLoopPolicy` is used for MCP server pipes
+
 ## v0.17.9 (2026-01-24)
 
 ### Bug Fixes
