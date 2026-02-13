@@ -46,7 +46,7 @@ EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD basic-memory --version || exit 1
+    CMD memopad --version || exit 1
 
-# Use the basic-memory entrypoint to run the MCP server with default SSE transport
-CMD ["basic-memory", "mcp", "--transport", "sse", "--host", "0.0.0.0", "--port", "8000"]
+# Use the memopad entrypoint to run the MCP server with default SSE transport
+CMD ["memopad", "mcp", "--transport", "sse", "--host", "0.0.0.0", "--port", "8000"]

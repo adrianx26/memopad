@@ -126,15 +126,37 @@ class MarkdownProcessor:
         post = Post(content, **frontmatter_dict)
         final_content = dump_frontmatter(post)
 
+        # Check if we should format in-memory (built-in formatter) or post-write (external formatter)
+        should_format_in_memory = False
+        should_format_post_write = False
+
+        if self.app_config and self.app_config.format_on_save:
+            extension = path.suffix.lstrip(".")
+            external_formatter = (
+                self.app_config.formatters.get(extension) or self.app_config.formatter_command
+            )
+
+            if external_formatter:
+                should_format_post_write = True
+            else:
+                should_format_in_memory = True
+
+        # Format in-memory if using built-in formatter (optimization to avoid double write)
+        if should_format_in_memory:
+            formatted_content = await file_utils.format_markdown_content(final_content)
+            if formatted_content is not None:
+                final_content = formatted_content
+
         logger.debug(f"writing file {path} with content:\n{final_content}")
 
         # Write atomically and return checksum of updated file
         path.parent.mkdir(parents=True, exist_ok=True)
         await file_utils.write_file_atomic(path, final_content)
 
-        # Format file if configured (MarkdownProcessor always handles markdown files)
         content_for_checksum = final_content
-        if self.app_config:
+
+        # Apply external formatter if configured
+        if should_format_post_write and self.app_config:
             formatted_content = await file_utils.format_file(  # pragma: no cover
                 path, self.app_config, is_markdown=True
             )

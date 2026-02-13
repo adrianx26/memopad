@@ -7,7 +7,9 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Optional
+import asyncio
 
+import aiofiles
 import dateparser
 import frontmatter
 import yaml
@@ -182,7 +184,9 @@ class EntityParser:
             absolute_path = self.get_file_path(path)
 
         # Parse frontmatter and content using python-frontmatter
-        file_content = absolute_path.read_text(encoding="utf-8")
+        async with aiofiles.open(absolute_path, mode="r", encoding="utf-8") as f:
+            file_content = await f.read()
+
         return await self.parse_file_content(absolute_path, file_content)
 
     def get_file_path(self, path):
@@ -196,7 +200,8 @@ class EntityParser:
         Exists for backwards compatibility with code that passes file paths.
         """
         # Extract file stat info for timestamps
-        file_stats = absolute_path.stat()
+        loop = asyncio.get_event_loop()
+        file_stats = await loop.run_in_executor(None, absolute_path.stat)
 
         # Delegate to parse_markdown_content with timestamps from file stats
         return await self.parse_markdown_content(

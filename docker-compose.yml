@@ -48,14 +48,14 @@ services:
     
     # Command with SSE transport (configurable via environment variables above)
     # IMPORTANT: The SSE and streamable-http endpoints are not secured
-    command: ["basic-memory", "mcp", "--transport", "sse", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["memopad", "mcp", "--transport", "sse", "--host", "0.0.0.0", "--port", "8000"]
     
     # Container management
     restart: unless-stopped
     
     # Health monitoring
     healthcheck:
-      test: ["CMD", "basic-memory", "--version"]
+      test: ["CMD", "memopad", "--version"]
       interval: 30s
       timeout: 10s
       retries: 3

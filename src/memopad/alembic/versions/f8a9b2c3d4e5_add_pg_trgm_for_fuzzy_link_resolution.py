@@ -175,19 +175,29 @@ def upgrade() -> None:
     # Postgres-specific: pg_trgm and GIN indexes
     if dialect == "postgresql":
         # Enable pg_trgm extension for fuzzy string matching
-        op.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        try:
+            op.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        except Exception:
+            # Ignore permission errors or other failures when creating extension
+            pass
 
-        # Create trigram indexes on entity table for fuzzy matching
-        # GIN indexes with gin_trgm_ops support similarity searches
-        op.execute("""
-            CREATE INDEX IF NOT EXISTS idx_entity_title_trgm
-            ON entity USING gin (title gin_trgm_ops)
-        """)
+        # Check if extension exists before creating dependent indexes
+        conn = op.get_bind()
+        result = conn.execute(text("SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm'"))
+        has_pg_trgm = result.fetchone() is not None
 
-        op.execute("""
-            CREATE INDEX IF NOT EXISTS idx_entity_permalink_trgm
-            ON entity USING gin (permalink gin_trgm_ops)
-        """)
+        if has_pg_trgm:
+            # Create trigram indexes on entity table for fuzzy matching
+            # GIN indexes with gin_trgm_ops support similarity searches
+            op.execute("""
+                CREATE INDEX IF NOT EXISTS idx_entity_title_trgm
+                ON entity USING gin (title gin_trgm_ops)
+            """)
+
+            op.execute("""
+                CREATE INDEX IF NOT EXISTS idx_entity_permalink_trgm
+                ON entity USING gin (permalink gin_trgm_ops)
+            """)
 
         # Create partial index on unresolved relations for efficient bulk resolution
         # This makes "WHERE to_id IS NULL AND project_id = X" queries very fast

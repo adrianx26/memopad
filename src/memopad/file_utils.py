@@ -127,6 +127,46 @@ async def write_file_atomic(path: FilePath, content: str) -> None:
         raise FileWriteError(f"Failed to write file {path}: {e}")
 
 
+async def format_markdown_content(content: str) -> Optional[str]:
+    """
+    Format markdown content string using the built-in mdformat formatter.
+
+    Uses mdformat with GFM (GitHub Flavored Markdown) support for consistent
+    formatting without requiring Node.js or external tools.
+
+    Args:
+        content: Markdown content to format
+
+    Returns:
+        Formatted content if successful, None if formatting failed.
+    """
+    try:
+        import mdformat
+    except ImportError:  # pragma: no cover
+        logger.warning("mdformat not installed, skipping built-in formatting")
+        return None
+
+    try:
+        # Format using mdformat with GFM and frontmatter extensions
+        # mdformat is synchronous, so we run it in a thread executor
+        loop = asyncio.get_event_loop()
+        formatted_content = await loop.run_in_executor(
+            None,
+            lambda: mdformat.text(
+                content,
+                extensions={"gfm", "frontmatter"},  # GFM + YAML frontmatter support
+                options={"wrap": "no"},  # Don't wrap lines
+            ),
+        )
+        return formatted_content
+    except Exception as e:  # pragma: no cover
+        logger.warning(
+            "mdformat formatting failed",
+            error=str(e),
+        )
+        return None
+
+
 async def format_markdown_builtin(path: Path) -> Optional[str]:
     """
     Format a markdown file using the built-in mdformat formatter.
@@ -141,31 +181,23 @@ async def format_markdown_builtin(path: Path) -> Optional[str]:
         Formatted content if successful, None if formatting failed.
     """
     try:
-        import mdformat
-    except ImportError:  # pragma: no cover
-        logger.warning(
-            "mdformat not installed, skipping built-in formatting",
-            path=str(path),
-        )
-        return None
-
-    try:
         # Read original content
         async with aiofiles.open(path, mode="r", encoding="utf-8") as f:
             content = await f.read()
-
-        # Format using mdformat with GFM and frontmatter extensions
-        # mdformat is synchronous, so we run it in a thread executor
-        loop = asyncio.get_event_loop()
-        formatted_content = await loop.run_in_executor(
-            None,
-            lambda: mdformat.text(
-                content,
-                extensions={"gfm", "frontmatter"},  # GFM + YAML frontmatter support
-                options={"wrap": "no"},  # Don't wrap lines
-            ),
+    except Exception as e:  # pragma: no cover
+        logger.warning(
+            "Failed to read file for formatting",
+            path=str(path),
+            error=str(e),
         )
+        return None
 
+    formatted_content = await format_markdown_content(content)
+
+    if formatted_content is None:
+        return None
+
+    try:
         # Only write if content changed
         if formatted_content != content:
             async with aiofiles.open(path, mode="w", encoding="utf-8") as f:
@@ -180,7 +212,7 @@ async def format_markdown_builtin(path: Path) -> Optional[str]:
 
     except Exception as e:  # pragma: no cover
         logger.warning(
-            "mdformat formatting failed",
+            "Failed to write formatted file",
             path=str(path),
             error=str(e),
         )
