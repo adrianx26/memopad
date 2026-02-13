@@ -2,7 +2,12 @@
 Basic Memory FastMCP server.
 """
 
+import asyncio
+import sys
 from contextlib import asynccontextmanager
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 from fastmcp import FastMCP
 from loguru import logger

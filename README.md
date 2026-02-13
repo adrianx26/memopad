@@ -2,6 +2,8 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![PyPI version](https://badge.fury.io/py/memopad.svg)](https://badge.fury.io/py/memopad)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![Tests](https://github.com/basicmachines-co/memopad/workflows/Tests/badge.svg)](https://github.com/basicmachines-co/memopad/actions)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 ![](https://badge.mcpx.dev?type=server 'MCP Server')
 ![](https://badge.mcpx.dev?type=dev 'MCP Dev')
 
@@ -529,7 +531,3 @@ Contributions are welcome. See the [Contributing](CONTRIBUTING.md) guide for inf
 and submitting PRs.
 
 ## Star History
-
-
-
-Built with ♥️ by AI

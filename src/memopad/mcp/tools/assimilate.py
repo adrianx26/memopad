@@ -5,9 +5,13 @@ and stores everything as structured notes in memopad.
 """
 
 import asyncio
+import os
 import re
+import shutil
+import tempfile
+import glob
 from html.parser import HTMLParser
-from typing import Optional
+from typing import Optional, List, Tuple
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -196,6 +200,103 @@ def detect_content_type(url: str, text: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# GitHub Cloning Logic
+# ---------------------------------------------------------------------------
+
+def _is_github_repo(url: str) -> bool:
+    """Check if URL is a GitHub repository."""
+    parsed = urlparse(url)
+    return "github.com" in parsed.netloc and len(parsed.path.strip("/").split("/")) >= 2
+
+async def _clone_github_repo(url: str, max_files: int = 50) -> dict:
+    """Clone a GitHub repository and extract relevant files."""
+    import subprocess
+    
+    # 1. Clone
+    temp_dir = tempfile.mkdtemp(prefix="memopad_git_")
+    try:
+        logger.info(f"Cloning {url} to {temp_dir}")
+        process = await asyncio.create_subprocess_exec(
+            "git", "clone", "--depth", "1", url, temp_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        _, stderr = await process.communicate()
+        
+        if process.returncode != 0:
+            logger.error(f"Git clone failed: {stderr.decode()}")
+            return {"pages": [], "all_github_links": [], "all_external_links": [], "errors": [f"Git clone failed: {url}"]}
+
+        # 2. Walk and find interesting files
+        pages = []
+        file_patterns = [
+            "**/*.md", "**/*.txt", "**/*.rst", 
+            "**/COPYING", "**/LICENSE", "**/NOTICE",
+            "**/*.py", "**/*.js", "**/*.ts", "**/*.go", "**/*.rs", "**/*.java", "**/*.c", "**/*.cpp", "**/*.h", "**/*.hpp",
+            "**/*.json", "**/*.toml", "**/*.yaml", "**/*.yml"
+        ]
+        
+        found_files = []
+        for pattern in file_patterns:
+             found_files.extend(glob.glob(os.path.join(temp_dir, pattern), recursive=True))
+
+        # Prioritize important files
+        def priority(fpath):
+            name = os.path.basename(fpath).lower()
+            if "readme" in name: return 0
+            if "agent" in name or "claude" in name or "skill" in name: return 1
+            if "doc" in fpath.lower(): return 2
+            return 3
+            
+        found_files.sort(key=priority)
+        
+        # Limit processed files
+        found_files = found_files[:max_files]
+        
+        for file_path in found_files:
+            try:
+                rel_path = os.path.relpath(file_path, temp_dir)
+                # Skip .git directory
+                if ".git" in rel_path.split(os.sep):
+                    continue
+                    
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                    
+                if not content.strip():
+                    continue
+
+                # Construct a URL-like identifier for consistency
+                # e.g. https://github.com/owner/repo/blob/main/README.md (approximate)
+                file_url = f"{url.rstrip('/')}/{rel_path.replace(os.sep, '/')}"
+                
+                content_types = detect_content_type(file_url, content)
+                
+                # Check for links (basic regex for now as we don't parse markdown fully here)
+                # This is a simplification compared to HTML parsing
+                links = {"internal": [], "github": [], "external": []} 
+                
+                pages.append({
+                    "url": file_url,
+                    "text": content,
+                    "content_types": content_types,
+                    "links": links,
+                    "is_file": True # Marker for file-based content
+                })
+            except Exception as e:
+                logger.warning(f"Failed to read file {file_path}: {e}")
+
+        return {
+            "pages": pages,
+            "all_github_links": [], # Git clone approach doesn't extract links efficiently yet
+            "all_external_links": [],
+            "errors": []
+        }
+
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+# ---------------------------------------------------------------------------
 # Crawler
 # ---------------------------------------------------------------------------
 
@@ -267,6 +368,16 @@ async def crawl(
                 continue
 
             html, final_url = result
+            
+            # If this is the start URL, update base_domain based on where we landed
+            # to handle redirects (e.g. http -> https, non-www -> www)
+            if depth == 0:
+                parsed_final = urlparse(final_url)
+                new_base = parsed_final.netloc.lower()
+                if new_base.startswith("www."):
+                    new_base = new_base[4:]
+                base_domain = new_base
+
             text = html_to_text(html)
             links = extract_links(html, final_url)
             categorized = categorize_links(links, base_domain)
@@ -278,6 +389,7 @@ async def crawl(
                 "text": text,
                 "content_types": content_types,
                 "links": categorized,
+                "is_file": False
             })
 
             all_github.update(categorized["github"])
@@ -315,12 +427,12 @@ def _build_overview_note(start_url: str, data: dict) -> str:
     lines = [
         f"# Assimilated: {start_url}\n",
         f"- [source] Source URL: {start_url}",
-        f"- [stats] Pages crawled: {len(data['pages'])}",
+        f"- [stats] Pages processed: {len(data['pages'])}",
         f"- [stats] GitHub links found: {len(data['all_github_links'])}",
         f"- [stats] External links found: {len(data['all_external_links'])}",
         f"- [stats] Errors: {len(data['errors'])}",
         "",
-        "## Pages Crawled\n",
+        "## Pages/Files Processed\n",
     ]
     for page in data["pages"]:
         types_str = ", ".join(page["content_types"]) if page["content_types"] else "general"
@@ -333,8 +445,10 @@ def _build_overview_note(start_url: str, data: dict) -> str:
 
     # Add a summary of the first page content (usually the main README)
     if data["pages"]:
-        first_text = data["pages"][0]["text"][:2000]
-        lines.append("\n## Main Page Summary\n")
+        # Find README if possible
+        readme = next((p for p in data["pages"] if "readme" in p["url"].lower()), data["pages"][0])
+        first_text = readme["text"][:2000]
+        lines.append(f"\n## Main Content Summary ({readme['url']})\n")
         lines.append(first_text)
 
     return "\n".join(lines)
@@ -347,7 +461,7 @@ def _build_agent_profiles_note(data: dict) -> str | None:
         if "agent_profile" in page.get("content_types", []):
             sections.append(f"## From: {page['url']}\n")
             # Take meaningful portion of text
-            sections.append(page["text"][:3000])
+            sections.append(page["text"][:5000]) # Increased limit for profiles
             sections.append("")
 
     if not sections:
@@ -364,7 +478,7 @@ def _build_skills_rules_note(data: dict) -> str | None:
     for page in data["pages"]:
         if "skills_rules" in page.get("content_types", []):
             sections.append(f"## From: {page['url']}\n")
-            sections.append(page["text"][:3000])
+            sections.append(page["text"][:5000]) # Increased limit for skills
             sections.append("")
 
     if not sections:
@@ -421,7 +535,7 @@ def _build_github_links_note(data: dict) -> str | None:
     - Architectural concepts and design patterns
     - GitHub repository links
 
-    Notes are stored under Assimilated/<domain>/ in the target project.
+    Notes are stored under <domain>/ in the target project.
 
     Args:
         url: The URL to assimilate (e.g. "https://github.com/org/repo")
@@ -471,12 +585,25 @@ async def assimilate(
         return "# Error\n\nInvalid URL. Please provide a full URL like https://example.com"
 
     domain = parsed.netloc.lower()
+    if domain.startswith("www."):
+        domain = domain[4:]
 
-    # Crawl
-    logger.info(f"assimilate: starting crawl of {url}")
-    data = await crawl(url, max_depth=max_depth, max_pages=max_pages)
+    # Choose strategy: GitHub clone or Generic Crawl
+    if _is_github_repo(url):
+        logger.info(f"assimilate: detected GitHub repo, cloning {url}")
+        # Use more pages for repo files
+        data = await _clone_github_repo(url, max_files=max_pages)
+        # Use a more specific directory for GitHub repos
+        # e.g. github.com/owner/repo
+        path_parts = parsed.path.strip("/").split("/")
+        if len(path_parts) >= 2:
+            domain = f"{domain}/{path_parts[0]}/{path_parts[1]}"
+    else:
+        logger.info(f"assimilate: starting generic crawl of {url}")
+        data = await crawl(url, max_depth=max_depth, max_pages=max_pages)
+
     logger.info(
-        f"assimilate: crawl complete — {len(data['pages'])} pages, "
+        f"assimilate: processing complete — {len(data['pages'])} pages/files, "
         f"{len(data['all_github_links'])} github links"
     )
 
@@ -506,7 +633,8 @@ async def assimilate(
         notes_to_write.append(("GitHub Links Index", github_note))
 
     # Store notes in memopad
-    directory = f"Assimilated/{domain}"
+    # explicitly controlled directory path
+    directory = domain # No 'Assimilated/' prefix!
 
     async with get_client() as client:
         active_project = await get_active_project(client, project, context)
@@ -549,7 +677,7 @@ async def assimilate(
         "# Assimilation Complete\n",
         f"source: {url}",
         f"project: {active_project.name}",
-        f"pages_crawled: {len(data['pages'])}",
+        f"items_processed: {len(data['pages'])}",
         f"github_links_found: {len(data['all_github_links'])}",
         f"notes_stored: {len(notes_to_write)}",
         f"directory: {directory}",
