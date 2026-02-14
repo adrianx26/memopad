@@ -36,9 +36,6 @@ from memopad.repository.sqlite_search_repository import SQLiteSearchRepository
 # The SelectorEventLoop doesn't support subprocess operations, so code that uses
 # asyncio.create_subprocess_shell() (like sync_service._quick_count_files) must
 # detect Windows and use fallback implementations.
-# The SelectorEventLoop doesn't support subprocess operations, so code that uses
-# asyncio.create_subprocess_shell() (like sync_service._quick_count_files) must
-# detect Windows and use fallback implementations.
 
 # Module level state
 _engine: Optional[AsyncEngine] = None

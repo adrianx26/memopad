@@ -7,7 +7,11 @@ import sys
 from contextlib import asynccontextmanager
 
 if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    # Use SelectorEventLoop to avoid ProactorEventLoop cleanup issues
+    # The ProactorEventLoop can raise "IndexError: pop from an empty deque" during
+    # event loop cleanup when there are pending handles. SelectorEventLoop is more
+    # stable for our use case (no subprocess pipes or named pipes needed).
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from fastmcp import FastMCP
 from loguru import logger
