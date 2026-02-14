@@ -159,6 +159,12 @@ Permalink = Annotated[str, MinLen(1)]
 EntityType = Annotated[str, BeforeValidator(to_snake_case), MinLen(1), MaxLen(200)]
 """Classification of entity (e.g., 'person', 'project', 'concept'). """
 
+# Maximum title length (500 characters as per best practices)
+MAX_TITLE_LENGTH = 500
+
+# Maximum content size (1MB = 1,000,000 characters)
+MAX_CONTENT_LENGTH = 1_000_000
+
 ALLOWED_CONTENT_TYPES = {
     "text/markdown",
     "text/plain",
@@ -225,8 +231,8 @@ class Entity(BaseModel):
     # Use empty string "" as sentinel to indicate permalinks are explicitly disabled
     _permalink: Optional[str] = None
 
-    title: str
-    content: Optional[str] = None
+    title: Annotated[str, MinLen(1), MaxLen(MAX_TITLE_LENGTH)]
+    content: Annotated[str, MaxLen(MAX_CONTENT_LENGTH)] = None
     directory: str
     entity_type: EntityType = "note"
     entity_metadata: Optional[Dict] = Field(default=None, description="Optional metadata")

@@ -1,0 +1,39 @@
+{
+  "name": "memopad-mcp-server",
+  "version": "1.0.0",
+  "description": "A Model Context Protocol (MCP) server for managing notes and memos",
+  "main": "server.py",
+  "type": "module",
+  "scripts": {
+    "test": "python test_memopad.py",
+    "start": "python server.py",
+    "validate": "python -m py_compile server.py"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "notes",
+    "memo",
+    "claude",
+    "ai"
+  ],
+  "author": "adrianx26",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/adrianx26/memopad"
+  },
+  "bugs": {
+    "url": "https://github.com/adrianx26/memopad/issues"
+  },
+  "engines": {
+    "python": ">=3.10"
+  },
+  "files": [
+    "server.py",
+    "test_memopad.py",
+    "README.md",
+    "QUICKSTART.md",
+    "MEMOPAD_ANALYSIS.md"
+  ]
+}
