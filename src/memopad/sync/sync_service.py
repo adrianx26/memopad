@@ -278,7 +278,9 @@ class SyncService:
         """
         async with semaphore:
             try:
-                return await self.sync_file(path, new=new, cached_checksum=cached_checksum)
+                # cached_checksum is not currently used by sync_file, so we don't pass it
+                # to avoid TypeError. The checksum will be computed inside sync_file.
+                return await self.sync_file(path, new=new)
             except Exception as e:
                 # Log but don't raise - gather will collect exceptions
                 logger.error(f"Error syncing {path}: {e}")
@@ -909,22 +911,8 @@ class SyncService:
             await self.entity_service.delete_entity_by_file_path(file_path)
 
             # Clean up search index
-            permalinks = (
-                [entity.permalink]
-                + [o.permalink for o in entity.observations]
-                + [r.permalink for r in entity.relations]
-            )
-
-            logger.debug(
-                f"Cleaning up search index for entity_id={entity.id}, file_path={file_path}, "
-                f"index_entries={len(permalinks)}"
-            )
-
-            for permalink in permalinks:
-                if permalink:
-                    await self.search_service.delete_by_permalink(permalink)
-                else:
-                    await self.search_service.delete_by_entity_id(entity.id)
+            # This handles entity, observations, and all relations (incoming & outgoing)
+            await self.search_service.handle_delete(entity)
 
     async def handle_move(self, old_path, new_path):
         logger.debug("Moving entity", old_path=old_path, new_path=new_path)

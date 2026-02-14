@@ -416,28 +416,30 @@ class SearchService:
     async def handle_delete(self, entity: Entity):
         """Handle complete entity deletion from search index including observations and relations.
 
-        This replicates the logic from sync_service.handle_delete() to properly clean up
-        all search index entries for an entity and its related data.
+        This optimizes the cleanup process by:
+        1. Using a single delete_by_entity_id call to remove all items owned by this entity
+           (the entity itself, its observations, and its outgoing relations).
+        2. Iterating only over incoming relations to remove their search index entries
+           (which are owned by other entities but point to this one).
         """
         logger.debug(
             f"Cleaning up search index for entity_id={entity.id}, file_path={entity.file_path}, "
-            f"observations={len(entity.observations)}, relations={len(entity.outgoing_relations)}"
+            f"observations={len(entity.observations)}, outgoing_relations={len(entity.outgoing_relations)}, "
+            f"incoming_relations={len(entity.incoming_relations)}"
         )
 
-        # Clean up search index - same logic as sync_service.handle_delete()
-        permalinks = (
-            [entity.permalink]
-            + [o.permalink for o in entity.observations]
-            + [r.permalink for r in entity.outgoing_relations]
-        )
+        # 1. Delete all search index items owned by this entity in one query
+        # This includes:
+        # - The entity itself
+        # - All observations (entity_id = this entity)
+        # - All outgoing relations (entity_id = this entity)
+        await self.repository.delete_by_entity_id(entity.id)
 
-        logger.debug(
-            f"Deleting search index entries for entity_id={entity.id}, "
-            f"index_entries={len(permalinks)}"
-        )
-
-        for permalink in permalinks:
-            if permalink:
-                await self.delete_by_permalink(permalink)
-            else:
-                await self.delete_by_entity_id(entity.id)
+        # 2. Delete incoming relations from search index
+        # These are owned by OTHER entities (entity_id = source entity), but their
+        # permalink (source/type/target) includes this entity. Since the relation
+        # is deleted from DB when this entity is deleted, we must remove its
+        # corresponding search index entry.
+        for rel in entity.incoming_relations:
+            if rel.permalink:
+                await self.delete_by_permalink(rel.permalink)
