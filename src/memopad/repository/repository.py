@@ -1,6 +1,6 @@
 ﻿"""Base repository implementation."""
 
-from typing import Type, Optional, Any, Sequence, TypeVar, List, Dict, cast
+from typing import Type, Optional, Any, Sequence, TypeVar, List, Dict, cast, Generic
 
 
 from loguru import logger
@@ -26,7 +26,7 @@ from memopad.models import Base
 T = TypeVar("T", bound=Base)
 
 
-class Repository[T: Base]:
+class Repository(Generic[T]):
     """Base repository implementation with generic CRUD operations."""
 
     def __init__(

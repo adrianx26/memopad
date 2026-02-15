@@ -35,17 +35,9 @@ class CliContainer:
         """
         config = ConfigManager().config
         mode = resolve_runtime_mode(
-            cloud_mode_enabled=config.cloud_mode_enabled,
             is_test_env=config.is_test_env,
         )
         return cls(config=config, mode=mode)
-
-    # --- Runtime Mode Properties ---
-
-    @property
-    def is_cloud_mode(self) -> bool:
-        """Whether running in cloud mode."""
-        return self.mode.is_cloud
 
 
 # Module-level container instance (set by app callback)

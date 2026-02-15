@@ -176,6 +176,7 @@ def test_import_chatgpt_command_invalid_json(tmp_path):
 def test_import_chatgpt_with_custom_folder(tmp_path, sample_chatgpt_json, monkeypatch):
     """Test import with custom conversations folder."""
     # Set up test environment
+    monkeypatch.setenv("HOME", str(tmp_path))
 
     config = get_project_config()
     config.home = tmp_path
@@ -192,6 +193,8 @@ def test_import_chatgpt_with_custom_folder(tmp_path, sample_chatgpt_json, monkey
             conversations_folder,
         ],
     )
+    if result.exit_code != 0:
+        print(f"Command output:\n{result.output}")
     assert result.exit_code == 0
 
     # Check files in custom folder

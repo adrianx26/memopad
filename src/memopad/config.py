@@ -47,22 +47,6 @@ class ProjectConfig:
         return f"/{generate_permalink(self.name)}"
 
 
-class CloudProjectConfig(BaseModel):
-    """Sync configuration for a cloud project.
-
-    This tracks the local working directory and sync state for a project
-    that is synced with Basic Memory Cloud.
-    """
-
-    local_path: str = Field(description="Local working directory path for this cloud project")
-    last_sync: Optional[datetime] = Field(
-        default=None, description="Timestamp of last successful sync operation"
-    )
-    bisync_initialized: bool = Field(
-        default=False, description="Whether rclone bisync baseline has been established"
-    )
-
-
 class MemoPadConfig(BaseSettings):
     """Pydantic model for Basic Memory global configuration."""
 
@@ -193,34 +177,6 @@ class MemoPadConfig(BaseSettings):
         description="If set, all projects must be created underneath this directory. Paths will be sanitized and constrained to this root. If not set, projects can be created anywhere (default behavior).",
     )
 
-    # Cloud configuration
-    cloud_client_id: str = Field(
-        default="client_01K6KWQPW6J1M8VV7R3TZP5A6M",
-        description="OAuth client ID for Basic Memory Cloud",
-    )
-
-    cloud_domain: str = Field(
-        default="https://eloquent-lotus-05.authkit.app",
-        description="AuthKit domain for Basic Memory Cloud",
-    )
-
-    cloud_host: str = Field(
-        default_factory=lambda: os.getenv(
-            "MEMOPAD_CLOUD_HOST", "https://cloud.basicmemory.com"
-        ),
-        description="Basic Memory Cloud host URL",
-    )
-
-    cloud_mode: bool = Field(
-        default=False,
-        description="Enable cloud mode - all requests go to cloud instead of local (config file value)",
-    )
-
-    cloud_projects: Dict[str, CloudProjectConfig] = Field(
-        default_factory=dict,
-        description="Cloud project sync configuration mapping project names to their local paths and sync state",
-    )
-
     @property
     def is_test_env(self) -> bool:
         """Check if running in a test environment.
@@ -236,52 +192,6 @@ class MemoPadConfig(BaseSettings):
             self.env == "test"
             or os.getenv("MEMOPAD_ENV", "").lower() == "test"
             or os.getenv("PYTEST_CURRENT_TEST") is not None
-        )
-
-    @property
-    def cloud_mode_enabled(self) -> bool:
-        """Check if cloud mode is enabled.
-
-        Priority:
-        1. MEMOPAD_CLOUD_MODE environment variable
-        2. Config file value (cloud_mode)
-        """
-        env_value = os.environ.get("MEMOPAD_CLOUD_MODE", "").lower()
-        if env_value in ("true", "1", "yes"):
-            return True
-        elif env_value in ("false", "0", "no"):
-            return False
-        # Fall back to config file value
-        return self.cloud_mode
-
-    @classmethod
-    def for_cloud_tenant(
-        cls,
-        database_url: str,
-        projects: Optional[Dict[str, str]] = None,
-    ) -> "MemoPadConfig":
-        """Create config for cloud tenant - no config.json, database is source of truth.
-
-        This factory method creates a MemoPadConfig suitable for cloud deployments
-        where:
-        - Database is Postgres (Neon), not SQLite
-        - Projects are discovered from the database, not config file
-        - Path validation is skipped (no local filesystem in cloud)
-        - Initialization sync is skipped (stateless deployment)
-
-        Args:
-            database_url: Postgres connection URL for tenant database
-            projects: Optional project mapping (usually empty, discovered from DB)
-
-        Returns:
-            MemoPadConfig configured for cloud mode
-        """
-        return cls(  # pragma: no cover
-            database_backend=DatabaseBackend.POSTGRES,
-            database_url=database_url,
-            projects=projects or {},
-            cloud_mode=True,
-            skip_initialization_sync=True,
         )
 
     model_config = SettingsConfigDict(
@@ -300,10 +210,6 @@ class MemoPadConfig(BaseSettings):
 
     def model_post_init(self, __context: Any) -> None:
         """Ensure configuration is valid after initialization."""
-        # Skip project initialization in cloud mode - projects are discovered from DB
-        if self.database_backend == DatabaseBackend.POSTGRES:  # pragma: no cover
-            return  # pragma: no cover
-
         # Ensure at least one project exists; if none exist then create main
         if not self.projects:  # pragma: no cover
             self.projects["main"] = str(
@@ -348,15 +254,7 @@ class MemoPadConfig(BaseSettings):
 
     @model_validator(mode="after")
     def ensure_project_paths_exists(self) -> "MemoPadConfig":  # pragma: no cover
-        """Ensure project paths exist.
-
-        Skips path creation when using Postgres backend (cloud mode) since
-        cloud tenants don't use local filesystem paths.
-        """
-        # Skip path creation for cloud mode - no local filesystem
-        if self.database_backend == DatabaseBackend.POSTGRES:
-            return self
-
+        """Ensure project paths exist."""
         for name, path_value in self.projects.items():
             path = Path(path_value)
             if not path.exists():
@@ -594,12 +492,10 @@ def init_mcp_logging() -> None:  # pragma: no cover
 def init_api_logging() -> None:  # pragma: no cover
     """Initialize logging for API server.
 
-    Cloud mode (MEMOPAD_CLOUD_MODE=1): stdout with structured context
-    Local mode: file only
+    API server can log to stdout as it handles HTTP requests.
     """
     log_level = os.getenv("MEMOPAD_LOG_LEVEL", "INFO")
-    cloud_mode = os.getenv("MEMOPAD_CLOUD_MODE", "").lower() in ("1", "true")
-    if cloud_mode:
-        setup_logging(log_level=log_level, log_to_stdout=True, structured_context=True)
-    else:
-        setup_logging(log_level=log_level, log_to_file=True)
+    setup_logging(log_level=log_level, log_to_file=False)
+
+
+

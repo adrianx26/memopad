@@ -50,7 +50,7 @@ def app_callback(
     # Skip for 'mcp' command - it has its own lifespan that handles initialization
     # Skip for API-using commands (status, sync, etc.) - they handle initialization via deps.py
     # Skip for 'reset' command - it manages its own database lifecycle
-    skip_init_commands = {"doctor", "mcp", "status", "sync", "project", "tool", "reset"}
+    skip_init_commands = {"doctor", "mcp", "status", "sync", "project", "tool", "reset", "import"}
     if (
         not version
         and ctx.invoked_subcommand is not None
@@ -70,7 +70,4 @@ claude_app = typer.Typer(help="Import Conversations from Claude JSON export.")
 import_app.add_typer(claude_app, name="claude")
 
 
-## cloud
 
-cloud_app = typer.Typer(help="Access MemoPad Cloud")
-app.add_typer(cloud_app, name="cloud")

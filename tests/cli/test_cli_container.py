@@ -20,20 +20,7 @@ class TestCliContainer:
         assert container.config == app_config
         assert container.mode == RuntimeMode.LOCAL
 
-    def test_is_cloud_mode_when_cloud(self, app_config):
-        """is_cloud_mode returns True in cloud mode."""
-        container = CliContainer(config=app_config, mode=RuntimeMode.CLOUD)
-        assert container.is_cloud_mode is True
 
-    def test_is_cloud_mode_when_local(self, app_config):
-        """is_cloud_mode returns False in local mode."""
-        container = CliContainer(config=app_config, mode=RuntimeMode.LOCAL)
-        assert container.is_cloud_mode is False
-
-    def test_is_cloud_mode_when_test(self, app_config):
-        """is_cloud_mode returns False in test mode."""
-        container = CliContainer(config=app_config, mode=RuntimeMode.TEST)
-        assert container.is_cloud_mode is False
 
 
 class TestContainerAccessors:

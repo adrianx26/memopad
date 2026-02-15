@@ -13,7 +13,7 @@ import typer
 
 from memopad.cli.app import app
 from memopad.cli.commands.command_utils import run_with_cleanup
-from memopad.cli.commands.routing import force_routing, validate_routing_flags
+from memopad.cli.commands.command_utils import run_with_cleanup
 from memopad.markdown.entity_parser import EntityParser
 from memopad.markdown.markdown_processor import MarkdownProcessor
 from memopad.markdown.schemas import EntityFrontmatter, EntityMarkdown
@@ -133,17 +133,10 @@ async def run_doctor() -> None:
 
 
 @app.command()
-def doctor(
-    local: bool = typer.Option(
-        False, "--local", help="Force local API routing (ignore cloud mode)"
-    ),
-    cloud: bool = typer.Option(False, "--cloud", help="Force cloud API routing"),
-) -> None:
+def doctor() -> None:
     """Run local consistency checks to verify file/database sync."""
     try:
-        validate_routing_flags(local, cloud)
-        with force_routing(local=local, cloud=cloud):
-            run_with_cleanup(run_doctor())
+        run_with_cleanup(run_doctor())
     except (ToolError, ValueError) as e:
         console.print(f"[red]Doctor failed: {e}[/red]")
         raise typer.Exit(code=1)

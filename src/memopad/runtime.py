@@ -14,12 +14,7 @@ class RuntimeMode(Enum):
     """Runtime modes for Basic Memory."""
 
     LOCAL = auto()  # Local standalone mode (default)
-    CLOUD = auto()  # Cloud mode with remote sync
     TEST = auto()  # Test environment
-
-    @property
-    def is_cloud(self) -> bool:
-        return self == RuntimeMode.CLOUD
 
     @property
     def is_local(self) -> bool:
@@ -31,7 +26,6 @@ class RuntimeMode(Enum):
 
 
 def resolve_runtime_mode(
-    cloud_mode_enabled: bool,
     is_test_env: bool,
 ) -> RuntimeMode:
     """Resolve the runtime mode from configuration flags.
@@ -40,7 +34,6 @@ def resolve_runtime_mode(
     Composition roots call this with config values they've read.
 
     Args:
-        cloud_mode_enabled: Whether cloud mode is enabled in config
         is_test_env: Whether running in test environment
 
     Returns:
@@ -51,11 +44,5 @@ def resolve_runtime_mode(
     # Outcome: returns TEST mode, skipping cloud mode check
     if is_test_env:
         return RuntimeMode.TEST
-
-    # Trigger: cloud mode is enabled in config
-    # Why: cloud mode changes auth, sync, and API behavior
-    # Outcome: returns CLOUD mode for remote-first behavior
-    if cloud_mode_enabled:
-        return RuntimeMode.CLOUD
 
     return RuntimeMode.LOCAL

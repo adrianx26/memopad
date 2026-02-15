@@ -39,7 +39,6 @@ class McpContainer:
         """
         config = ConfigManager().config
         mode = resolve_runtime_mode(
-            cloud_mode_enabled=config.cloud_mode_enabled,
             is_test_env=config.is_test_env,
         )
         return cls(config=config, mode=mode)
@@ -53,9 +52,8 @@ class McpContainer:
         Sync is enabled when:
         - sync_changes is True in config
         - Not in test mode (tests manage their own sync)
-        - Not in cloud mode (cloud handles sync differently)
         """
-        return self.config.sync_changes and not self.mode.is_test and not self.mode.is_cloud
+        return self.config.sync_changes and not self.mode.is_test
 
     @property
     def sync_skip_reason(self) -> str | None:
@@ -65,8 +63,6 @@ class McpContainer:
         """
         if self.mode.is_test:
             return "Test environment detected"
-        if self.mode.is_cloud:
-            return "Cloud mode enabled"
         if not self.config.sync_changes:
             return "Sync changes disabled"
         return None

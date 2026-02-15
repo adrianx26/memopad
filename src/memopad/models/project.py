@@ -1,7 +1,7 @@
 ﻿"""Project model for Basic Memory."""
 
 import uuid
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import (
@@ -58,12 +58,12 @@ class Project(Base):
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(UTC),
-        onupdate=lambda: datetime.now(UTC),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
     )
 
     # Sync optimization - scan watermark tracking

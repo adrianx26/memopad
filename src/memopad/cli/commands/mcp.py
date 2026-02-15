@@ -37,15 +37,8 @@ def mcp(
     - sse: Server-Sent Events (for compatibility with existing clients)
 
     Initialization, file sync, and cleanup are handled by the MCP server's lifespan.
-
-    Note: This command is available regardless of cloud mode setting.
-    Users who have cloud mode enabled can still use local MCP for Claude Code
-    and Claude Desktop while using cloud MCP for web and mobile access.
     """
-    # Force local routing for local MCP server
-    # Why: The local MCP server should always talk to the local API, not the cloud proxy.
-    # Even when cloud_mode_enabled is True, stdio MCP runs locally and needs local API access.
-    os.environ["MEMOPAD_FORCE_LOCAL"] = "true"
+
 
     # Initialize logging for MCP (file only, stdout breaks protocol)
     init_mcp_logging()

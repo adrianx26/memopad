@@ -3,7 +3,7 @@
 import logging
 from abc import abstractmethod
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional, TypeVar
+from typing import TYPE_CHECKING, Any, Optional, TypeVar, Generic
 
 from memopad.markdown.markdown_processor import MarkdownProcessor
 from memopad.markdown.schemas import EntityMarkdown
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=ImportResult)
 
 
-class Importer[T: ImportResult]:
+class Importer(Generic[T]):
     """Base class for all import services.
 
     All file operations are delegated to FileService, which can be overridden

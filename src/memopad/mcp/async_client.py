@@ -9,17 +9,7 @@ from memopad.api.app import app as fastapi_app
 from memopad.config import ConfigManager
 
 
-def _force_local_mode() -> bool:
-    """Check if local mode is forced via environment variable.
 
-    This allows commands like `bm mcp` to force local routing even when
-    cloud_mode_enabled is True in config. The local MCP server should
-    always talk to the local API, not the cloud proxy.
-
-    Returns:
-        True if MEMOPAD_FORCE_LOCAL is set to a truthy value
-    """
-    return os.environ.get("MEMOPAD_FORCE_LOCAL", "").lower() in ("true", "1", "yes")
 
 
 # Optional factory override for dependency injection
@@ -49,27 +39,16 @@ async def get_client() -> AsyncIterator[AsyncClient]:
     """Get an AsyncClient as a context manager.
 
     This function provides proper resource management for HTTP clients,
-    ensuring connections are closed after use. It supports three modes:
-
-    1. **Factory injection** (cloud app, tests):
-       If a custom factory is set via set_client_factory(), use that.
-
-    2. **CLI cloud mode**:
-       When cloud_mode_enabled is True, create HTTP client with auth
-       token from CLIAuth for requests to cloud proxy endpoint.
-
-    3. **Local mode** (default):
-       Use ASGI transport for in-process requests to local FastAPI app.
+    ensuring connections are closed after use.
+    
+    Local mode only: Use ASGI transport for in-process requests to local FastAPI app.
 
     Usage:
         async with get_client() as client:
             response = await client.get("/path")
 
     Yields:
-        AsyncClient: Configured HTTP client for the current mode
-
-    Raises:
-        RuntimeError: If cloud mode is enabled but user is not authenticated
+        AsyncClient: Configured HTTP client
     """
     if _client_factory:
         # Use injected factory (cloud app, tests)
@@ -77,7 +56,6 @@ async def get_client() -> AsyncIterator[AsyncClient]:
             yield client
     else:
         # Default: create based on config
-        config = ConfigManager().config
         timeout = Timeout(
             connect=10.0,  # 10 seconds for connection
             read=30.0,  # 30 seconds for reading response
@@ -85,62 +63,19 @@ async def get_client() -> AsyncIterator[AsyncClient]:
             pool=30.0,  # 30 seconds for connection pool
         )
 
-        # Trigger: MEMOPAD_FORCE_LOCAL env var is set
-        # Why: allows local MCP server and CLI commands to route locally
-        #      even when cloud_mode_enabled is True
-        # Outcome: uses ASGI transport for in-process local API calls
-        if _force_local_mode():
-            logger.info("Force local mode enabled - using ASGI client for local Basic Memory API")
-            async with AsyncClient(
-                transport=ASGITransport(app=fastapi_app), base_url="http://test", timeout=timeout
-            ) as client:
-                yield client
-        elif config.cloud_mode_enabled:
-            # CLI cloud mode: inject auth when creating client
-            from memopad.cli.auth import CLIAuth
-
-            auth = CLIAuth(client_id=config.cloud_client_id, authkit_domain=config.cloud_domain)
-            token = await auth.get_valid_token()
-
-            if not token:
-                raise RuntimeError(
-                    "Cloud mode enabled but not authenticated. "
-                    "Run 'memopad cloud login' first."
-                )
-
-            # Auth header set ONCE at client creation
-            proxy_base_url = f"{config.cloud_host}/proxy"
-            logger.info(f"Creating HTTP client for cloud proxy at: {proxy_base_url}")
-            async with AsyncClient(
-                base_url=proxy_base_url,
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=timeout,
-            ) as client:
-                yield client
-        else:
-            # Local mode: ASGI transport for in-process calls
-            # Note: ASGI transport does NOT trigger FastAPI lifespan, so no special handling needed
-            logger.info("Creating ASGI client for local Basic Memory API")
-            async with AsyncClient(
-                transport=ASGITransport(app=fastapi_app), base_url="http://test", timeout=timeout
-            ) as client:
-                yield client
+        # Local mode: ASGI transport for in-process calls
+        logger.info("Creating ASGI client for local Basic Memory API")
+        async with AsyncClient(
+            transport=ASGITransport(app=fastapi_app), base_url="http://test", timeout=timeout
+        ) as client:
+            yield client
 
 
 def create_client() -> AsyncClient:
     """Create an HTTP client based on configuration.
 
     DEPRECATED: Use get_client() context manager instead for proper resource management.
-
-    This function is kept for backward compatibility but will be removed in a future version.
-    The returned client should be closed manually by calling await client.aclose().
-
-    Returns:
-        AsyncClient configured for either local ASGI or remote proxy
     """
-    config_manager = ConfigManager()
-    config = config_manager.config
-
     # Configure timeout for longer operations like write_note
     # Default httpx timeout is 5 seconds which is too short for file operations
     timeout = Timeout(
@@ -150,20 +85,8 @@ def create_client() -> AsyncClient:
         pool=30.0,  # 30 seconds for connection pool
     )
 
-    # Check force local first (for local MCP server and CLI --local flag)
-    if _force_local_mode():
-        logger.info("Force local mode enabled - using ASGI client for local Basic Memory API")
-        return AsyncClient(
-            transport=ASGITransport(app=fastapi_app), base_url="http://test", timeout=timeout
-        )
-    elif config.cloud_mode_enabled:
-        # Use HTTP transport to proxy endpoint
-        proxy_base_url = f"{config.cloud_host}/proxy"
-        logger.info(f"Creating HTTP client for proxy at: {proxy_base_url}")
-        return AsyncClient(base_url=proxy_base_url, timeout=timeout)
-    else:
-        # Default: use ASGI transport for local API (development mode)
-        logger.info("Creating ASGI client for local Basic Memory API")
-        return AsyncClient(
-            transport=ASGITransport(app=fastapi_app), base_url="http://test", timeout=timeout
-        )
+    # Default: use ASGI transport for local API (development mode)
+    logger.info("Creating ASGI client for local Basic Memory API")
+    return AsyncClient(
+        transport=ASGITransport(app=fastapi_app), base_url="http://test", timeout=timeout
+    )

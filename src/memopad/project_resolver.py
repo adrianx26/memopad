@@ -22,8 +22,6 @@ from loguru import logger
 class ResolutionMode(Enum):
     """How the project was resolved."""
 
-    CLOUD_EXPLICIT = auto()  # Explicit project in cloud mode
-    CLOUD_DISCOVERY = auto()  # Discovery mode allowed in cloud (no project)
     ENV_CONSTRAINT = auto()  # MEMOPAD_MCP_PROJECT env var
     EXPLICIT = auto()  # Explicit project parameter
     DEFAULT = auto()  # default_project with default_project_mode=true
@@ -52,9 +50,7 @@ class ResolvedProject:
     @property
     def is_discovery_mode(self) -> bool:
         """Whether we're in discovery mode (no specific project)."""
-        return self.mode == ResolutionMode.CLOUD_DISCOVERY or (
-            self.mode == ResolutionMode.NONE and self.project is None
-        )
+        return self.mode == ResolutionMode.NONE and self.project is None
 
 
 @dataclass
@@ -68,14 +64,12 @@ class ProjectResolver:
     used by MCP tools, API routes, and CLI commands.
 
     Args:
-        cloud_mode: Whether running in cloud mode (project required)
         default_project_mode: Whether to use default project when not specified
         default_project: The default project name
         constrained_project: Optional env-constrained project override
             (typically from memopad_MCP_PROJECT)
     """
 
-    cloud_mode: bool = False
     default_project_mode: bool = False
     default_project: Optional[str] = None
     constrained_project: Optional[str] = None
@@ -83,14 +77,12 @@ class ProjectResolver:
     @classmethod
     def from_env(
         cls,
-        cloud_mode: bool = False,
         default_project_mode: bool = False,
         default_project: Optional[str] = None,
     ) -> "ProjectResolver":
         """Create resolver with constrained_project from environment.
 
         Args:
-            cloud_mode: Whether running in cloud mode
             default_project_mode: Whether to use default project when not specified
             default_project: The default project name
 
@@ -99,7 +91,6 @@ class ProjectResolver:
         """
         constrained = os.environ.get("MEMOPAD_MCP_PROJECT")
         return cls(
-            cloud_mode=cloud_mode,
             default_project_mode=default_project_mode,
             default_project=default_project,
             constrained_project=constrained,
@@ -108,48 +99,20 @@ class ProjectResolver:
     def resolve(
         self,
         project: Optional[str] = None,
-        allow_discovery: bool = False,
     ) -> ResolvedProject:
-        """Resolve project using the three-tier hierarchy.
+        """Resolve project using the hierarchy.
 
         Resolution order:
-        1. Cloud mode check (project required unless discovery allowed)
-        2. Constrained project from env var (highest priority in local mode)
-        3. Explicit project parameter
-        4. Default project if default_project_mode=true
+        1. Constrained project from env var (highest priority in local mode)
+        2. Explicit project parameter
+        3. Default project if default_project_mode=true
 
         Args:
             project: Optional explicit project parameter
-            allow_discovery: If True, allows returning None in cloud mode
-                for discovery operations (e.g., recent_activity across projects)
 
         Returns:
             ResolvedProject with project name, resolution mode, and reason
-
-        Raises:
-            ValueError: If in cloud mode and no project specified (unless discovery allowed)
         """
-        # --- Cloud Mode Handling ---
-        # In cloud mode, project is required unless discovery is explicitly allowed
-        if self.cloud_mode:
-            if project:
-                logger.debug(f"Cloud mode: using explicit project '{project}'")
-                return ResolvedProject(
-                    project=project,
-                    mode=ResolutionMode.CLOUD_EXPLICIT,
-                    reason=f"Explicit project in cloud mode: {project}",
-                )
-            elif allow_discovery:
-                logger.debug("Cloud mode: discovery mode allowed, no project required")
-                return ResolvedProject(
-                    project=None,
-                    mode=ResolutionMode.CLOUD_DISCOVERY,
-                    reason="Discovery mode enabled in cloud",
-                )
-            else:
-                raise ValueError("No project specified. Project is required for cloud mode.")
-
-        # --- Local Mode: Three-Tier Hierarchy ---
 
         # Priority 1: CLI constraint overrides everything
         if self.constrained_project:

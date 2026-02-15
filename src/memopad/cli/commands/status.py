@@ -11,7 +11,6 @@ from rich.panel import Panel
 from rich.tree import Tree
 
 from memopad.cli.app import app
-from memopad.cli.commands.routing import force_routing, validate_routing_flags
 from memopad.mcp.async_client import get_client
 from memopad.mcp.tools.utils import call_post
 from memopad.schemas import SyncReportResponse
@@ -163,22 +162,12 @@ def status(
         typer.Option(help="The project name."),
     ] = None,
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed file information"),
-    local: bool = typer.Option(
-        False, "--local", help="Force local API routing (ignore cloud mode)"
-    ),
-    cloud: bool = typer.Option(False, "--cloud", help="Force cloud API routing"),
 ):
-    """Show sync status between files and database.
-
-    Use --local to force local routing when cloud mode is enabled.
-    Use --cloud to force cloud routing when cloud mode is disabled.
-    """
+    """Show sync status between files and database."""
     from memopad.cli.commands.command_utils import run_with_cleanup
 
     try:
-        validate_routing_flags(local, cloud)
-        with force_routing(local=local, cloud=cloud):
-            run_with_cleanup(run_status(project, verbose))  # pragma: no cover
+        run_with_cleanup(run_status(project, verbose))  # pragma: no cover
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(code=1)

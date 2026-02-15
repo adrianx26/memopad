@@ -432,37 +432,20 @@ def validate_project_path(path: str, project_path: Path) -> bool:
         return False  # pragma: no cover
 
 
-def ensure_timezone_aware(dt: datetime, cloud_mode: bool | None = None) -> datetime:
+def ensure_timezone_aware(dt: datetime) -> datetime:
     """Ensure a datetime is timezone-aware.
 
-    If the datetime is naive, convert it to timezone-aware. The interpretation
-    depends on cloud_mode:
-    - In cloud mode (PostgreSQL/asyncpg): naive datetimes are interpreted as UTC
-    - In local mode (SQLite): naive datetimes are interpreted as local time
-
-    asyncpg uses binary protocol which returns timestamps in UTC but as naive
-    datetimes. In cloud deployments, cloud_mode=True handles this correctly.
+    If the datetime is naive, convert it to timezone-aware using the local system timezone.
 
     Args:
         dt: The datetime to ensure is timezone-aware
-        cloud_mode: Optional explicit cloud_mode setting. If None, loads from config.
 
     Returns:
         A timezone-aware datetime
     """
     if dt.tzinfo is None:
-        # Determine cloud_mode: use explicit parameter if provided, otherwise load from config
-        if cloud_mode is None:
-            from memopad.config import ConfigManager
-
-            cloud_mode = ConfigManager().config.cloud_mode_enabled
-
-        if cloud_mode:
-            # Cloud/PostgreSQL mode: naive datetimes from asyncpg are already UTC
-            return dt.replace(tzinfo=timezone.utc)
-        else:
-            # Local/SQLite mode: naive datetimes are in local time
-            return dt.astimezone()
+        # Local/SQLite mode: naive datetimes are in local time
+        return dt.astimezone()
     else:
         # Already timezone-aware
         return dt

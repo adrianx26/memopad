@@ -25,7 +25,6 @@ from memopad.schemas.v2 import ProjectResolveResponse
 async def resolve_project_parameter(
     project: Optional[str] = None,
     allow_discovery: bool = False,
-    cloud_mode: Optional[bool] = None,
     default_project_mode: Optional[bool] = None,
     default_project: Optional[str] = None,
 ) -> Optional[str]:
@@ -35,19 +34,15 @@ async def resolve_project_parameter(
     New code should consider using ProjectResolver directly for more detailed
     resolution information.
 
-    if cloud_mode:
-        project is required (unless allow_discovery=True for tools that support discovery mode)
-    else:
-        Resolution order:
-        1. Single Project Mode  (--project cli arg, or MEMOPAD_MCP_PROJECT env var) - highest priority
-        2. Explicit project parameter - medium priority
-        3. Default project if default_project_mode=true - lowest priority
+    Resolution order:
+    1. Single Project Mode  (--project cli arg, or MEMOPAD_MCP_PROJECT env var) - highest priority
+    2. Explicit project parameter - medium priority
+    3. Default project if default_project_mode=true - lowest priority
 
     Args:
         project: Optional explicit project parameter
-        allow_discovery: If True, allows returning None in cloud mode for discovery mode
+        allow_discovery: If True, allows returning None for discovery mode
             (used by tools like recent_activity that can operate across all projects)
-        cloud_mode: Optional explicit cloud mode. If not provided, reads from ConfigManager.
         default_project_mode: Optional explicit default project mode. If not provided, reads from ConfigManager.
         default_project: Optional explicit default project. If not provided, reads from ConfigManager.
 
@@ -55,10 +50,8 @@ async def resolve_project_parameter(
         Resolved project name or None if no resolution possible
     """
     # Load config for any values not explicitly provided
-    if cloud_mode is None or default_project_mode is None or default_project is None:
+    if default_project_mode is None or default_project is None:
         config = ConfigManager().config
-        if cloud_mode is None:
-            cloud_mode = config.cloud_mode
         if default_project_mode is None:
             default_project_mode = config.default_project_mode
         if default_project is None:
@@ -66,11 +59,10 @@ async def resolve_project_parameter(
 
     # Create resolver with configuration and resolve
     resolver = ProjectResolver.from_env(
-        cloud_mode=cloud_mode,
         default_project_mode=default_project_mode,
         default_project=default_project,
     )
-    result = resolver.resolve(project=project, allow_discovery=allow_discovery)
+    result = resolver.resolve(project=project)
     return result.project
 
 

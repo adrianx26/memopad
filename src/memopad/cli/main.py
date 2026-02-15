@@ -4,7 +4,7 @@ from memopad.cli.app import app  # pragma: no cover
 
 # Register commands
 from memopad.cli.commands import (  # noqa: F401  # pragma: no cover
-    cloud,
+
     db,
     doctor,
     import_chatgpt,

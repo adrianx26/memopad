@@ -141,16 +141,10 @@ class ProjectService:
         """
         # If project_root is set, constrain all projects to that directory
         project_root = self.config_manager.config.project_root
-        sanitized_name = None
+        sanitized_name = generate_permalink(name)
+        
         if project_root:
             base_path = Path(project_root)
-
-            # In cloud mode (when project_root is set), ignore user's path completely
-            # and use sanitized project name as the directory name
-            # This ensures flat structure: /app/data/test-bisync instead of /app/data/documents/test bisync
-            sanitized_name = generate_permalink(name)
-
-            # Construct path using sanitized project name only
             resolved_path = (base_path / sanitized_name).resolve().as_posix()
 
             # Verify the resolved path is actually under project_root
@@ -159,19 +153,6 @@ class ProjectService:
                     f"MEMOPAD_PROJECT_ROOT is set to {project_root}. "
                     f"All projects must be created under this directory. Invalid path: {path}"
                 )  # pragma: no cover
-
-            # Check for case-insensitive path collisions with existing projects
-            existing_projects = await self.list_projects()
-            for existing in existing_projects:
-                if (
-                    existing.path.lower() == resolved_path.lower()
-                    and existing.path != resolved_path
-                ):
-                    raise ValueError(  # pragma: no cover
-                        f"Path collision detected: '{resolved_path}' conflicts with existing project "
-                        f"'{existing.name}' at '{existing.path}'. "
-                        f"In cloud mode, paths are normalized to lowercase to prevent case-sensitivity issues."
-                    )  # pragma: no cover
         else:
             resolved_path = Path(os.path.abspath(os.path.expanduser(path))).as_posix()
 
@@ -198,9 +179,8 @@ class ProjectService:
                         f"Projects cannot share directory trees."
                     )
 
-        if not self.config_manager.config.cloud_mode:
-            # First add to config file (this will validate the project doesn't exist)
-            self.config_manager.add_project(name, resolved_path)
+        # First add to config file (this will validate the project doesn't exist)
+        self.config_manager.add_project(name, resolved_path)
 
         # Then add to database
         project_data = {
@@ -242,19 +222,16 @@ class ProjectService:
         project_path = project.path
 
         # Check if project is default
-        # In cloud mode: database is source of truth
-        # In local mode: also check config file
         is_default = project.is_default
-        if not self.config_manager.config.cloud_mode:
-            is_default = is_default or name == self.config_manager.config.default_project
+        is_default = is_default or name == self.config_manager.config.default_project
         if is_default:
             raise ValueError(f"Cannot remove the default project '{name}'")  # pragma: no cover
 
-        # Remove from config if it exists there (may not exist in cloud mode)
+        # Remove from config if it exists there
         try:
             self.config_manager.remove_project(name)
         except ValueError:  # pragma: no cover
-            # Project not in config - that's OK in cloud mode, continue with database deletion
+            # Project not in config
             logger.debug(  # pragma: no cover
                 f"Project '{name}' not found in config, removing from database only"
             )
@@ -300,9 +277,8 @@ class ProjectService:
         # Update database
         await self.repository.set_as_default(project.id)
 
-        # Update config file only in local mode (cloud mode uses database only)
-        if not self.config_manager.config.cloud_mode:
-            self.config_manager.set_default_project(name)
+        # Update config file
+        self.config_manager.set_default_project(name)
 
         logger.info(f"Project '{name}' set as default in configuration and database")
 

@@ -3,7 +3,7 @@ name = "memopad"
 dynamic = ["version"]
 description = "Local-first knowledge management combining Zettelkasten with knowledge graphs"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 license = { text = "AGPL-3.0-or-later" }
 authors = [
     { name = "adrianx26", email = "adrianx26@gmail.com" }
@@ -62,7 +62,7 @@ build-backend = "hatchling.build"
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "tests"]
-addopts = "--cov=basic_memory --cov-report term-missing"
+addopts = ""
 testpaths = ["tests", "test-int"]
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
@@ -116,7 +116,7 @@ pythonVersion = "3.12"
 
 
 [tool.coverage.run]
-concurrency = ["thread", "gevent"]
+concurrency = ["thread"]
 parallel = true
 source = ["memopad"]
 

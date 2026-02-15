@@ -1,6 +1,6 @@
 """Tests for context service."""
 
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
@@ -59,7 +59,7 @@ async def test_find_connected_timeframe(
     if app_config.database_backend == DatabaseBackend.POSTGRES:
         pytest.skip("Not yet supported for Postgres - duplicate key violation issue")
 
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)
     old_date = now - timedelta(days=10)
     recent_date = now - timedelta(days=1)
 
@@ -255,8 +255,8 @@ async def test_project_isolation_in_find_related(session_maker, app_config):
             project_id=project1.id,
             permalink="project1/entity1",
             file_path="project1/entity1.md",
-            created_at=datetime.now(UTC),
-            updated_at=datetime.now(UTC),
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
         )
         entity2_p1 = Entity(
             title="Entity2_P1",
@@ -265,8 +265,8 @@ async def test_project_isolation_in_find_related(session_maker, app_config):
             project_id=project1.id,
             permalink="project1/entity2",
             file_path="project1/entity2.md",
-            created_at=datetime.now(UTC),
-            updated_at=datetime.now(UTC),
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
         )
 
         # Create entities in project2
@@ -277,8 +277,8 @@ async def test_project_isolation_in_find_related(session_maker, app_config):
             project_id=project2.id,
             permalink="project2/entity1",
             file_path="project2/entity1.md",
-            created_at=datetime.now(UTC),
-            updated_at=datetime.now(UTC),
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
         )
 
         db_session.add_all([entity1_p1, entity2_p1, entity1_p2])

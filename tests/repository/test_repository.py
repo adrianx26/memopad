@@ -1,6 +1,6 @@
 """Test repository implementation."""
 
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 import pytest
 from sqlalchemy import String, DateTime
 from sqlalchemy.orm import Mapped, mapped_column
@@ -18,12 +18,12 @@ class ModelTest(Base):
     name: Mapped[str] = mapped_column(String(255))
     description: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(UTC).replace(tzinfo=None)
+        DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=lambda: datetime.now(UTC).replace(tzinfo=None),
-        onupdate=lambda: datetime.now(UTC).replace(tzinfo=None),
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
+        onupdate=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
     )
 
 
