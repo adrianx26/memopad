@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from memopad import db
 from memopad.config import MemoPadConfig, ConfigManager
 from memopad.file_utils import has_frontmatter
-from memopad.ignore_utils import load_bmignore_patterns, should_ignore_path
+from memopad.ignore_utils import load_bmignore_patterns, should_ignore_path, FastIgnoreMatcher
 from memopad.markdown import EntityParser, MarkdownProcessor
 from memopad.models import Entity, Project
 from memopad.repository import (
@@ -143,6 +143,7 @@ class SyncService:
         self.file_service = file_service
         # Load ignore patterns once at initialization for performance
         self._ignore_patterns = load_bmignore_patterns()
+        self._ignore_matcher = FastIgnoreMatcher(self._ignore_patterns)
         # Circuit breaker: track file failures to prevent infinite retry loops
         # Use OrderedDict for LRU behavior with bounded size to prevent unbounded memory growth
         self._file_failures: OrderedDict[str, FileFailureInfo] = OrderedDict()
@@ -643,13 +644,14 @@ class SyncService:
         return report
 
     async def sync_file(
-        self, path: str, new: bool = True
+        self, path: str, new: bool = True, cached_checksum: Optional[str] = None
     ) -> Tuple[Optional[Entity], Optional[str]]:
         """Sync a single file with circuit breaker protection.
 
         Args:
             path: Path to file to sync
             new: Whether this is a new file
+            cached_checksum: Pre-calculated checksum if available
 
         Returns:
             Tuple of (entity, checksum) or (None, None) if sync fails or file is skipped
@@ -665,9 +667,9 @@ class SyncService:
             )
 
             if self.file_service.is_markdown(path):
-                entity, checksum = await self.sync_markdown_file(path, new)
+                entity, checksum = await self.sync_markdown_file(path, new, cached_checksum)
             else:
-                entity, checksum = await self.sync_regular_file(path, new)
+                entity, checksum = await self.sync_regular_file(path, new, cached_checksum)
 
             if entity is not None:
                 await self.search_service.index_entity(entity)
@@ -708,12 +710,13 @@ class SyncService:
 
             return None, None
 
-    async def sync_markdown_file(self, path: str, new: bool = True) -> Tuple[Optional[Entity], str]:
+    async def sync_markdown_file(self, path: str, new: bool = True, cached_checksum: Optional[str] = None) -> Tuple[Optional[Entity], str]:
         """Sync a markdown file with full processing.
 
         Args:
             path: Path to markdown file
             new: Whether this is a new file
+            cached_checksum: Pre-calculated checksum (unused for markdown as we must read content to parse)
 
         Returns:
             Tuple of (entity, checksum)
@@ -789,17 +792,21 @@ class SyncService:
         # Return the final checksum to ensure everything is consistent
         return entity, final_checksum
 
-    async def sync_regular_file(self, path: str, new: bool = True) -> Tuple[Optional[Entity], str]:
+    async def sync_regular_file(self, path: str, new: bool = True, cached_checksum: Optional[str] = None) -> Tuple[Optional[Entity], str]:
         """Sync a non-markdown file with basic tracking.
 
         Args:
             path: Path to file
             new: Whether this is a new file
+            cached_checksum: Pre-calculated checksum if available
 
         Returns:
             Tuple of (entity, checksum)
         """
-        checksum = await self.file_service.compute_checksum(path)
+        if cached_checksum:
+            checksum = cached_checksum
+        else:
+            checksum = await self.file_service.compute_checksum(path)
         if new:
             # Generate permalink from path - skip conflict checks during bulk sync
             await self.entity_service.resolve_permalink(path, skip_conflict_check=True)
@@ -1232,7 +1239,9 @@ class SyncService:
             file_paths.append(rel_path)
         return file_paths
 
-    async def scan_directory(self, directory: Path) -> AsyncIterator[Tuple[str, os.stat_result]]:
+    async def scan_directory(
+        self, directory: Path, _relative_path: str = ""
+    ) -> AsyncIterator[Tuple[str, os.stat_result]]:
         """Stream files from directory using aiofiles.os.scandir() with cached stat info.
 
         This method uses aiofiles.os.scandir() to leverage async I/O and cached stat
@@ -1241,6 +1250,7 @@ class SyncService:
 
         Args:
             directory: Directory to scan
+            _relative_path: Relative path from project root (internal recursion state)
 
         Yields:
             Tuples of (absolute_file_path, stat_info) for each file
@@ -1255,16 +1265,23 @@ class SyncService:
         subdirs = []
 
         for entry in entries:
-            entry_path = Path(entry.path)
+            # Calculate relative path for this entry
+            if _relative_path:
+                rel_path = f"{_relative_path}/{entry.name}"
+            else:
+                rel_path = entry.name
 
-            # Check ignore patterns
-            if should_ignore_path(entry_path, directory, self._ignore_patterns):
-                logger.trace(f"Ignoring path per .bmignore: {entry_path.relative_to(directory)}")
+            # Check ignore patterns using optimized matcher with string operations
+            # This avoids expensive Path creation for every file
+            if self._ignore_matcher.match(rel_path, is_dir=entry.is_dir(follow_symlinks=False)):
+                logger.trace(f"Ignoring path per .bmignore: {rel_path}")
                 continue
 
             if entry.is_dir(follow_symlinks=False):
                 # Collect subdirectories to recurse into
-                subdirs.append(entry_path)
+                # Only create Path object for directories as we need it for recursion
+                # Store (Path, relative_path) tuple
+                subdirs.append((Path(entry.path), rel_path))
             elif entry.is_file(follow_symlinks=False):
                 # Get cached stat info (no extra syscall!)
                 stat_info = entry.stat(follow_symlinks=False)
@@ -1275,8 +1292,8 @@ class SyncService:
             yield (file_path, stat_info)
 
         # Recurse into subdirectories
-        for subdir in subdirs:
-            async for result in self.scan_directory(subdir):
+        for subdir_path, subdir_rel in subdirs:
+            async for result in self.scan_directory(subdir_path, _relative_path=subdir_rel):
                 yield result
 
 

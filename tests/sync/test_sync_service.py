@@ -1486,9 +1486,10 @@ async def test_scan_directory_respects_ignore_patterns(
     (project_dir / ".gitignore").write_text("*.ignored\n.hidden/\n")
 
     # Reload ignore patterns using project's .gitignore
-    from memopad.ignore_utils import load_gitignore_patterns
+    from memopad.ignore_utils import load_gitignore_patterns, FastIgnoreMatcher
 
     sync_service._ignore_patterns = load_gitignore_patterns(project_dir)
+    sync_service._ignore_matcher = FastIgnoreMatcher(sync_service._ignore_patterns)
 
     # Create test files - some should be ignored
     await create_test_file(project_dir / "included.md", "included")

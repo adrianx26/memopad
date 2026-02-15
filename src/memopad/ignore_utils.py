@@ -1,4 +1,4 @@
-﻿"""Utilities for handling .gitignore patterns and file filtering."""
+"""Utilities for handling .gitignore patterns and file filtering."""
 
 import fnmatch
 from pathlib import Path
@@ -295,3 +295,114 @@ def filter_files(
             filtered_files.append(file_path)
 
     return filtered_files, ignored_count
+
+
+class FastIgnoreMatcher:
+    """Optimized matcher for ignore patterns.
+
+    Pre-processes patterns into categories (simple names, extensions, etc.) for O(1) or O(N)
+    string lookup instead of expensive Path operations and repeated regex compilation.
+    """
+
+    def __init__(self, patterns: Set[str]):
+        self._simple_names = set()
+        self._extensions = []  # list of suffixes
+        self._complex_patterns = []  # list of (pattern, is_root_relative, is_dir_only)
+
+        for p in patterns:
+            # Analyze pattern
+            if p.startswith("/"):
+                is_root = True
+                p_clean = p[1:]
+            else:
+                is_root = False
+                p_clean = p
+
+            if p_clean.endswith("/"):
+                is_dir_only = True
+                p_clean = p_clean[:-1]
+            else:
+                is_dir_only = False
+
+            # Categorize
+            if (
+                not is_root
+                and not is_dir_only
+                and "*" not in p_clean
+                and "?" not in p_clean
+                and "[" not in p_clean
+                and "/" not in p_clean
+            ):
+                self._simple_names.add(p_clean)
+            elif (
+                not is_root
+                and not is_dir_only
+                and p_clean.startswith("*.")
+                and p_clean.count("*") == 1
+                and "?" not in p_clean
+                and "[" not in p_clean
+                and "/" not in p_clean
+            ):
+                self._extensions.append(p_clean[1:])  # extension
+            else:
+                self._complex_patterns.append((p, is_root, is_dir_only))
+
+        self._extensions = tuple(self._extensions)
+
+    def match(self, path: str, is_dir: bool = False) -> bool:
+        """Check if a file/directory path matches ignore patterns.
+
+        Args:
+            path: Relative path from project root (forward slashes)
+            is_dir: Whether the entry is a directory
+
+        Returns:
+            True if ignored
+        """
+        # Extract filename
+        if "/" in path:
+            name = path.rsplit("/", 1)[1]
+        else:
+            name = path
+
+        # 1. Simple names (O(1))
+        # Matches if the name appears as a component anywhere (unless constrained by pattern logic,
+        # but simple names in gitignore match anywhere)
+        if name in self._simple_names:
+            return True
+
+        # 2. Extensions (O(num_extensions), usually small)
+        if self._extensions and name.endswith(self._extensions):
+            return True
+
+        # 3. Complex patterns (O(num_complex))
+        if self._complex_patterns:
+            for pattern, is_root, is_dir_only in self._complex_patterns:
+                if is_dir_only and not is_dir:
+                    continue
+
+                if is_root:
+                    # Root pattern matches against full relative path
+                    # e.g. /build matches "build", but not "src/build"
+                    p_clean = pattern[1:]
+                    if p_clean.endswith("/"):
+                        p_clean = p_clean[:-1]
+
+                    if fnmatch.fnmatch(path, p_clean):
+                        return True
+                else:
+                    # Regular pattern
+                    if is_dir_only:
+                        p_clean = pattern[:-1]
+                    else:
+                        p_clean = pattern
+
+                    # Matches name (e.g. "node_modules")
+                    if fnmatch.fnmatch(name, p_clean):
+                        return True
+
+                    # Matches path (e.g. "src/temp")
+                    if fnmatch.fnmatch(path, p_clean):
+                        return True
+
+        return False
