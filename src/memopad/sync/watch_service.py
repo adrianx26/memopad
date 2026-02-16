@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from memopad.sync.sync_service import SyncService
 
 from memopad.config import MemoPadConfig, WATCH_STATUS_JSON
-from memopad.ignore_utils import load_gitignore_patterns, should_ignore_path
+from memopad.ignore_utils import load_gitignore_patterns, should_ignore_path, IgnoreMatcher
 from memopad.models import Project
 from memopad.repository import ProjectRepository
 from loguru import logger
@@ -91,7 +91,7 @@ class WatchService:
         self.state = WatchServiceState()
         self.status_path = Path.home() / ".memopad" / WATCH_STATUS_JSON
         self.status_path.parent.mkdir(parents=True, exist_ok=True)
-        self._ignore_patterns_cache: dict[Path, Set[str]] = {}
+        self._ignore_patterns_cache: dict[Path, IgnoreMatcher] = {}
         self._sync_service_factory = sync_service_factory
 
         # quiet mode for mcp so it doesn't mess up stdout
@@ -111,10 +111,12 @@ class WatchService:
         await asyncio.sleep(self.app_config.watch_project_reload_interval)
         stop_event.set()
 
-    def _get_ignore_patterns(self, project_path: Path) -> Set[str]:
-        """Get or load ignore patterns for a project path."""
+    def _get_ignore_matcher(self, project_path: Path) -> IgnoreMatcher:
+        """Get or load ignore matcher for a project path."""
         if project_path not in self._ignore_patterns_cache:
-            self._ignore_patterns_cache[project_path] = load_gitignore_patterns(project_path)
+            self._ignore_patterns_cache[project_path] = IgnoreMatcher(
+                load_gitignore_patterns(project_path)
+            )
         return self._ignore_patterns_cache[project_path]
 
     async def _watch_projects_cycle(self, projects: Sequence[Project], stop_event: asyncio.Event):
@@ -136,9 +138,9 @@ class WatchService:
                         # Check if the file should be ignored based on gitignore patterns
                         project_path = Path(project.path)
                         file_path = Path(path)
-                        ignore_patterns = self._get_ignore_patterns(project_path)
+                        ignore_matcher = self._get_ignore_matcher(project_path)
 
-                        if should_ignore_path(file_path, project_path, ignore_patterns):
+                        if ignore_matcher.match(file_path, project_path):
                             logger.trace(
                                 f"Ignoring watched file change: {file_path.relative_to(project_path)}"
                             )

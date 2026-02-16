@@ -1,8 +1,9 @@
-﻿"""Utilities for handling .gitignore patterns and file filtering."""
+"""Utilities for handling .gitignore patterns and file filtering."""
 
 import fnmatch
+import re
 from pathlib import Path
-from typing import Set
+from typing import Set, List, Pattern
 
 
 # Common directories and patterns to ignore by default
@@ -206,18 +207,124 @@ def load_gitignore_patterns(base_path: Path, use_gitignore: bool = True) -> Set[
     return patterns
 
 
-def should_ignore_path(file_path: Path, base_path: Path, ignore_patterns: Set[str]) -> bool:
+class IgnoreMatcher:
+    """Efficient matcher for ignore patterns using pre-compiled regex and sets."""
+
+    def __init__(self, patterns: Set[str]):
+        self._root_dirs: Set[str] = set()
+        self._root_patterns: List[Pattern] = []
+        self._dirs: Set[str] = set()
+        self._names: Set[str] = set()
+        self._extensions: Set[str] = set()
+        self._patterns: List[tuple[str, Pattern]] = []
+
+        for pattern in patterns:
+            # Handle patterns starting with / (root relative)
+            if pattern.startswith("/"):
+                p = pattern[1:]
+                if p.endswith("/"):
+                    # Root-relative directory: /node_modules/
+                    self._root_dirs.add(p[:-1])
+                else:
+                    # Root-relative file/glob: /config.json or /*.txt
+                    # fnmatch.translate converts glob to regex anchored at start and end
+                    regex = fnmatch.translate(p)
+                    self._root_patterns.append(re.compile(regex))
+            # Handle directory patterns (ending with /)
+            elif pattern.endswith("/"):
+                # Directory anywhere: node_modules/
+                self._dirs.add(pattern[:-1])
+            # Simple extension: *.pyc (no other wildcards, no path separators)
+            elif (
+                pattern.startswith("*.")
+                and pattern.count("*") == 1
+                and pattern.count("?") == 0
+                and "/" not in pattern
+            ):
+                self._extensions.add(pattern[1:])
+            # Simple exact name: .git or node_modules (no wildcards, no path separators)
+            elif (
+                "/" not in pattern
+                and "*" not in pattern
+                and "?" not in pattern
+                and "[" not in pattern
+            ):
+                self._names.add(pattern)
+            else:
+                # Complex glob: src/*.py or *foo*
+                regex = fnmatch.translate(pattern)
+                self._patterns.append((pattern, re.compile(regex)))
+
+    def match(self, file_path: Path, base_path: Path) -> bool:
+        """Check if file path matches any ignore pattern."""
+        try:
+            relative_path = file_path.relative_to(base_path)
+            parts = relative_path.parts
+            if not parts:
+                return False
+
+            # 1. Root-relative directories
+            if parts[0] in self._root_dirs:
+                return True
+
+            relative_posix = relative_path.as_posix()
+
+            # 2. Root-relative patterns
+            for regex in self._root_patterns:
+                if regex.match(relative_posix):
+                    return True
+
+            # 3. Component checks (iterating parts is fast enough)
+            for part in parts:
+                if part in self._dirs:
+                    return True
+                if part in self._names:
+                    return True
+                for ext in self._extensions:
+                    if part.endswith(ext):
+                        return True
+
+            # 4. Complex patterns
+            for pattern_str, regex in self._patterns:
+                if "/" in pattern_str:
+                    # If pattern contains slash, it matches against full path
+                    if regex.match(relative_posix):
+                        return True
+                else:
+                    # If pattern has no slash, it matches against any component
+                    # But fnmatch behavior is slightly more complex, let's verify:
+                    # 'src/*.py' (with slash) -> matched above
+                    # '*.py' (no slash) -> matched via extensions or below
+                    # 'foo*' (no slash) -> matches 'foobar' in any component
+                    for part in parts:
+                        if regex.match(part):
+                            return True
+
+            return False
+
+        except ValueError:
+            # If we can't get relative path, don't ignore
+            return False
+
+
+def should_ignore_path(
+    file_path: Path, base_path: Path, ignore_patterns: Set[str] | IgnoreMatcher
+) -> bool:
     """Check if a file path should be ignored based on gitignore patterns.
 
     Args:
         file_path: The file path to check
         base_path: The base directory for relative path calculation
-        ignore_patterns: Set of patterns to match against
+        ignore_patterns: Set of patterns or IgnoreMatcher to match against
 
     Returns:
         True if the path should be ignored, False otherwise
     """
-    # Get the relative path from base
+    # Use optimized matcher if provided
+    if isinstance(ignore_patterns, IgnoreMatcher):
+        return ignore_patterns.match(file_path, base_path)
+
+    # Fallback to legacy implementation for sets
     try:
         relative_path = file_path.relative_to(base_path)
         relative_str = str(relative_path)
@@ -285,11 +392,14 @@ def filter_files(
     if ignore_patterns is None:
         ignore_patterns = load_gitignore_patterns(base_path)
 
+    # Optimize: create matcher once for the batch
+    matcher = IgnoreMatcher(ignore_patterns)
+
     filtered_files = []
     ignored_count = 0
 
     for file_path in files:
-        if should_ignore_path(file_path, base_path, ignore_patterns):
+        if matcher.match(file_path, base_path):
             ignored_count += 1
         else:
             filtered_files.append(file_path)
