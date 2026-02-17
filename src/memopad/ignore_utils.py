@@ -1,8 +1,8 @@
-﻿"""Utilities for handling .gitignore patterns and file filtering."""
+"""Utilities for handling .gitignore patterns and file filtering."""
 
 import fnmatch
 from pathlib import Path
-from typing import Set
+from typing import Set, List, Tuple
 
 
 # Common directories and patterns to ignore by default
@@ -269,6 +269,80 @@ def should_ignore_path(file_path: Path, base_path: Path, ignore_patterns: Set[st
         return False
 
 
+class IgnoreMatcher:
+    """Efficient matcher for ignore patterns.
+
+    Pre-compiles patterns into sets for O(1) lookups where possible.
+    """
+
+    def __init__(self, patterns: Set[str]):
+        self.ignore_names: Set[str] = set()
+        self.ignore_extensions: Set[str] = set()
+        self.complex_patterns: Set[str] = set()
+
+        for pattern in patterns:
+            # Patterns with path separators or specific location anchors are complex
+            if pattern.startswith("/") or pattern.endswith("/") or "/" in pattern:
+                self.complex_patterns.add(pattern)
+                continue
+
+            # Patterns with wildcards
+            if "*" in pattern or "?" in pattern or "[" in pattern:
+                # Optimization for simple extensions like *.pyc
+                if (
+                    pattern.startswith("*.")
+                    and pattern.count("*") == 1
+                    and pattern.count("?") == 0
+                    and pattern.count("[") == 0
+                ):
+                    ext = pattern[1:]  # e.g. .pyc
+                    self.ignore_extensions.add(ext)
+                else:
+                    self.complex_patterns.add(pattern)
+            else:
+                # Exact name matches
+                self.ignore_names.add(pattern)
+
+    def match(self, file_path: Path, base_path: Path) -> bool:
+        """Check if a file path should be ignored.
+
+        Args:
+            file_path: The file path to check
+            base_path: The base directory for relative path calculation
+
+        Returns:
+            True if the path should be ignored, False otherwise
+        """
+        try:
+            relative_path = file_path.relative_to(base_path)
+        except ValueError:
+            # If we can't get relative path, don't ignore
+            return False
+
+        # Fast path 1: Check names in path parts (e.g. node_modules, .git)
+        # intersection is O(min(len(parts), len(ignore_names))) which is fast
+        # Note: This set lookup is case-sensitive, unlike fnmatch on Windows.
+        # This is generally acceptable for .gitignore (which is usually case-sensitive),
+        # but technically slightly stricter than OS filesystem behavior on Windows.
+        if not self.ignore_names.isdisjoint(relative_path.parts):
+            return True
+
+        # Fast path 2: Check extensions
+        # Check if file name ends with any of the ignored extensions
+        if self.ignore_extensions:
+            # Check if any part ends with an extension
+            # Optimized for common case of checking many extensions against path parts
+            for part in relative_path.parts:
+                if part.endswith(tuple(self.ignore_extensions)):
+                    return True
+
+        # Slow path: Fallback to complex pattern matching
+        if self.complex_patterns:
+            return should_ignore_path(file_path, base_path, self.complex_patterns)
+
+        return False
+
+
 def filter_files(
     files: list[Path], base_path: Path, ignore_patterns: Set[str] | None = None
 ) -> tuple[list[Path], int]:
@@ -285,11 +359,13 @@ def filter_files(
     if ignore_patterns is None:
         ignore_patterns = load_gitignore_patterns(base_path)
 
+    matcher = IgnoreMatcher(ignore_patterns)
+
     filtered_files = []
     ignored_count = 0
 
     for file_path in files:
-        if should_ignore_path(file_path, base_path, ignore_patterns):
+        if matcher.match(file_path, base_path):
             ignored_count += 1
         else:
             filtered_files.append(file_path)

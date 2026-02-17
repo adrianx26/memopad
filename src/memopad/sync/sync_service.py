@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from memopad import db
 from memopad.config import MemoPadConfig, ConfigManager
 from memopad.file_utils import has_frontmatter
-from memopad.ignore_utils import load_bmignore_patterns, should_ignore_path
+from memopad.ignore_utils import load_bmignore_patterns, should_ignore_path, IgnoreMatcher
 from memopad.markdown import EntityParser, MarkdownProcessor
 from memopad.models import Entity, Project
 from memopad.repository import (
@@ -143,6 +143,7 @@ class SyncService:
         self.file_service = file_service
         # Load ignore patterns once at initialization for performance
         self._ignore_patterns = load_bmignore_patterns()
+        self._ignore_matcher = IgnoreMatcher(self._ignore_patterns)
         # Circuit breaker: track file failures to prevent infinite retry loops
         # Use OrderedDict for LRU behavior with bounded size to prevent unbounded memory growth
         self._file_failures: OrderedDict[str, FileFailureInfo] = OrderedDict()
@@ -643,13 +644,14 @@ class SyncService:
         return report
 
     async def sync_file(
-        self, path: str, new: bool = True
+        self, path: str, new: bool = True, cached_checksum: Optional[str] = None
     ) -> Tuple[Optional[Entity], Optional[str]]:
         """Sync a single file with circuit breaker protection.
 
         Args:
             path: Path to file to sync
             new: Whether this is a new file
+            cached_checksum: Pre-calculated checksum if available
 
         Returns:
             Tuple of (entity, checksum) or (None, None) if sync fails or file is skipped
@@ -664,10 +666,17 @@ class SyncService:
                 f"Syncing file path={path} is_new={new} is_markdown={self.file_service.is_markdown(path)}"
             )
 
+            # Invalidate metadata cache to ensure we get fresh timestamps
+            self.file_service.invalidate_metadata_cache(path)
+
             if self.file_service.is_markdown(path):
-                entity, checksum = await self.sync_markdown_file(path, new)
+                entity, checksum = await self.sync_markdown_file(
+                    path, new, cached_checksum=cached_checksum
+                )
             else:
-                entity, checksum = await self.sync_regular_file(path, new)
+                entity, checksum = await self.sync_regular_file(
+                    path, new, cached_checksum=cached_checksum
+                )
 
             if entity is not None:
                 await self.search_service.index_entity(entity)
@@ -708,12 +717,15 @@ class SyncService:
 
             return None, None
 
-    async def sync_markdown_file(self, path: str, new: bool = True) -> Tuple[Optional[Entity], str]:
+    async def sync_markdown_file(
+        self, path: str, new: bool = True, cached_checksum: Optional[str] = None
+    ) -> Tuple[Optional[Entity], str]:
         """Sync a markdown file with full processing.
 
         Args:
             path: Path to markdown file
             new: Whether this is a new file
+            cached_checksum: Pre-calculated checksum if available (ignored for markdown as we recompute)
 
         Returns:
             Tuple of (entity, checksum)
@@ -789,17 +801,20 @@ class SyncService:
         # Return the final checksum to ensure everything is consistent
         return entity, final_checksum
 
-    async def sync_regular_file(self, path: str, new: bool = True) -> Tuple[Optional[Entity], str]:
+    async def sync_regular_file(
+        self, path: str, new: bool = True, cached_checksum: Optional[str] = None
+    ) -> Tuple[Optional[Entity], str]:
         """Sync a non-markdown file with basic tracking.
 
         Args:
             path: Path to file
             new: Whether this is a new file
+            cached_checksum: Pre-calculated checksum if available
 
         Returns:
             Tuple of (entity, checksum)
         """
-        checksum = await self.file_service.compute_checksum(path)
+        checksum = cached_checksum or await self.file_service.compute_checksum(path)
         if new:
             # Generate permalink from path - skip conflict checks during bulk sync
             await self.entity_service.resolve_permalink(path, skip_conflict_check=True)
@@ -908,6 +923,10 @@ class SyncService:
             # Delete from db (this cascades to observations/relations)
             await self.entity_service.delete_entity_by_file_path(file_path)
 
+            # Invalidate caches for this path
+            self.entity_service.invalidate_permalink_cache(file_path)
+            self.file_service.invalidate_metadata_cache(file_path)
+
             # Clean up search index
             permalinks = (
                 [entity.permalink]
@@ -928,6 +947,10 @@ class SyncService:
 
     async def handle_move(self, old_path, new_path):
         logger.debug("Moving entity", old_path=old_path, new_path=new_path)
+
+        # Invalidate caches for the old path immediately
+        self.entity_service.invalidate_permalink_cache(old_path)
+        self.file_service.invalidate_metadata_cache(old_path)
 
         entity = await self.entity_repository.get_by_file_path(old_path)
         if entity:
@@ -1203,7 +1226,7 @@ class SyncService:
                     rel_path = abs_path.relative_to(directory).as_posix()
 
                     # Apply ignore patterns (same as scan_directory)
-                    if should_ignore_path(abs_path, directory, self._ignore_patterns):
+                    if self._ignore_matcher.match(abs_path, directory):
                         logger.trace(f"Ignoring path per .bmignore: {rel_path}")
                         continue
 
@@ -1258,7 +1281,7 @@ class SyncService:
             entry_path = Path(entry.path)
 
             # Check ignore patterns
-            if should_ignore_path(entry_path, directory, self._ignore_patterns):
+            if self._ignore_matcher.match(entry_path, directory):
                 logger.trace(f"Ignoring path per .bmignore: {entry_path.relative_to(directory)}")
                 continue
 

@@ -135,8 +135,8 @@ class EntityService(BaseService[EntityModel]):
         cache_key = f"path:{file_path_str.lower()}"
         
         # Check cache first (warm path - avoid database queries)
-        if cache_key in self._permalink_cache:
-            cached_permalink = self._permalink_cache[cache_key]
+        cached_permalink = self._permalink_cache.get(cache_key)
+        if cached_permalink:
             logger.trace(f"Permalink cache hit: {file_path_str} -> {cached_permalink}")
             return cached_permalink
 
