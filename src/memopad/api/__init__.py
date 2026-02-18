@@ -1,4 +1,4 @@
-﻿"""Basic Memory API module."""
+﻿"""Memopad API module."""
 
 from .app import app
 

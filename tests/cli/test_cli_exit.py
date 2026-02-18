@@ -47,7 +47,7 @@ def test_bm_help_exits_cleanly():
         env=env,
     )
     assert result.returncode == 0
-    assert "Basic Memory" in result.stdout
+    assert "Memopad" in result.stdout
 
 
 def test_bm_tool_help_exits_cleanly():

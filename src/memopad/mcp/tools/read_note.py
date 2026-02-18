@@ -1,4 +1,4 @@
-﻿"""Read note tool for Basic Memory MCP server."""
+﻿"""Read note tool for Memopad MCP server."""
 
 from textwrap import dedent
 from typing import Optional

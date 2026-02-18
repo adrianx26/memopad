@@ -24,7 +24,7 @@ class ProductionCascadeTest:
     def __init__(self, db_path: Optional[Path] = None):
         """Initialize test with database path."""
         if db_path is None:
-            # Default to standard Basic Memory location
+            # Default to standard Memopad location
             home_dir = Path.home()
             self.db_path = home_dir / ".memopad" / "memory.db"
         else:
@@ -40,7 +40,7 @@ class ProductionCascadeTest:
         """Setup database connection."""
         if not self.db_path.exists():
             print(f"❌ Production database not found at: {self.db_path}")
-            print("Please ensure Basic Memory has been initialized and the database exists.")
+            print("Please ensure Memopad has been initialized and the database exists.")
             sys.exit(1)
 
         print(f"📁 Using database: {self.db_path}")

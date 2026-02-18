@@ -1,4 +1,4 @@
-﻿"""Project management service for Basic Memory."""
+﻿"""Project management service for Memopad."""
 
 import asyncio
 import json
@@ -25,7 +25,7 @@ from memopad.utils import generate_permalink
 
 
 class ProjectService:
-    """Service for managing Basic Memory projects."""
+    """Service for managing Memopad projects."""
 
     repository: ProjectRepository
 
@@ -508,7 +508,7 @@ class ProjectService:
                 )
 
     async def get_project_info(self, project_name: Optional[str] = None) -> ProjectInfoResponse:
-        """Get comprehensive information about the specified Basic Memory project.
+        """Get comprehensive information about the specified Memopad project.
 
         Args:
             project_name: Name of the project to get info for. If None, uses the current config project.

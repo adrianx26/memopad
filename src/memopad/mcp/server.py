@@ -1,5 +1,5 @@
 ﻿"""
-Basic Memory FastMCP server.
+Memopad FastMCP server.
 """
 
 import asyncio
@@ -29,7 +29,7 @@ async def lifespan(app: FastMCP):
     container = McpContainer.create()
     set_container(container)
 
-    logger.debug(f"Starting Basic Memory MCP server (mode={container.mode.name})")
+    logger.debug(f"Starting Memopad MCP server (mode={container.mode.name})")
 
     # Track if we created the engine (vs test fixtures providing it)
     # This prevents disposing an engine provided by test fixtures when
@@ -47,7 +47,7 @@ async def lifespan(app: FastMCP):
         yield
     finally:
         # Shutdown - coordinator handles clean task cancellation
-        logger.debug("Shutting down Basic Memory MCP server")
+        logger.debug("Shutting down Memopad MCP server")
         await sync_coordinator.stop()
 
         # Only shutdown DB if we created it (not if test fixture provided it)
@@ -59,6 +59,6 @@ async def lifespan(app: FastMCP):
 
 
 mcp = FastMCP(
-    name="Basic Memory",
+    name="Memopad",
     lifespan=lifespan,
 )

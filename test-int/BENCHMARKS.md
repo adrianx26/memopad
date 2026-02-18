@@ -1,6 +1,6 @@
 # Performance Benchmarks
 
-This directory contains performance benchmark tests for Basic Memory's sync/indexing operations.
+This directory contains performance benchmark tests for Memopad's sync/indexing operations.
 
 ## Purpose
 

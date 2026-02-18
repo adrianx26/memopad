@@ -1,4 +1,4 @@
-﻿"""Search prompts for Basic Memory MCP server.
+﻿"""Search prompts for Memopad MCP server.
 
 These prompts help users search and explore their knowledge base.
 """

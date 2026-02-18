@@ -32,7 +32,7 @@ async def test_continue_conversation_with_recent_activity(client, test_graph):
     # Check that the result contains expected content for recent activity
     assert "Continuing conversation on: Recent Activity" in result  # pyright: ignore [reportOperatorIssue]
     assert "This is a memory retrieval session" in result  # pyright: ignore [reportOperatorIssue]
-    assert "Please use the available memopad tools" in result  # pyright: ignore [reportOperatorIssue]
+    assert "Please use the available Memopad tools" in result  # pyright: ignore [reportOperatorIssue]
     assert "Next Steps" in result  # pyright: ignore [reportOperatorIssue]
 
 

@@ -1,6 +1,6 @@
-﻿"""ChatGPT-compatible MCP tools for Basic Memory.
+﻿"""ChatGPT-compatible MCP tools for Memopad.
 
-These adapters expose Basic Memory's search/fetch functionality using the exact
+These adapters expose Memopad's search/fetch functionality using the exact
 tool names and response structure OpenAI's MCP clients expect: each call returns
 a list containing a single `{"type": "text", "text": "{...json...}"}` item.
 """

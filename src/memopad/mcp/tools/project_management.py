@@ -1,4 +1,4 @@
-﻿"""Project management tools for Basic Memory MCP server.
+﻿"""Project management tools for Memopad MCP server.
 
 These tools allow users to switch between projects, list available projects,
 and manage project context during conversations.
@@ -17,7 +17,7 @@ from memopad.utils import generate_permalink
 async def list_memory_projects(context: Context | None = None) -> str:
     """List all available projects with their status.
 
-    Shows all Basic Memory projects that are available for MCP operations.
+    Shows all Memopad projects that are available for MCP operations.
     Use this tool to discover projects when you need to know which project to use.
 
     Use this tool:
@@ -73,7 +73,7 @@ async def list_memory_projects(context: Context | None = None) -> str:
 async def create_memory_project(
     project_name: str, project_path: str, set_default: bool = False, context: Context | None = None
 ) -> str:
-    """Create a new Basic Memory project.
+    """Create a new Memopad project.
 
     Creates a new project with the specified name and path. The project directory
     will be created if it doesn't exist. Optionally sets the new project as default.
@@ -129,10 +129,10 @@ async def create_memory_project(
 
 @mcp.tool()
 async def delete_project(project_name: str, context: Context | None = None) -> str:
-    """Delete a Basic Memory project.
+    """Delete a Memopad project.
 
     Removes a project from the configuration and database. This does NOT delete
-    the actual files on disk - only removes the project from Basic Memory's
+    the actual files on disk - only removes the project from Memopad's
     configuration and database records.
 
     Args:
@@ -146,7 +146,7 @@ async def delete_project(project_name: str, context: Context | None = None) -> s
 
     Warning:
         This action cannot be undone. The project will need to be re-added
-        to access its content through Basic Memory again.
+        to access its content through Memopad again.
     """
     async with get_client() as client:
         # Check if server is constrained to a specific project

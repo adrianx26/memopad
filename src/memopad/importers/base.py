@@ -1,4 +1,4 @@
-﻿"""Base import service for Basic Memory."""
+﻿"""Base import service for Memopad."""
 
 import logging
 from abc import abstractmethod

@@ -22,7 +22,7 @@ from memopad.utils import generate_permalink, normalize_project_path
 console = Console()
 
 # Create a project subcommand
-project_app = typer.Typer(help="Manage multiple Basic Memory projects")
+project_app = typer.Typer(help="Manage multiple Memopad projects")
 app.add_typer(project_app, name="project")
 
 
@@ -36,7 +36,7 @@ def format_path(path: str) -> str:
 
 @project_app.command("list")
 def list_projects() -> None:
-    """List all Basic Memory projects."""
+    """List all Memopad projects."""
 
     async def _list_projects():
         async with get_client() as client:
@@ -47,7 +47,7 @@ def list_projects() -> None:
         result = run_with_cleanup(_list_projects())
         config = ConfigManager().config
 
-        table = Table(title="Basic Memory Projects")
+        table = Table(title="Memopad Projects")
         table.add_column("Name", style="cyan")
         table.add_column("Path", style="green")
         table.add_column("Default", style="magenta")
@@ -227,11 +227,11 @@ def display_project_info(
             # Project configuration section
             console.print(
                 Panel(
-                    f"Basic Memory version: [bold green]{info.system.version}[/bold green]\n"
+                    f"Memopad version: [bold green]{info.system.version}[/bold green]\n"
                     f"[bold]Project:[/bold] {info.project_name}\n"
                     f"[bold]Path:[/bold] {info.project_path}\n"
                     f"[bold]Default Project:[/bold] {info.default_project}\n",
-                    title="Basic Memory Project Info",
+                    title="Memopad Project Info",
                     expand=False,
                 )
             )

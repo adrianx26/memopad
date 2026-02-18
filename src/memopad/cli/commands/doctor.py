@@ -30,7 +30,7 @@ console = Console()
 
 async def run_doctor() -> None:
     """Run local consistency checks for file <-> database flows."""
-    console.print("[blue]Running Basic Memory doctor checks...[/blue]")
+    console.print("[blue]Running Memopad doctor checks...[/blue]")
 
     project_name = f"doctor-{uuid.uuid4().hex[:8]}"
     api_note_title = "Doctor API Note"

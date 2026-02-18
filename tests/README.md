@@ -1,6 +1,6 @@
 # Dual-Backend Testing
 
-Basic Memory tests run against both SQLite and Postgres backends to ensure compatibility.
+Memopad tests run against both SQLite and Postgres backends to ensure compatibility.
 
 ## Quick Start
 

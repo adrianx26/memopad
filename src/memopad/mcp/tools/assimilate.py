@@ -1,4 +1,4 @@
-"""Assimilate tool for Basic Memory MCP server.
+"""Assimilate tool for Memopad MCP server.
 
 Crawls a URL, extracts knowledge (content, links, agent profiles, skills, rules),
 and stores everything as structured notes in memopad.
