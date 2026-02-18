@@ -11,10 +11,26 @@ import shutil
 import tempfile
 import glob
 from html.parser import HTMLParser
-from typing import Optional, List, Tuple
+from typing import Optional
 from urllib.parse import urljoin, urlparse
 
 import httpx
+import io
+import csv
+import webbrowser
+from PIL import Image
+try:
+    import pypdf
+except ImportError:
+    pypdf = None
+try:
+    import docx
+except ImportError:
+    docx = None
+try:
+    import openpyxl
+except ImportError:
+    openpyxl = None
 from fastmcp import Context
 from loguru import logger
 
@@ -204,6 +220,124 @@ DECISION_PATTERNS = re.compile(
 )
 
 
+
+# ---------------------------------------------------------------------------
+# File Processing Helpers
+# ---------------------------------------------------------------------------
+
+class FileProcessor:
+    """Helper to extract text/metadata from various file formats."""
+
+    @staticmethod
+    def extract_pdf_text(content: bytes) -> str:
+        if not pypdf:
+            return "Error: pypdf not installed."
+        try:
+            reader = pypdf.PdfReader(io.BytesIO(content))
+            text = []
+            for page in reader.pages:
+                text.append(page.extract_text() or "")
+            return "\n".join(text)
+        except Exception as e:
+            logger.error(f"Error extracting PDF: {e}")
+            return f"Error extracting PDF: {e}"
+
+    @staticmethod
+    def extract_docx_text(content: bytes) -> str:
+        if not docx:
+            return "Error: python-docx not installed."
+        try:
+            doc = docx.Document(io.BytesIO(content))
+            return "\n".join([para.text for para in doc.paragraphs])
+        except Exception as e:
+            logger.error(f"Error extracting DOCX: {e}")
+            return f"Error extracting DOCX: {e}"
+
+    @staticmethod
+    def extract_xlsx_text(content: bytes) -> str:
+        if not openpyxl:
+            return "Error: openpyxl not installed."
+        try:
+            wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+            text = []
+            for sheet in wb.worksheets:
+                text.append(f"Sheet: {sheet.title}")
+                for row in sheet.iter_rows(values_only=True):
+                    row_text = [str(cell) for cell in row if cell is not None]
+                    if row_text:
+                        text.append(" | ".join(row_text))
+                text.append("\n")
+            return "\n".join(text)
+        except Exception as e:
+            logger.error(f"Error extracting XLSX: {e}")
+            return f"Error extracting XLSX: {e}"
+
+    @staticmethod
+    def extract_image_info(content: bytes) -> str:
+        try:
+            img = Image.open(io.BytesIO(content))
+            info = [
+                f"Format: {img.format}",
+                f"Size: {img.size} (Width x Height)",
+                f"Mode: {img.mode}",
+                f"Info: {img.info}",
+            ]
+            
+            # OCR Capability (Commented out as requested)
+            # if pytesseract:
+            #     text = pytesseract.image_to_string(img)
+            #     info.append("\n--- OCR Detected Text ---\n")
+            #     info.append(text)
+            
+            return "\n".join(info)
+        except Exception as e:
+            logger.error(f"Error processing image: {e}")
+            return f"Error processing image: {e}"
+
+    @staticmethod
+    def extract_text_content(content: bytes, content_type: str, url: str) -> str:
+        """Dispatch to appropriate extractor based on content type/extension."""
+        url_lower = url.lower()
+        
+        # PDF
+        if "application/pdf" in content_type or url_lower.endswith(".pdf"):
+            return FileProcessor.extract_pdf_text(content)
+            
+        # Word
+        if "wordprocessingml" in content_type or url_lower.endswith(".docx") or url_lower.endswith(".doc"):
+             # .doc is binary, python-docx only supports .docx. .doc support requires other tools or is limited.
+             if url_lower.endswith(".doc"):
+                 return "Error: .doc format not supported directly (only .docx)"
+             return FileProcessor.extract_docx_text(content)
+             
+        # Excel
+        if "spreadsheet" in content_type or "excel" in content_type or url_lower.endswith(".xlsx") or url_lower.endswith(".xls"):
+            if url_lower.endswith(".xls"):
+                 return "Error: .xls format not supported directly (only .xlsx)"
+            return FileProcessor.extract_xlsx_text(content)
+            
+        # CSV
+        if "text/csv" in content_type or url_lower.endswith(".csv"):
+             try:
+                 text_content = content.decode("utf-8", errors="replace")
+                 # Check if it parses as CSV
+                 # csv.reader expects a text stream
+                 return text_content
+             except Exception:
+                 return "Error reading CSV"
+                 
+        # Image
+        if "image/" in content_type or url_lower.endswith((".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp")):
+            return FileProcessor.extract_image_info(content)
+            
+        # Text/Code
+        # Try to decode as text
+        try:
+            return content.decode("utf-8", errors="replace")
+        except Exception:
+            return "Binary content (decoding failed)"
+
+
 def detect_content_type(url: str, text: str) -> list[str]:
     """Identify what kind of useful content a page contains."""
     types: list[str] = []
@@ -248,23 +382,63 @@ def _is_github_repo(url: str) -> bool:
     return "github.com" in parsed.netloc and len(parsed.path.strip("/").split("/")) >= 2
 
 async def _clone_github_repo(url: str, max_files: int = 0) -> dict:
-    """Clone a GitHub repository and extract relevant files."""
-    import subprocess
+    """Clone a GitHub repository and extract relevant files.
+    
+    Raises:
+        No exceptions - all errors are caught and returned in the errors list.
+    """
+    # Default empty result structure
+    empty_result = {
+        "pages": [],
+        "all_github_links": [],
+        "all_external_links": [],
+        "errors": []
+    }
     
     # 1. Clone
     temp_dir = tempfile.mkdtemp(prefix="memopad_git_")
     try:
         logger.info(f"Cloning {url} to {temp_dir}")
-        process = await asyncio.create_subprocess_exec(
-            "git", "clone", "--depth", "1", url, temp_dir,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        _, stderr = await process.communicate()
+        
+        # --- Git subprocess execution with comprehensive error handling ---
+        # Trigger: User attempts to assimilate a GitHub repository
+        # Why: Git may not be installed, clone may fail, or operation may timeout
+        # Outcome: Return descriptive error message instead of crashing MCP tool
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "git", "clone", "--depth", "1", url, temp_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            # 5 minute timeout for large repositories
+            _, stderr = await asyncio.wait_for(process.communicate(), timeout=300.0)
+        except FileNotFoundError:
+            error_msg = "Git is not installed or not in PATH. Please install git to clone GitHub repositories."
+            logger.error(f"assimilate: {error_msg}")
+            empty_result["errors"] = [error_msg]
+            return empty_result
+        except asyncio.TimeoutError:
+            error_msg = f"Git clone timed out after 5 minutes for {url}. The repository may be too large."
+            logger.error(f"assimilate: {error_msg}")
+            empty_result["errors"] = [error_msg]
+            return empty_result
+        except PermissionError as e:
+            error_msg = f"Permission denied when cloning {url}: {e}"
+            logger.error(f"assimilate: {error_msg}")
+            empty_result["errors"] = [error_msg]
+            return empty_result
+        except OSError as e:
+            error_msg = f"OS error when cloning {url}: {type(e).__name__}: {e}"
+            logger.error(f"assimilate: {error_msg}")
+            empty_result["errors"] = [error_msg]
+            return empty_result
         
         if process.returncode != 0:
-            logger.error(f"Git clone failed: {stderr.decode()}")
-            return {"pages": [], "all_github_links": [], "all_external_links": [], "errors": [f"Git clone failed: {url}"]}
+            stderr_text = stderr.decode() if stderr else "No error message"
+            error_msg = f"Git clone failed for {url}: {stderr_text}"
+            logger.error(f"assimilate: {error_msg}")
+            empty_result["errors"] = [error_msg]
+            return empty_result
 
         # 2. Walk and find interesting files
         pages = []
@@ -282,9 +456,12 @@ async def _clone_github_repo(url: str, max_files: int = 0) -> dict:
         # Prioritize important files
         def priority(fpath):
             name = os.path.basename(fpath).lower()
-            if "readme" in name: return 0
-            if "agent" in name or "claude" in name or "skill" in name: return 1
-            if "doc" in fpath.lower(): return 2
+            if "readme" in name:
+                return 0
+            if "agent" in name or "claude" in name or "skill" in name:
+                return 1
+            if "doc" in fpath.lower():
+                return 2
             return 3
             
         found_files.sort(key=priority)
@@ -328,11 +505,17 @@ async def _clone_github_repo(url: str, max_files: int = 0) -> dict:
 
         return {
             "pages": pages,
-            "all_github_links": [], # Git clone approach doesn't extract links efficiently yet
+            "all_github_links": [],  # Git clone approach doesn't extract links efficiently yet
             "all_external_links": [],
             "errors": []
         }
 
+    except Exception as e:
+        # Catch-all for any unexpected errors during file processing
+        error_msg = f"Unexpected error processing repository {url}: {type(e).__name__}: {e}"
+        logger.exception(f"assimilate: {error_msg}")
+        empty_result["errors"] = [error_msg]
+        return empty_result
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -751,21 +934,17 @@ def _build_github_links_note(data: dict) -> str | None:
     - Skills, rules, and workflow definitions
     - Architectural concepts and design patterns
     - GitHub repository links
+    - Documents (PDF, DOCX, XLSX) and Images
 
     Notes are stored under <domain>/ in the target project.
-
-    Also auto-detects:
-    - Soul files (identity, personality, values)
-    - Tools & function definitions
-    - Algorithm implementations
-    - Decision structures & state machines
-    - Generates a functional/schematic Mermaid diagram
 
     Args:
         url: The URL to assimilate (e.g. "https://github.com/org/repo")
         project: Project to store notes in. Optional - uses default if not specified.
+
         max_depth: How many link-hops deep to crawl (default: 10)
         max_pages: Maximum pages to fetch (default: 0 = unlimited)
+        open_browser: Open the URL in the system browser for visualization (default: False)
     """,
 )
 async def assimilate(
@@ -773,6 +952,7 @@ async def assimilate(
     project: Optional[str] = None,
     max_depth: int = 10,
     max_pages: int = 0,
+    open_browser: bool = False,
     context: Context | None = None,
 ) -> str:
     """Assimilate knowledge from a URL into memopad.
@@ -781,7 +961,7 @@ async def assimilate(
     concepts, and GitHub links, then stores everything as structured notes.
 
     Project Resolution:
-    Server resolves projects in this order: Single Project Mode → project parameter → default project.
+    Server resolves projects in this order: Single Project Mode -> project parameter -> default project.
     If project unknown, use list_memory_projects() or recent_activity() first.
 
     Args:
@@ -789,6 +969,7 @@ async def assimilate(
         project: Project name to store notes in. Optional.
         max_depth: Maximum crawl depth from start URL (default: 10)
         max_pages: Maximum total pages to crawl (default: 0 = unlimited)
+        open_browser: Open the URL in the system browser for visualization (default: False)
         context: Optional FastMCP context for performance caching.
 
     Returns:
@@ -801,140 +982,211 @@ async def assimilate(
     Raises:
         ValueError: If URL is invalid or project doesn't exist
     """
-    logger.info(f"MCP tool call tool=assimilate url={url} max_depth={max_depth} max_pages={max_pages}")
+    logger.info(f"MCP tool call tool=assimilate url={url} max_depth={max_depth} max_pages={max_pages} open_browser={open_browser}")
 
-    # Validate URL
-    parsed = urlparse(url)
-    if not parsed.scheme or not parsed.netloc:
-        return "# Error\n\nInvalid URL. Please provide a full URL like https://example.com"
+    # --- Top-level exception handling ---
+    try:
+        # Validate URL
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return "# Error\n\nInvalid URL. Please provide a full URL like https://example.com"
 
-    domain = parsed.netloc.lower()
-    if domain.startswith("www."):
-        domain = domain[4:]
+        domain = parsed.netloc.lower()
+        if domain.startswith("www."):
+            domain = domain[4:]
 
-    # Choose strategy: GitHub clone or Generic Crawl
-    if _is_github_repo(url):
-        logger.info(f"assimilate: detected GitHub repo, cloning {url}")
-        # Use more pages for repo files
-        data = await _clone_github_repo(url, max_files=max_pages)
-        # Use a more specific directory for GitHub repos
-        # e.g. github.com/owner/repo
-        path_parts = parsed.path.strip("/").split("/")
-        if len(path_parts) >= 2:
-            domain = f"{domain}/{path_parts[0]}/{path_parts[1]}"
-    else:
-        logger.info(f"assimilate: starting generic crawl of {url}")
-        data = await crawl(url, max_depth=max_depth, max_pages=max_pages)
-
-    logger.info(
-        f"assimilate: processing complete — {len(data['pages'])} pages/files, "
-        f"{len(data['all_github_links'])} github links"
-    )
-
-    if not data["pages"]:
-        return f"# Error\n\nCould not fetch any content from {url}"
-
-    # Build notes
-    notes_to_write: list[tuple[str, str]] = []
-
-    overview = _build_overview_note(url, data)
-    notes_to_write.append(("Overview", overview))
-
-    agent_note = _build_agent_profiles_note(data)
-    if agent_note:
-        notes_to_write.append(("Agent Profiles", agent_note))
-
-    skills_note = _build_skills_rules_note(data)
-    if skills_note:
-        notes_to_write.append(("Skills and Rules", skills_note))
-
-    concepts_note = _build_concepts_note(data)
-    if concepts_note:
-        notes_to_write.append(("Concepts and Ideas", concepts_note))
-
-    soul_note = _build_soul_files_note(data)
-    if soul_note:
-        notes_to_write.append(("Soul Files", soul_note))
-
-    tools_note = _build_tools_functions_note(data)
-    if tools_note:
-        notes_to_write.append(("Tools and Functions", tools_note))
-
-    algo_note = _build_algorithms_note(data)
-    if algo_note:
-        notes_to_write.append(("Algorithms", algo_note))
-
-    decision_note = _build_decision_structure_note(data)
-    if decision_note:
-        notes_to_write.append(("Decision Structures", decision_note))
-
-    diagram_note = _build_functional_diagram_note(data)
-    if diagram_note:
-        notes_to_write.append(("Functional Diagram", diagram_note))
-
-    github_note = _build_github_links_note(data)
-    if github_note:
-        notes_to_write.append(("GitHub Links Index", github_note))
-
-    # Store notes in memopad
-    # explicitly controlled directory path
-    directory = domain # No 'Assimilated/' prefix!
-
-    async with get_client() as client:
-        active_project = await get_active_project(client, project, context)
-
-        from memopad.mcp.clients import KnowledgeClient
-        knowledge_client = KnowledgeClient(client, active_project.external_id)
-
-        stored: list[str] = []
-        for title, content in notes_to_write:
-            entity = Entity(
-                title=title,
-                directory=directory,
-                entity_type="note",
-                content_type="text/markdown",
-                content=content,
-                entity_metadata={"tags": ["assimilated", domain]},
-            )
+        # Open in browser if requested
+        if open_browser:
             try:
+                logger.info(f"Opening browser for {url}")
+                webbrowser.open(url)
+            except Exception as e:
+                logger.error(f"Failed to open browser for {url}: {e}")
+
+        data = None
+        
+        # Strategy 1: GitHub Repo
+        if _is_github_repo(url):
+            logger.info(f"assimilate: detected GitHub repo, cloning {url}")
+            data = await _clone_github_repo(url, max_files=max_pages)
+            path_parts = parsed.path.strip("/").split("/")
+            if len(path_parts) >= 2:
+                domain = f"{domain}/{path_parts[0]}/{path_parts[1]}"
+        
+        # Strategy 2: Check for direct file download
+        else:
+            # Check extension first
+            is_file_ext = url.lower().endswith(
+                (".pdf", ".docx", ".xlsx", ".csv", ".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".txt", ".ini", ".py")
+            )
+            
+            should_download_directly = is_file_ext
+            content_type = ""
+            
+            # If not obvious extension, check Content-Type via HEAD request
+            if not should_download_directly:
                 try:
-                    result = await knowledge_client.create_entity(entity.model_dump(), fast=False)
-                except Exception as e:
-                    if "409" in str(e) or "conflict" in str(e).lower() or "already exists" in str(e).lower():
-                        if entity.permalink:
-                            entity_id = await knowledge_client.resolve_entity(entity.permalink)
-                            result = await knowledge_client.update_entity(
-                                entity_id, entity.model_dump(), fast=False
-                            )
+                    async with httpx.AsyncClient() as client:
+                         head_resp = await client.head(url, follow_redirects=True, timeout=5.0)
+                         content_type = head_resp.headers.get("content-type", "").lower()
+                         if any(t in content_type for t in ["application/pdf", "wordprocessingml", "spreadsheet", "image/"]):
+                             should_download_directly = True
+                except Exception:
+                    pass # Ignore HEAD errors, fall back to crawl
+
+            if should_download_directly:
+                 logger.info(f"assimilate: detected direct file download for {url}")
+                 try:
+                     async with httpx.AsyncClient() as client:
+                         resp = await client.get(url, follow_redirects=True, timeout=30.0)
+                         resp.raise_for_status()
+                         content = resp.content
+                         if not content_type:
+                             content_type = resp.headers.get("content-type", "").lower()
+                         
+                         text = FileProcessor.extract_text_content(content, content_type, url)
+                         
+                         # Construct a single-page result
+                         data = {
+                            "pages": [{
+                                "url": str(resp.url),
+                                "text": text,
+                                "content_types": ["file_content"],
+                                "links": {"internal": [], "github": [], "external": []},
+                                "is_file": True
+                            }],
+                            "all_github_links": [],
+                            "all_external_links": [],
+                            "errors": []
+                         }
+                 except Exception as e:
+                     logger.error(f"Failed to download file {url}: {e}")
+                     # Fallback to crawl if download fails? No, probably report error.
+                     data = {"pages": [], "all_github_links": [], "all_external_links": [], "errors": [str(e)]}
+
+        # Strategy 3: Generic Crawl (Fallback)
+        if data is None:
+            logger.info(f"assimilate: starting generic crawl of {url}")
+            data = await crawl(url, max_depth=max_depth, max_pages=max_pages)
+
+        logger.info(
+            f"assimilate: processing complete — {len(data['pages'])} pages/files, "
+            f"{len(data['all_github_links'])} github links"
+        )
+
+        if not data["pages"]:
+            if data.get("errors"):
+                error_details = "\n".join(f"- {e}" for e in data["errors"])
+                return f"# Error\n\nCould not fetch content from {url}:\n\n{error_details}"
+            return f"# Error\n\nCould not fetch any content from {url}"
+
+        # Build notes
+        notes_to_write: list[tuple[str, str]] = []
+
+        overview = _build_overview_note(url, data)
+        notes_to_write.append(("Overview", overview))
+
+        agent_note = _build_agent_profiles_note(data)
+        if agent_note:
+            notes_to_write.append(("Agent Profiles", agent_note))
+
+        skills_note = _build_skills_rules_note(data)
+        if skills_note:
+            notes_to_write.append(("Skills and Rules", skills_note))
+
+        concepts_note = _build_concepts_note(data)
+        if concepts_note:
+            notes_to_write.append(("Concepts and Ideas", concepts_note))
+
+        soul_note = _build_soul_files_note(data)
+        if soul_note:
+            notes_to_write.append(("Soul Files", soul_note))
+
+        tools_note = _build_tools_functions_note(data)
+        if tools_note:
+            notes_to_write.append(("Tools and Functions", tools_note))
+
+        algo_note = _build_algorithms_note(data)
+        if algo_note:
+            notes_to_write.append(("Algorithms", algo_note))
+
+        decision_note = _build_decision_structure_note(data)
+        if decision_note:
+            notes_to_write.append(("Decision Structures", decision_note))
+
+        diagram_note = _build_functional_diagram_note(data)
+        if diagram_note:
+            notes_to_write.append(("Functional Diagram", diagram_note))
+
+        github_note = _build_github_links_note(data)
+        if github_note:
+            notes_to_write.append(("GitHub Links Index", github_note))
+
+        # Store notes in memopad
+        # explicitly controlled directory path
+        directory = domain  # No 'Assimilated/' prefix!
+
+        async with get_client() as client:
+            active_project = await get_active_project(client, project, context)
+
+            from memopad.mcp.clients import KnowledgeClient
+            knowledge_client = KnowledgeClient(client, active_project.external_id)
+
+            stored: list[str] = []
+            for title, content in notes_to_write:
+                entity = Entity(
+                    title=title,
+                    directory=directory,
+                    entity_type="note",
+                    content_type="text/markdown",
+                    content=content,
+                    entity_metadata={"tags": ["assimilated", domain]},
+                )
+                try:
+                    try:
+                        result = await knowledge_client.create_entity(entity.model_dump(), fast=False)
+                    except Exception as e:
+                        if "409" in str(e) or "conflict" in str(e).lower() or "already exists" in str(e).lower():
+                            if entity.permalink:
+                                entity_id = await knowledge_client.resolve_entity(entity.permalink)
+                                result = await knowledge_client.update_entity(
+                                    entity_id, entity.model_dump(), fast=False
+                                )
+                            else:
+                                raise
                         else:
                             raise
-                    else:
-                        raise
-                stored.append(f"- {title}: {result.permalink}")
-                logger.info(f"assimilate: stored note '{title}' at {result.permalink}")
-            except Exception as e:
-                stored.append(f"- {title}: FAILED ({e})")
-                logger.error(f"assimilate: failed to store note '{title}': {e}")
+                    stored.append(f"- {title}: {result.permalink}")
+                    logger.info(f"assimilate: stored note '{title}' at {result.permalink}")
+                except Exception as e:
+                    stored.append(f"- {title}: FAILED ({e})")
+                    logger.error(f"assimilate: failed to store note '{title}': {e}")
 
-    # Build summary
-    summary_lines = [
-        "# Assimilation Complete\n",
-        f"source: {url}",
-        f"project: {active_project.name}",
-        f"items_processed: {len(data['pages'])}",
-        f"github_links_found: {len(data['all_github_links'])}",
-        f"notes_stored: {len(notes_to_write)}",
-        f"directory: {directory}",
-        "\n## Notes Created\n",
-    ]
-    summary_lines.extend(stored)
+        # Build summary
+        summary_lines = [
+            "# Assimilation Complete\n",
+            f"source: {url}",
+            f"project: {active_project.name}",
+            f"items_processed: {len(data['pages'])}",
+            f"github_links_found: {len(data['all_github_links'])}",
+            f"notes_stored: {len(notes_to_write)}",
+            f"directory: {directory}",
+            "\n## Notes Created\n",
+        ]
+        summary_lines.extend(stored)
 
-    if data["all_github_links"]:
-        summary_lines.append(f"\n## GitHub Links ({len(data['all_github_links'])})\n")
-        for gh in data["all_github_links"][:20]:
-            summary_lines.append(f"- {gh}")
-        if len(data["all_github_links"]) > 20:
-            summary_lines.append(f"- ... and {len(data['all_github_links']) - 20} more (see GitHub Links Index note)")
+        if data["all_github_links"]:
+            summary_lines.append(f"\n## GitHub Links ({len(data['all_github_links'])})\n")
+            for gh in data["all_github_links"][:20]:
+                summary_lines.append(f"- {gh}")
+            if len(data["all_github_links"]) > 20:
+                summary_lines.append(f"- ... and {len(data['all_github_links']) - 20} more (see GitHub Links Index note)")
 
-    summary_result = "\n".join(summary_lines)
-    return add_project_metadata(summary_result, active_project.name)
+        summary_result = "\n".join(summary_lines)
+        return add_project_metadata(summary_result, active_project.name)
+
+    except Exception as e:
+        # Catch-all for any unhandled exceptions
+        logger.exception(f"assimilate: unhandled error for {url}")
+        return f"# Error\n\nAssimilation failed for {url}:\n\n**{type(e).__name__}**: {e}\n\nPlease check the MCP server logs for details."
+
