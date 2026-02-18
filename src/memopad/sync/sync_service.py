@@ -473,6 +473,8 @@ class SyncService:
         logger.debug(f"Found {current_count} files in directory")
 
         # Step 2: Determine scan strategy based on watermark and file count
+        file_paths_to_scan: List[str] | Dict[str, os.stat_result]
+
         if force_full:
             # User explicitly requested full scan → bypass watermark optimization
             scan_type = "full_forced"
@@ -520,24 +522,32 @@ class SyncService:
         logger.debug(f"Processing {len(file_paths_to_scan)} files with mtime-based comparison")
 
         # Step 3a: Batch fetch all entities for files being scanned (eliminates N+1 queries)
-        logger.debug(f"Batch fetching entities for {len(file_paths_to_scan)} files")
+        # Note: keys() works for both dict (full scan) and we pass list directly (incremental)
+        paths_for_db = list(file_paths_to_scan.keys()) if isinstance(file_paths_to_scan, dict) else file_paths_to_scan
+
+        logger.debug(f"Batch fetching entities for {len(paths_for_db)} files")
         db_entities = await self.entity_repository.get_by_file_paths_batch(
-            file_paths_to_scan, eager_load=False  # We only need basic info for scanning
+            paths_for_db, eager_load=False  # We only need basic info for scanning
         )
         db_entity_map = {entity.file_path: entity for entity in db_entities}
         logger.debug(f"Fetched {len(db_entities)} existing entities from database")
 
         # Step 3b: Process each file with in-memory lookup (no DB queries in loop)
-        for rel_path in file_paths_to_scan:
+        # Handle iteration for both list and dict
+        paths_iterator = file_paths_to_scan.keys() if isinstance(file_paths_to_scan, dict) else file_paths_to_scan
+
+        for rel_path in paths_iterator:
             scanned_paths.add(rel_path)
 
-            # Get file stats
-            abs_path = directory / rel_path
-            if not abs_path.exists():
-                # File was deleted between scan and now (race condition)
-                continue
-
-            stat_info = abs_path.stat()
+            # Get file stats - either from pre-computed dict (full scan) or stat() call (incremental)
+            if isinstance(file_paths_to_scan, dict):
+                stat_info = file_paths_to_scan[rel_path]
+            else:
+                abs_path = directory / rel_path
+                if not abs_path.exists():
+                    # File was deleted between scan and now (race condition)
+                    continue
+                stat_info = abs_path.stat()
 
             # O(1) dict lookup instead of database query
             db_entity = db_entity_map.get(rel_path)
@@ -643,13 +653,14 @@ class SyncService:
         return report
 
     async def sync_file(
-        self, path: str, new: bool = True
+        self, path: str, new: bool = True, cached_checksum: Optional[str] = None
     ) -> Tuple[Optional[Entity], Optional[str]]:
         """Sync a single file with circuit breaker protection.
 
         Args:
             path: Path to file to sync
             new: Whether this is a new file
+            cached_checksum: Pre-calculated checksum if available
 
         Returns:
             Tuple of (entity, checksum) or (None, None) if sync fails or file is skipped
@@ -659,15 +670,20 @@ class SyncService:
             logger.warning(f"Skipping file due to repeated failures: {path}")
             return None, None
 
+        # Invalidate metadata cache to ensure we get fresh timestamps
+        self.file_service.invalidate_metadata_cache(path)
+        # Invalidate permalink cache to ensure we don't use stale permalinks if conflicts arose
+        self.entity_service.invalidate_permalink_cache(path)
+
         try:
             logger.debug(
                 f"Syncing file path={path} is_new={new} is_markdown={self.file_service.is_markdown(path)}"
             )
 
             if self.file_service.is_markdown(path):
-                entity, checksum = await self.sync_markdown_file(path, new)
+                entity, checksum = await self.sync_markdown_file(path, new, cached_checksum)
             else:
-                entity, checksum = await self.sync_regular_file(path, new)
+                entity, checksum = await self.sync_regular_file(path, new, cached_checksum)
 
             if entity is not None:
                 await self.search_service.index_entity(entity)
@@ -708,12 +724,15 @@ class SyncService:
 
             return None, None
 
-    async def sync_markdown_file(self, path: str, new: bool = True) -> Tuple[Optional[Entity], str]:
+    async def sync_markdown_file(
+        self, path: str, new: bool = True, cached_checksum: Optional[str] = None
+    ) -> Tuple[Optional[Entity], str]:
         """Sync a markdown file with full processing.
 
         Args:
             path: Path to markdown file
             new: Whether this is a new file
+            cached_checksum: Pre-calculated checksum if available
 
         Returns:
             Tuple of (entity, checksum)
@@ -754,6 +773,8 @@ class SyncService:
 
                 entity_markdown.frontmatter.metadata["permalink"] = permalink
                 await self.file_service.update_frontmatter(path, {"permalink": permalink})
+                # Invalidate cached checksum because file content changed
+                cached_checksum = None
 
         # Create/update entity and relations in one path
         logger.debug(f"{'Creating' if new else 'Updating'} entity from markdown, path={path}")
@@ -764,7 +785,10 @@ class SyncService:
         # After updating relations, we need to compute the checksum again
         # This is necessary for files with wikilinks to ensure consistent checksums
         # after relation processing is complete
-        final_checksum = await self.file_service.compute_checksum(path)
+        if cached_checksum:
+            final_checksum = cached_checksum
+        else:
+            final_checksum = await self.file_service.compute_checksum(path)
 
         # Update checksum, timestamps, and file metadata from file system
         # Store mtime/size for efficient change detection in future scans
@@ -789,17 +813,24 @@ class SyncService:
         # Return the final checksum to ensure everything is consistent
         return entity, final_checksum
 
-    async def sync_regular_file(self, path: str, new: bool = True) -> Tuple[Optional[Entity], str]:
+    async def sync_regular_file(
+        self, path: str, new: bool = True, cached_checksum: Optional[str] = None
+    ) -> Tuple[Optional[Entity], str]:
         """Sync a non-markdown file with basic tracking.
 
         Args:
             path: Path to file
             new: Whether this is a new file
+            cached_checksum: Pre-calculated checksum if available
 
         Returns:
             Tuple of (entity, checksum)
         """
-        checksum = await self.file_service.compute_checksum(path)
+        if cached_checksum:
+            checksum = cached_checksum
+        else:
+            checksum = await self.file_service.compute_checksum(path)
+
         if new:
             # Generate permalink from path - skip conflict checks during bulk sync
             await self.entity_service.resolve_permalink(path, skip_conflict_check=True)
@@ -970,6 +1001,9 @@ class SyncService:
                 and not self.app_config.disable_permalinks
                 and self.file_service.is_markdown(new_path)
             ):
+                # Invalidate cache for new path to ensure we don't get stale results
+                self.entity_service.invalidate_permalink_cache(new_path)
+
                 # generate new permalink value - skip conflict checks during bulk sync
                 new_permalink = await self.entity_service.resolve_permalink(
                     new_path, skip_conflict_check=True
@@ -1192,7 +1226,9 @@ class SyncService:
                 f"This will cause slow syncs on large projects!"
             )
             # Fallback to full scan
-            return await self._scan_directory_full(directory)
+            # We convert the dict to list to match expected return type
+            full_scan_result = await self._scan_directory_full(directory)
+            return list(full_scan_result.keys())
 
         # Convert absolute paths to relative and filter through ignore patterns
         file_paths = []
@@ -1215,22 +1251,23 @@ class SyncService:
 
         return file_paths
 
-    async def _scan_directory_full(self, directory: Path) -> List[str]:
-        """Full directory scan returning all file paths.
+    async def _scan_directory_full(self, directory: Path) -> Dict[str, os.stat_result]:
+        """Full directory scan returning all file paths with stat info.
 
         Uses scan_directory() which respects .bmignore patterns.
+        Returns a dict mapping relative path to os.stat_result to avoid redundant stat calls.
 
         Args:
             directory: Directory to scan
 
         Returns:
-            List of relative file paths (respects .bmignore)
+            Dict of relative file paths to stat info (respects .bmignore)
         """
-        file_paths = []
-        async for file_path_str, _ in self.scan_directory(directory):
+        files = {}
+        async for file_path_str, stat_info in self.scan_directory(directory):
             rel_path = Path(file_path_str).relative_to(directory).as_posix()
-            file_paths.append(rel_path)
-        return file_paths
+            files[rel_path] = stat_info
+        return files
 
     async def scan_directory(self, directory: Path) -> AsyncIterator[Tuple[str, os.stat_result]]:
         """Stream files from directory using aiofiles.os.scandir() with cached stat info.

@@ -135,8 +135,8 @@ class EntityService(BaseService[EntityModel]):
         cache_key = f"path:{file_path_str.lower()}"
         
         # Check cache first (warm path - avoid database queries)
-        if cache_key in self._permalink_cache:
-            cached_permalink = self._permalink_cache[cache_key]
+        cached_permalink = self._permalink_cache.get(cache_key)
+        if cached_permalink is not None:
             logger.trace(f"Permalink cache hit: {file_path_str} -> {cached_permalink}")
             return cached_permalink
 
@@ -201,10 +201,16 @@ class EntityService(BaseService[EntityModel]):
         
         Call this when a file is moved, deleted, or title changes.
         """
-        # 2Q cache doesn't support selective invalidation easily
-        # For now, clear entire cache (or could track keys separately)
-        self._permalink_cache.clear()
-        logger.debug("Cleared permalink cache after file change")
+        file_path_str = Path(file_path).as_posix()
+        cache_key = f"path:{file_path_str.lower()}"
+
+        # Use delete method if available, otherwise clear
+        if hasattr(self._permalink_cache, "delete"):
+            self._permalink_cache.delete(cache_key)
+            logger.trace(f"Invalidated permalink cache: {cache_key}")
+        else:
+            self._permalink_cache.clear()
+            logger.debug("Cleared permalink cache after file change")
     
     async def warm_permalink_cache(self, top_n: int = 1000) -> int:
         """Pre-load most frequently accessed permalinks into cache.

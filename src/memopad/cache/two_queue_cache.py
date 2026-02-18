@@ -128,6 +128,24 @@ class TwoQueueCache(Generic[K, V]):
         self.a1[key] = value
         self._evict_if_needed()
         logger.trace(f"2Q insert (A1): {key}")
+
+    def delete(self, key: K) -> None:
+        """Remove item from cache.
+
+        Args:
+            key: Cache key to remove
+        """
+        deleted = False
+        if key in self.a1:
+            del self.a1[key]
+            deleted = True
+
+        if key in self.am:
+            del self.am[key]
+            deleted = True
+
+        if deleted:
+            logger.trace(f"2Q delete: {key}")
     
     def _evict_if_needed(self) -> None:
         """Evict entries if queues exceed capacity."""
