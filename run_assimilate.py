@@ -17,7 +17,7 @@ async def run():
     from memopad.schemas.base import Entity
     from urllib.parse import urlparse
 
-    url = 'https://github.com/openclaw/openclaw'
+    url = 'https://github.com/jacob-bd/universal-skills-manager'
     project = 'main'
 
     print(f'Is github repo: {_is_github_repo(url)}')

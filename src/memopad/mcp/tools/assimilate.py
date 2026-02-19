@@ -10,7 +10,16 @@ import re
 import shutil
 import tempfile
 import glob
+import stat
+import errno
 from html.parser import HTMLParser
+
+def handle_remove_readonly(func, path, exc):
+    """Error handler for shutil.rmtree to clean up read-only files (common with git)."""
+    excvalue = exc[1]
+    if func in (os.rmdir, os.remove, os.unlink) and excvalue.errno == errno.EACCES:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
 from typing import Optional
 from urllib.parse import urljoin, urlparse
 
@@ -425,10 +434,15 @@ async def _clone_github_repo(url: str, max_files: int = 0) -> dict:
         # Why: Git may not be installed, clone may fail, or operation may timeout
         # Outcome: Return descriptive error message instead of crashing MCP tool
         try:
+            # Disable interactive prompts (prevent hanging on private repos)
+            env = os.environ.copy()
+            env["GIT_TERMINAL_PROMPT"] = "0"
+            
             process = await asyncio.create_subprocess_exec(
                 "git", "clone", "--depth", "1", url, temp_dir,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                env=env
             )
             # 5 minute timeout for large repositories
             _, stderr = await asyncio.wait_for(process.communicate(), timeout=300.0)
@@ -545,7 +559,8 @@ async def _clone_github_repo(url: str, max_files: int = 0) -> dict:
         empty_result["errors"] = [error_msg]
         return empty_result
     finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        # Use robust error handler for Windows git files
+        shutil.rmtree(temp_dir, onerror=handle_remove_readonly)
 
 # ---------------------------------------------------------------------------
 # Crawler
@@ -1181,10 +1196,15 @@ async def assimilate(
                     except Exception as e:
                         if "409" in str(e) or "conflict" in str(e).lower() or "already exists" in str(e).lower():
                             if entity.permalink:
-                                entity_id = await knowledge_client.resolve_entity(entity.permalink)
-                                result = await knowledge_client.update_entity(
-                                    entity_id, entity.model_dump(), fast=False
-                                )
+                                try:
+                                    entity_id = await knowledge_client.resolve_entity(entity.permalink)
+                                    result = await knowledge_client.update_entity(
+                                        entity_id, entity.model_dump(), fast=False
+                                    )
+                                    logger.info(f"assimilate: updated existing note '{title}' at {result.permalink}")
+                                except Exception as update_err:
+                                    logger.error(f"assimilate: update failed for '{title}': {update_err}")
+                                    raise update_err
                             else:
                                 raise
                         else:
