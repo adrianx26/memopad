@@ -220,6 +220,26 @@ DECISION_PATTERNS = re.compile(
 )
 
 
+# ---------------------------------------------------------------------------
+# Safety limits for content processing
+# ---------------------------------------------------------------------------
+
+# Max bytes to read per file when cloning a repo (1GB)
+MAX_FILE_READ_SIZE = 1_000_000_000
+
+# Default cap on files to process from a repo (when max_files=0/unlimited)
+DEFAULT_MAX_FILES = 2_000
+
+# Safety margin below Entity MAX_CONTENT_LENGTH (50M) for note content
+MAX_NOTE_CONTENT = 49_000_000
+
+
+def _safe_truncate(content: str | None, max_len: int = MAX_NOTE_CONTENT) -> str | None:
+    """Truncate content to max_len with a marker if it exceeds the limit."""
+    if content and len(content) > max_len:
+        return content[:max_len] + "\n\n[... content truncated to fit size limit ...]"
+    return content
+
 
 # ---------------------------------------------------------------------------
 # File Processing Helpers
@@ -466,9 +486,9 @@ async def _clone_github_repo(url: str, max_files: int = 0) -> dict:
             
         found_files.sort(key=priority)
         
-        # Limit processed files
-        if max_files > 0:
-            found_files = found_files[:max_files]
+        # Limit processed files — always cap even when max_files=0 (unlimited)
+        effective_max = max_files if max_files > 0 else DEFAULT_MAX_FILES
+        found_files = found_files[:effective_max]
         
         for file_path in found_files:
             try:
@@ -476,9 +496,17 @@ async def _clone_github_repo(url: str, max_files: int = 0) -> dict:
                 # Skip .git directory
                 if ".git" in rel_path.split(os.sep):
                     continue
+
+                # Log large files but do not skip them
+                try:
+                    file_size = os.path.getsize(file_path)
+                    if file_size > 10_000_000:  # 10MB
+                        logger.info(f"assimilate: reading large file ({file_size} bytes): {rel_path}")
+                except OSError:
+                    pass
                     
                 with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                    content = f.read()
+                    content = f.read(MAX_FILE_READ_SIZE)
                     
                 if not content.strip():
                     continue
@@ -674,7 +702,7 @@ def _build_overview_note(start_url: str, data: dict) -> str:
         lines.append(f"\n## Main Content Summary ({readme['url']})\n")
         lines.append(first_text)
 
-    return "\n".join(lines)
+    return _safe_truncate("\n".join(lines))
 
 
 def _build_agent_profiles_note(data: dict) -> str | None:
@@ -692,7 +720,7 @@ def _build_agent_profiles_note(data: dict) -> str | None:
 
     header = "# Agent Profiles & System Prompts\n\n"
     header += "- [category] Extracted agent profiles, system prompts, and AI instructions\n\n"
-    return header + "\n".join(sections)
+    return _safe_truncate(header + "\n".join(sections))
 
 
 def _build_skills_rules_note(data: dict) -> str | None:
@@ -709,7 +737,7 @@ def _build_skills_rules_note(data: dict) -> str | None:
 
     header = "# Skills, Rules & Workflows\n\n"
     header += "- [category] Extracted skills definitions, rules files, and workflow patterns\n\n"
-    return header + "\n".join(sections)
+    return _safe_truncate(header + "\n".join(sections))
 
 
 def _build_concepts_note(data: dict) -> str | None:
@@ -726,7 +754,7 @@ def _build_concepts_note(data: dict) -> str | None:
 
     header = "# Concepts & Ideas\n\n"
     header += "- [category] Extracted architectural concepts, design patterns, and ideas\n\n"
-    return header + "\n".join(sections)
+    return _safe_truncate(header + "\n".join(sections))
 
 
 def _build_soul_files_note(data: dict) -> str | None:
@@ -743,7 +771,7 @@ def _build_soul_files_note(data: dict) -> str | None:
 
     header = "# Soul Files & Identity\n\n"
     header += "- [category] Extracted soul files, identity definitions, personality, values, and purpose statements\n\n"
-    return header + "\n".join(sections)
+    return _safe_truncate(header + "\n".join(sections))
 
 
 def _build_tools_functions_note(data: dict) -> str | None:
@@ -760,7 +788,7 @@ def _build_tools_functions_note(data: dict) -> str | None:
 
     header = "# Tools & Functions\n\n"
     header += "- [category] Extracted tool definitions, function registrations, API endpoints, and handlers\n\n"
-    return header + "\n".join(sections)
+    return _safe_truncate(header + "\n".join(sections))
 
 
 def _build_algorithms_note(data: dict) -> str | None:
@@ -777,7 +805,7 @@ def _build_algorithms_note(data: dict) -> str | None:
 
     header = "# Algorithms & Implementations\n\n"
     header += "- [category] Extracted algorithm implementations, data structures, and computational logic\n\n"
-    return header + "\n".join(sections)
+    return _safe_truncate(header + "\n".join(sections))
 
 
 def _build_decision_structure_note(data: dict) -> str | None:
@@ -794,7 +822,7 @@ def _build_decision_structure_note(data: dict) -> str | None:
 
     header = "# Decision Structures\n\n"
     header += "- [category] Extracted decision trees, state machines, routing logic, and control flow patterns\n\n"
-    return header + "\n".join(sections)
+    return _safe_truncate(header + "\n".join(sections))
 
 
 def _build_functional_diagram_note(data: dict) -> str | None:
@@ -903,7 +931,7 @@ def _build_functional_diagram_note(data: dict) -> str | None:
     ]
     lines.extend(legend_lines)
 
-    return "\n".join(lines)
+    return _safe_truncate("\n".join(lines))
 
 
 def _build_github_links_note(data: dict) -> str | None:
@@ -918,7 +946,10 @@ def _build_github_links_note(data: dict) -> str | None:
     for link in data["all_github_links"]:
         lines.append(f"- {link}")
 
-    return "\n".join(lines)
+    return _safe_truncate("\n".join(lines))
+
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -1134,15 +1165,17 @@ async def assimilate(
 
             stored: list[str] = []
             for title, content in notes_to_write:
-                entity = Entity(
-                    title=title,
-                    directory=directory,
-                    entity_type="note",
-                    content_type="text/markdown",
-                    content=content,
-                    entity_metadata={"tags": ["assimilated", domain]},
-                )
                 try:
+                    # Truncate content as defense-in-depth before Entity validation
+                    safe_content = _safe_truncate(content)
+                    entity = Entity(
+                        title=title,
+                        directory=directory,
+                        entity_type="note",
+                        content_type="text/markdown",
+                        content=safe_content,
+                        entity_metadata={"tags": ["assimilated", domain]},
+                    )
                     try:
                         result = await knowledge_client.create_entity(entity.model_dump(), fast=False)
                     except Exception as e:
