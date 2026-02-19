@@ -1,6 +1,51 @@
 ﻿"""MCP server command with streamable HTTP transport."""
 
+# -----------------------------------------------------------------------------
+# Windows Event Loop Fix (MUST be before any other imports)
+# -----------------------------------------------------------------------------
+# On Windows, anyio auto-selects 'winloop' (Windows port of uvloop) as the
+# event loop backend, which has known issues with stdio operations causing:
+# - "IndexError: pop from an empty deque" during event loop cleanup
+# - Crashes in run_forever -> _run_once -> popleft
+#
+# This fix MUST be applied before any imports that might trigger anyio to be
+# imported (directly or indirectly), as anyio caches its backend selection on
+# first import.
+#
+# The fix uses multiple approaches:
+# 1. Set ANYIO_BACKEND=asyncio to force anyio to use standard asyncio
+# 2. Set WindowsSelectorEventLoopPolicy for better stdio/pipe stability
+# 3. Create a fake winloop module that raises ImportError to prevent anyio
+#    from using winloop even if it's installed
+# -----------------------------------------------------------------------------
+
 import os
+import sys
+
+if os.name == "nt":  # Windows-specific fix
+    # Force anyio to use standard asyncio backend instead of winloop
+    # This must be set before anyio is imported
+    os.environ.setdefault("ANYIO_BACKEND", "asyncio")
+
+    # Force SelectorEventLoopPolicy which is more stable for stdio/pipes on Windows
+    # This fixes the crash seen in run_forever -> _run_once -> popleft
+    import asyncio
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    # Create a fake winloop module that raises ImportError when any attribute is accessed
+    # This prevents anyio from using winloop even if it's installed
+    class _FakeWinloop:
+        """Fake module that raises ImportError for any attribute access."""
+        def __getattr__(self, name):
+            raise ImportError(f"winloop is disabled on this system due to stdio compatibility issues")
+    
+    # Install the fake module before anyio can import the real one
+    sys.modules["winloop"] = _FakeWinloop()
+
+# -----------------------------------------------------------------------------
+# Now safe to import other modules (anyio will be imported through these)
+# -----------------------------------------------------------------------------
+
 import typer
 from typing import Optional
 
@@ -38,7 +83,6 @@ def mcp(
 
     Initialization, file sync, and cleanup are handled by the MCP server's lifespan.
     """
-
 
     # Initialize logging for MCP (file only, stdout breaks protocol)
     init_mcp_logging()
