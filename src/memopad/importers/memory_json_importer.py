@@ -1,4 +1,4 @@
-﻿"""Memory JSON import service for Basic Memory."""
+﻿"""Memory JSON import service for Memopad."""
 
 import logging
 from typing import Any, Dict, List, Optional

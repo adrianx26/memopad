@@ -1,4 +1,4 @@
-﻿"""Claude projects import service for Basic Memory."""
+﻿"""Claude projects import service for Memopad."""
 
 import logging
 from typing import Any, Dict, Optional
@@ -91,7 +91,7 @@ class ClaudeProjectsImporter(Importer[ProjectImportResult]):
     def _format_project_markdown(
         self, project: Dict[str, Any], doc: Dict[str, Any], destination_folder: str = ""
     ) -> EntityMarkdown:
-        """Format a project document as a Basic Memory entity.
+        """Format a project document as a Memopad entity.
 
         Args:
             project: Project data.
@@ -138,7 +138,7 @@ class ClaudeProjectsImporter(Importer[ProjectImportResult]):
     def _format_prompt_markdown(
         self, project: Dict[str, Any], destination_folder: str = ""
     ) -> Optional[EntityMarkdown]:
-        """Format project prompt template as a Basic Memory entity.
+        """Format project prompt template as a Memopad entity.
 
         Args:
             project: Project data.

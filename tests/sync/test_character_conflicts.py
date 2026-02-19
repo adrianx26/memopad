@@ -190,7 +190,7 @@ class TestSyncConflictHandling:
         ---
         type: knowledge  
         ---
-        # Basic Memory Bug
+        # Memopad Bug
         This file has spaces in the name.
         """)
 
@@ -199,7 +199,7 @@ class TestSyncConflictHandling:
         ---
         type: knowledge
         ---
-        # Basic Memory Bug Report
+        # Memopad Bug Report
         This file has hyphens in the name.
         """)
 

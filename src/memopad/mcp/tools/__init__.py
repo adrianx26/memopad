@@ -1,4 +1,4 @@
-﻿"""MCP tools for Basic Memory.
+﻿"""MCP tools for Memopad.
 
 This package provides the complete set of tools for interacting with
 Basic Memory through the MCP protocol. Importing this module registers

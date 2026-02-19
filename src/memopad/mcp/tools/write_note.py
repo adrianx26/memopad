@@ -1,4 +1,4 @@
-﻿"""Write note tool for Basic Memory MCP server."""
+﻿"""Write note tool for Memopad MCP server."""
 
 from typing import List, Union, Optional
 

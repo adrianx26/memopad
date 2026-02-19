@@ -1,7 +1,7 @@
-﻿"""Utility functions for making HTTP requests in Basic Memory MCP tools.
+﻿"""Utility functions for making HTTP requests in Memopad MCP tools.
 
 These functions provide a consistent interface for making HTTP requests
-to the Basic Memory API, with improved error handling and logging.
+to the Memopad API, with improved error handling and logging.
 """
 
 import typing

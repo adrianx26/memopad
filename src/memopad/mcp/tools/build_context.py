@@ -1,4 +1,4 @@
-﻿"""Build context tool for Basic Memory MCP server."""
+﻿"""Build context tool for Memopad MCP server."""
 
 from typing import Optional
 

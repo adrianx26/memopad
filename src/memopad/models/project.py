@@ -1,4 +1,4 @@
-﻿"""Project model for Basic Memory."""
+﻿"""Project model for Memopad."""
 
 import uuid
 from datetime import datetime, timezone
@@ -21,7 +21,7 @@ from memopad.utils import generate_permalink
 
 
 class Project(Base):
-    """Project model for Basic Memory.
+    """Project model for Memopad.
 
     A project represents a collection of knowledge entities that are grouped together.
     Projects are stored in the app-level database and provide context for all knowledge

@@ -1,12 +1,12 @@
-# AI Assistant Guide for Basic Memory
+# AI Assistant Guide for Memopad
 
-Quick reference for using Basic Memory tools effectively through MCP.
+Quick reference for using Memopad tools effectively through MCP.
 
-**For comprehensive coverage**: See the [Extended AI Assistant Guide](https://github.com/basicmachines-co/basic-memory/blob/main/docs/ai-assistant-guide-extended.md) with detailed examples, advanced patterns, and self-contained sections.
+**For comprehensive coverage**: See the [Extended AI Assistant Guide](https://github.com/adrianx26/memopad/blob/main/docs/ai-assistant-guide-extended.md) with detailed examples, advanced patterns, and self-contained sections.
 
 ## Overview
 
-Basic Memory creates a semantic knowledge graph from markdown files. Focus on building rich connections between notes.
+Memopad creates a semantic knowledge graph from markdown files. Focus on building rich connections between notes.
 
 - **Local-First**: Plain text files on user's computer
 - **Persistent**: Knowledge survives across sessions
@@ -223,10 +223,10 @@ response = await write_note(
 ### 5. Recording Context
 
 **Ask permission:**
-> "Would you like me to save our discussion about [topic] to Basic Memory?"
+> "Would you like me to save our discussion about [topic] to Memopad?"
 
 **Confirm when done:**
-> "I've saved our discussion to Basic Memory."
+> "I've saved our discussion to Memopad."
 
 **What to record:**
 - Decisions and rationales
@@ -277,7 +277,3 @@ context = await build_context(url=f"memory://{results[0].permalink}", project="m
 - `memory://folder/title` - By folder + title
 - `memory://permalink` - By permalink
 - `memory://folder/*` - All in folder
-
-For full documentation: https://docs.basicmemory.com
-
-Built with ♥️ by Basic Machines

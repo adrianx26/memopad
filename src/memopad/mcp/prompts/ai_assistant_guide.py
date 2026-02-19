@@ -8,18 +8,19 @@ from loguru import logger
 @mcp.resource(
     uri="memory://ai_assistant_guide",
     name="ai assistant guide",
-    description="Give an AI assistant guidance on how to use Basic Memory tools effectively",
+    description="Give an AI assistant guidance on how to use Memopad tools effectively",
 )
 def ai_assistant_guide() -> str:
-    """Return a concise guide on Basic Memory tools and how to use them.
+    """Return a concise guide on Memopad tools and how to use them.
 
     Dynamically adapts instructions based on configuration:
     - Default project mode: Simplified instructions with automatic project
     - Regular mode: Project discovery and selection guidance
     - CLI constraint mode: Single project constraint information
 
+    
     Returns:
-        A focused guide on Basic Memory usage.
+        A focused guide on Memopad usage.
     """
     logger.info("Loading AI assistant guide resource")
 

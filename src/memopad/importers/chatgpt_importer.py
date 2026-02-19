@@ -1,4 +1,4 @@
-﻿"""ChatGPT import service for Basic Memory."""
+﻿"""ChatGPT import service for Memopad."""
 
 import logging
 from datetime import datetime
@@ -85,7 +85,7 @@ class ChatGPTImporter(Importer[ChatImportResult]):
     def _format_chat_content(
         self, folder: str, conversation: Dict[str, Any]
     ) -> EntityMarkdown:  # pragma: no cover
-        """Convert chat conversation to Basic Memory entity.
+        """Convert chat conversation to Memopad entity.
 
         Args:
             folder: Destination folder name.

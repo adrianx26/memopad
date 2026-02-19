@@ -1,4 +1,4 @@
-﻿"""Recent activity tool for Basic Memory MCP server."""
+﻿"""Recent activity tool for Memopad MCP server."""
 
 from datetime import timezone
 from typing import List, Union, Optional

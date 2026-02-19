@@ -643,13 +643,14 @@ class SyncService:
         return report
 
     async def sync_file(
-        self, path: str, new: bool = True
+        self, path: str, new: bool = True, cached_checksum: Optional[str] = None
     ) -> Tuple[Optional[Entity], Optional[str]]:
         """Sync a single file with circuit breaker protection.
 
         Args:
             path: Path to file to sync
             new: Whether this is a new file
+            cached_checksum: Optional pre-computed checksum to optimize IO
 
         Returns:
             Tuple of (entity, checksum) or (None, None) if sync fails or file is skipped
@@ -665,9 +666,13 @@ class SyncService:
             )
 
             if self.file_service.is_markdown(path):
-                entity, checksum = await self.sync_markdown_file(path, new)
+                entity, checksum = await self.sync_markdown_file(
+                    path, new, cached_checksum=cached_checksum
+                )
             else:
-                entity, checksum = await self.sync_regular_file(path, new)
+                entity, checksum = await self.sync_regular_file(
+                    path, new, cached_checksum=cached_checksum
+                )
 
             if entity is not None:
                 await self.search_service.index_entity(entity)
@@ -708,7 +713,9 @@ class SyncService:
 
             return None, None
 
-    async def sync_markdown_file(self, path: str, new: bool = True) -> Tuple[Optional[Entity], str]:
+    async def sync_markdown_file(
+        self, path: str, new: bool = True, cached_checksum: Optional[str] = None
+    ) -> Tuple[Optional[Entity], str]:
         """Sync a markdown file with full processing.
 
         Args:
@@ -789,17 +796,23 @@ class SyncService:
         # Return the final checksum to ensure everything is consistent
         return entity, final_checksum
 
-    async def sync_regular_file(self, path: str, new: bool = True) -> Tuple[Optional[Entity], str]:
+    async def sync_regular_file(
+        self, path: str, new: bool = True, cached_checksum: Optional[str] = None
+    ) -> Tuple[Optional[Entity], str]:
         """Sync a non-markdown file with basic tracking.
 
         Args:
             path: Path to file
             new: Whether this is a new file
+            cached_checksum: Optional pre-computed checksum from scan
 
         Returns:
             Tuple of (entity, checksum)
         """
-        checksum = await self.file_service.compute_checksum(path)
+        if cached_checksum:
+            checksum = cached_checksum
+        else:
+            checksum = await self.file_service.compute_checksum(path)
         if new:
             # Generate permalink from path - skip conflict checks during bulk sync
             await self.entity_service.resolve_permalink(path, skip_conflict_check=True)

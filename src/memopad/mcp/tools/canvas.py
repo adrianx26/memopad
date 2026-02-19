@@ -1,4 +1,4 @@
-﻿"""Canvas creation tool for Basic Memory MCP server.
+﻿"""Canvas creation tool for Memopad MCP server.
 
 This tool creates Obsidian canvas files (.canvas) using the JSON Canvas 1.0 spec.
 """

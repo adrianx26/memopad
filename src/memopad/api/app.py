@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):  # pragma: no cover
     set_container(container)
     app.state.container = container
 
-    logger.info(f"Starting Basic Memory API (mode={container.mode.name})")
+    logger.info(f"Starting Memopad API (mode={container.mode.name})")
 
     await initialize_app(container.config)
 
@@ -57,7 +57,7 @@ async def lifespan(app: FastAPI):  # pragma: no cover
     yield
 
     # Shutdown - coordinator handles clean task cancellation
-    logger.info("Shutting down Basic Memory API")
+    logger.info("Shutting down Memopad API")
     await sync_coordinator.stop()
 
     await container.shutdown_database()
@@ -65,7 +65,7 @@ async def lifespan(app: FastAPI):  # pragma: no cover
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="Basic Memory API",
+    title="Memopad API",
     description="Knowledge graph API for memopad",
     version=version,
     lifespan=lifespan,

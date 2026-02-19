@@ -1,4 +1,4 @@
-"""Tests for the Basic Memory CLI tools.
+"""Tests for the Memopad CLI tools.
 
 These tests verify CLI tool functionality. Some tests that previously used
 subprocess have been removed due to a pre-existing CLI architecture issue

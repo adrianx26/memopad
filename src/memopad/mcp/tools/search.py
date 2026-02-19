@@ -1,4 +1,4 @@
-﻿"""Search tools for Basic Memory MCP server."""
+﻿"""Search tools for Memopad MCP server."""
 
 from textwrap import dedent
 from typing import List, Optional, Dict, Any

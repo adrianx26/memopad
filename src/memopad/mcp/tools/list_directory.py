@@ -1,4 +1,4 @@
-﻿"""List directory tool for Basic Memory MCP server."""
+﻿"""List directory tool for Memopad MCP server."""
 
 from typing import Optional
 

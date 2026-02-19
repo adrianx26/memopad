@@ -1,4 +1,4 @@
-﻿"""Project info tool for Basic Memory MCP server."""
+﻿"""Project info tool for Memopad MCP server."""
 
 from typing import Optional
 
@@ -14,15 +14,15 @@ from memopad.schemas import ProjectInfoResponse
 
 @mcp.resource(
     uri="memory://{project}/info",
-    description="Get information and statistics about the current Basic Memory project.",
+    description="Get information and statistics about the current Memopad project.",
 )
 async def project_info(
     project: Optional[str] = None, context: Context | None = None
 ) -> ProjectInfoResponse:
-    """Get comprehensive information about the current Basic Memory project.
+    """Get comprehensive information about the current Memopad project.
 
     This tool provides detailed statistics and status information about your
-    Basic Memory project, including:
+    Memopad project, including:
 
     - Project configuration
     - Entity, observation, and relation counts
@@ -31,7 +31,7 @@ async def project_info(
     - System status (database, watch service, version)
 
     Use this tool to:
-    - Verify your Basic Memory installation is working correctly
+    - Verify your Memopad installation is working correctly
     - Get insights into your knowledge base structure
     - Monitor growth and activity over time
     - Identify potential issues like unresolved relations
@@ -56,7 +56,7 @@ async def project_info(
         print(f"Total entities: {info.statistics.total_entities}")
 
         # Check system status
-        print(f"Basic Memory version: {info.system.version}")
+        print(f"Memopad version: {info.system.version}")
     """
     logger.info("Getting project info")
 

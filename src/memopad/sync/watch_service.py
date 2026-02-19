@@ -1,4 +1,4 @@
-﻿"""Watch service for Basic Memory."""
+﻿"""Watch service for Memopad."""
 
 import asyncio
 import os

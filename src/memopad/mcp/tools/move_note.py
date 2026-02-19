@@ -1,4 +1,4 @@
-﻿"""Move note tool for Basic Memory MCP server."""
+﻿"""Move note tool for Memopad MCP server."""
 
 from textwrap import dedent
 from typing import Optional
@@ -263,7 +263,7 @@ This usually means the database and filesystem are out of sync.
 
 ## Troubleshooting steps:
 ```
-# Check if note exists in Basic Memory
+# Check if note exists in Memopad
 read_note("{identifier}")
 
 # If it exists, the file is missing on disk - send a message to support@xxx
@@ -554,7 +554,7 @@ move_note("path/to/file.md", "{destination_path}/file.md")
                 move_note("{identifier}", "{destination_path}.{source_ext}")
                 ```
 
-                All examples in Basic Memory expect file extensions to be explicitly provided.
+                All examples in Memopad expect file extensions to be explicitly provided.
                 """).strip()
 
         # Get the source entity to check its file extension

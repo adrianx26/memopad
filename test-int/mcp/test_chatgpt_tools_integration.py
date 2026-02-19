@@ -2,7 +2,7 @@
 Integration tests for ChatGPT-compatible MCP tools.
 
 Tests the complete flow of search and fetch tools designed for ChatGPT integration,
-ensuring they properly wrap Basic Memory's MCP tools and return OpenAI-compatible
+ensuring they properly wrap Memopad's MCP tools and return OpenAI-compatible
 MCP content array format.
 """
 
