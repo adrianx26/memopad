@@ -416,28 +416,21 @@ class SearchService:
     async def handle_delete(self, entity: Entity):
         """Handle complete entity deletion from search index including observations and relations.
 
-        This replicates the logic from sync_service.handle_delete() to properly clean up
-        all search index entries for an entity and its related data.
+        Deletes all search index entries associated with the entity ID in a single query.
         """
         logger.debug(
-            f"Cleaning up search index for entity_id={entity.id}, file_path={entity.file_path}, "
-            f"observations={len(entity.observations)}, relations={len(entity.outgoing_relations)}"
+            f"Cleaning up search index for entity_id={entity.id}, file_path={entity.file_path}"
         )
 
-        # Clean up search index - same logic as sync_service.handle_delete()
-        permalinks = (
-            [entity.permalink]
-            + [o.permalink for o in entity.observations]
-            + [r.permalink for r in entity.outgoing_relations]
-        )
+        # Optimization: Delete all search index entries for this entity ID in one query
+        # This includes entity, observations, and outgoing relations
+        await self.delete_by_entity_id(entity.id)
 
-        logger.debug(
-            f"Deleting search index entries for entity_id={entity.id}, "
-            f"index_entries={len(permalinks)}"
-        )
-
-        for permalink in permalinks:
-            if permalink:
-                await self.delete_by_permalink(permalink)
-            else:
-                await self.delete_by_entity_id(entity.id)
+        # Also delete incoming relations from search index
+        # These are indexed under the source entity's ID, so delete_by_entity_id won't remove them.
+        # We must delete them individually by permalink.
+        # Note: This relies on entity.incoming_relations being loaded.
+        if hasattr(entity, "incoming_relations"):
+            for rel in entity.incoming_relations:
+                if rel.permalink:
+                    await self.delete_by_permalink(rel.permalink)

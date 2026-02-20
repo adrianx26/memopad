@@ -102,6 +102,13 @@ class TwoQueueCache(Generic[K, V]):
         logger.trace(f"2Q miss: {key}")
         return None
     
+    def __getitem__(self, key: K) -> V:
+        """Get value from cache (subscript access)."""
+        value = self.get(key)
+        if value is None:
+            raise KeyError(key)
+        return value
+
     def put(self, key: K, value: V) -> None:
         """Put value into cache.
         
