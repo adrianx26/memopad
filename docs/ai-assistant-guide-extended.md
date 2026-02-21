@@ -3279,10 +3279,7 @@ await edit_note(
 
 This extended guide provides comprehensive coverage of MemoPad's capabilities for AI assistants. Each section is designed to be self-contained so you can reference or copy specific sections as needed.
 
-For the condensed quick-reference version, see the [AI Assistant Guide](https://github.com/basicmachines-co/memopad/blob/main/src/basic_memory/mcp/resources/ai_assistant_guide.md).
+For the condensed quick-reference version, see the [AI Assistant Guide](https://github.com/adrianx26/memopad/blob/main/src/basic_memory/mcp/resources/ai_assistant_guide.md).
 
-For complete documentation including setup, integrations, and advanced features, visit [docs.basicmemory.com](https://docs.basicmemory.com).
 
 **Remember**: MemoPad is about building persistent, structured knowledge that grows over time. Focus on creating rich observations, meaningful relations, and building a connected knowledge graph that provides lasting value across conversations and sessions.
-
-Built with ♥️ by Basic Machines

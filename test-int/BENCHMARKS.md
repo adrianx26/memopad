@@ -127,7 +127,7 @@ After optimizations:
 
 ## Related Issues
 
-- [#351: Performance: Optimize sync/indexing for cloud deployments](https://github.com/basicmachines-co/basic-memory/issues/351)
+- [#351: Performance: Optimize sync/indexing for cloud deployments](https://github.com/adrianx26/memopad/issues/351)
 
 ## Test File Generation
 

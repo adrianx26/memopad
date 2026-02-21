@@ -69,7 +69,7 @@ jobs:
           # Formula name in homebrew-memopad repo
           formula-name: memopad
           # The tap repository
-          homebrew-tap: basicmachines-co/homebrew-memopad
+          homebrew-tap: adrianx26/homebrew-memopad
           # Base branch of the tap repository
           base-branch: main
           # Download URL will be automatically constructed from the tag
