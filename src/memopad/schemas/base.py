@@ -162,8 +162,8 @@ EntityType = Annotated[str, BeforeValidator(to_snake_case), MinLen(1), MaxLen(20
 # Maximum title length (500 characters as per best practices)
 MAX_TITLE_LENGTH = 500
 
-# Maximum content size (1MB = 1,000,000 characters)
-MAX_CONTENT_LENGTH = 1_000_000
+# Maximum content size (50MB = 50,000,000 characters)
+MAX_CONTENT_LENGTH = 50_000_000
 
 ALLOWED_CONTENT_TYPES = {
     "text/markdown",

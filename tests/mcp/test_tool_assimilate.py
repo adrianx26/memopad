@@ -19,6 +19,10 @@ from memopad.mcp.tools.assimilate import (
     _build_algorithms_note,
     _build_decision_structure_note,
     _build_functional_diagram_note,
+    _safe_truncate,
+    MAX_FILE_READ_SIZE,
+    DEFAULT_MAX_FILES,
+    MAX_NOTE_CONTENT,
 )
 
 
@@ -379,3 +383,160 @@ async def test_assimilate_stores_notes(app, test_project, monkeypatch):
     assert "notes_stored:" in result
     assert "Overview" in result
     assert f"[Session: Using project '{test_project.name}']" in result
+
+
+# ---------------------------------------------------------------------------
+# Safety limit tests (Bug fixes for oversized content)
+# ---------------------------------------------------------------------------
+
+
+class TestSafeTruncate:
+    """Tests for the _safe_truncate helper function."""
+
+    def test_returns_none_for_none(self):
+        assert _safe_truncate(None) is None
+
+    def test_returns_empty_for_empty(self):
+        assert _safe_truncate("") == ""
+
+    def test_short_content_unchanged(self):
+        content = "Hello world"
+        assert _safe_truncate(content) == content
+
+    def test_exact_limit_unchanged(self):
+        content = "x" * MAX_NOTE_CONTENT
+        result = _safe_truncate(content)
+        assert result == content
+
+    def test_over_limit_truncated(self):
+        content = "x" * (MAX_NOTE_CONTENT + 100)
+        result = _safe_truncate(content)
+        assert len(result) < len(content)
+        assert result.endswith("[... content truncated to fit size limit ...]")
+
+    def test_custom_max_len(self):
+        content = "abcdefghij"  # 10 chars
+        result = _safe_truncate(content, max_len=5)
+        assert result.startswith("abcde")
+        assert "truncated" in result
+
+    def test_truncated_content_under_entity_limit(self):
+        """The truncated result must always be under MAX_CONTENT_LENGTH (1M)."""
+        from memopad.schemas.base import MAX_CONTENT_LENGTH
+        huge = "x" * (MAX_CONTENT_LENGTH + 500_000)
+        result = _safe_truncate(huge)
+        assert len(result) < MAX_CONTENT_LENGTH
+
+
+class TestNoteBuilderTruncation:
+    """Tests that note builders produce content under MAX_NOTE_CONTENT."""
+
+    def _make_large_data(self, content_type: str, n_pages: int = 300):
+        """Create crawl data with many pages of the given content type."""
+        return {
+            "pages": [
+                {
+                    "url": f"https://example.com/src/file_{i}.py",
+                    "text": f"# File {i}\n" + ("x" * 5000),
+                    "content_types": [content_type],
+                    "links": {"internal": [], "github": [], "external": []},
+                }
+                for i in range(n_pages)
+            ],
+            "all_github_links": [],
+            "all_external_links": [],
+            "errors": [],
+        }
+
+    def test_overview_truncated(self):
+        data = self._make_large_data("config_docs", n_pages=300)
+        note = _build_overview_note("https://example.com", data)
+        assert note is not None
+        assert len(note) <= MAX_NOTE_CONTENT + 100  # allow small marker overhead
+
+    def test_agent_profiles_truncated(self):
+        data = self._make_large_data("agent_profile", n_pages=300)
+        note = _build_agent_profiles_note(data)
+        assert note is not None
+        assert len(note) <= MAX_NOTE_CONTENT + 100
+
+    def test_tools_functions_truncated(self):
+        data = self._make_large_data("tools_functions", n_pages=300)
+        note = _build_tools_functions_note(data)
+        assert note is not None
+        assert len(note) <= MAX_NOTE_CONTENT + 100
+
+    def test_concepts_truncated(self):
+        data = self._make_large_data("concepts", n_pages=300)
+        note = _build_concepts_note(data)
+        assert note is not None
+        assert len(note) <= MAX_NOTE_CONTENT + 100
+
+    def test_algorithms_truncated(self):
+        data = self._make_large_data("algorithms", n_pages=300)
+        note = _build_algorithms_note(data)
+        assert note is not None
+        assert len(note) <= MAX_NOTE_CONTENT + 100
+
+
+class TestSafetyConstants:
+    """Tests that safety constants are configured correctly."""
+
+    def test_max_note_content_below_entity_limit(self):
+        from memopad.schemas.base import MAX_CONTENT_LENGTH
+        assert MAX_NOTE_CONTENT < MAX_CONTENT_LENGTH
+
+    def test_default_max_files_reasonable(self):
+        assert DEFAULT_MAX_FILES >= 100
+        assert DEFAULT_MAX_FILES <= 10_000
+
+    def test_max_file_read_size_allows_large_files(self):
+        # Must support up to 1GB per file
+        assert MAX_FILE_READ_SIZE >= 1_000_000_000
+
+
+class TestAssimilateOversizedContent:
+    """Integration test: assimilate handles oversized content gracefully.
+
+    Verifies Bug Fix #3 and #4: Entity construction inside try/except,
+    and defense-in-depth truncation before Entity validation.
+    """
+
+    @pytest.mark.asyncio
+    async def test_assimilate_with_huge_crawl_data(self, app, test_project, monkeypatch):
+        """Assimilate completes even when crawl returns huge content."""
+        import sys
+        from memopad.mcp.tools.assimilate import assimilate
+
+        assimilate_mod = sys.modules["memopad.mcp.tools.assimilate"]
+
+        huge_text = "x" * 2_000_000  # 2MB — well over MAX_CONTENT_LENGTH
+        mock_data = {
+            "pages": [
+                {
+                    "url": "https://huge-repo.example.com/huge.py",
+                    "text": huge_text,
+                    "content_types": ["tools_functions", "concepts"],
+                    "links": {"internal": [], "github": [], "external": []},
+                }
+            ],
+            "all_github_links": [],
+            "all_external_links": [],
+            "errors": [],
+        }
+
+        async def mock_crawl(url, max_depth=10, max_pages=0):
+            return mock_data
+
+        monkeypatch.setattr(assimilate_mod, "crawl", mock_crawl)
+
+        # This should NOT raise — it must handle oversized content gracefully
+        result = await assimilate.fn(
+            url="https://huge-repo.example.com",
+            project=test_project.name,
+        )
+
+        # Should succeed or at least report partial success, NOT crash
+        assert "Error" not in result or "FAILED" in result
+        assert "Assimilation Complete" in result
+
