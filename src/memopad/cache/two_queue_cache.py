@@ -183,3 +183,21 @@ class TwoQueueCache(Generic[K, V]):
         self.hits = 0
         self.misses = 0
         self.promotions = 0
+
+    def __getitem__(self, key: K) -> V:
+        """Get item from cache (dict-like access)."""
+        value = self.get(key)
+        if value is None:
+            raise KeyError(key)
+        return value
+
+    def __setitem__(self, key: K, value: V) -> None:
+        """Set item in cache (dict-like access)."""
+        self.put(key, value)
+
+    def delete(self, key: K) -> None:
+        """Remove item from cache."""
+        if key in self.a1:
+            del self.a1[key]
+        if key in self.am:
+            del self.am[key]

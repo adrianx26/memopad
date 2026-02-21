@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from memopad import db
 from memopad.config import MemoPadConfig, ConfigManager
 from memopad.file_utils import has_frontmatter
-from memopad.ignore_utils import load_bmignore_patterns, should_ignore_path
+from memopad.ignore_utils import load_bmignore_patterns, should_ignore_path, IgnoreMatcher
 from memopad.markdown import EntityParser, MarkdownProcessor
 from memopad.models import Entity, Project
 from memopad.repository import (
@@ -143,6 +143,7 @@ class SyncService:
         self.file_service = file_service
         # Load ignore patterns once at initialization for performance
         self._ignore_patterns = load_bmignore_patterns()
+        self._ignore_matcher = IgnoreMatcher(self._ignore_patterns)
         # Circuit breaker: track file failures to prevent infinite retry loops
         # Use OrderedDict for LRU behavior with bounded size to prevent unbounded memory growth
         self._file_failures: OrderedDict[str, FileFailureInfo] = OrderedDict()
@@ -728,11 +729,15 @@ class SyncService:
         # Parse markdown first to get any existing permalink
         logger.debug(f"Parsing markdown file, path: {path}, new: {new}")
 
+        # Invalidate permalink cache to ensure we respect any frontmatter changes
+        self.entity_service.invalidate_permalink_cache(path)
+
         file_content = await self.file_service.read_file_content(path)
         file_contains_frontmatter = has_frontmatter(file_content)
 
         # Get file timestamps for tracking modification times
-        file_metadata = await self.file_service.get_file_metadata(path)
+        # Force fresh metadata since we know file is new or modified
+        file_metadata = await self.file_service.get_file_metadata(path, use_cache=False)
         created = file_metadata.created_at
         modified = file_metadata.modified_at
 
@@ -813,12 +818,16 @@ class SyncService:
             checksum = cached_checksum
         else:
             checksum = await self.file_service.compute_checksum(path)
+
+        # Invalidate permalink cache
+        self.entity_service.invalidate_permalink_cache(path)
+
         if new:
             # Generate permalink from path - skip conflict checks during bulk sync
             await self.entity_service.resolve_permalink(path, skip_conflict_check=True)
 
             # get file timestamps
-            file_metadata = await self.file_service.get_file_metadata(path)
+            file_metadata = await self.file_service.get_file_metadata(path, use_cache=False)
             created = file_metadata.created_at
             modified = file_metadata.modified_at
 
@@ -881,7 +890,7 @@ class SyncService:
                     raise  # pragma: no cover
         else:
             # Get file timestamps for updating modification time
-            file_metadata = await self.file_service.get_file_metadata(path)
+            file_metadata = await self.file_service.get_file_metadata(path, use_cache=False)
             modified = file_metadata.modified_at
 
             entity = await self.entity_repository.get_by_file_path(path)
@@ -910,6 +919,9 @@ class SyncService:
 
     async def handle_delete(self, file_path: str):
         """Handle complete entity deletion including search index cleanup."""
+
+        # Invalidate caches
+        self.entity_service.invalidate_permalink_cache(file_path)
 
         # First get entity to get permalink before deletion
         entity = await self.entity_repository.get_by_file_path(file_path)
@@ -941,6 +953,9 @@ class SyncService:
 
     async def handle_move(self, old_path, new_path):
         logger.debug("Moving entity", old_path=old_path, new_path=new_path)
+
+        # Invalidate caches for old path
+        self.entity_service.invalidate_permalink_cache(old_path)
 
         entity = await self.entity_repository.get_by_file_path(old_path)
         if entity:
@@ -1209,18 +1224,29 @@ class SyncService:
 
         # Convert absolute paths to relative and filter through ignore patterns
         file_paths = []
+        directory_str = str(directory)
         for line in stdout.decode().splitlines():
             if line:
                 try:
-                    abs_path = Path(line)
-                    rel_path = abs_path.relative_to(directory).as_posix()
-
-                    # Apply ignore patterns (same as scan_directory)
-                    if should_ignore_path(abs_path, directory, self._ignore_patterns):
-                        logger.trace(f"Ignoring path per .bmignore: {rel_path}")
+                    # Optimization: check ignore patterns on string path before creating Path object
+                    # find returns absolute paths
+                    if not line.startswith(directory_str):
+                        logger.warning(f"Skipping file not under directory: {line}")
                         continue
 
-                    file_paths.append(rel_path)
+                    # Calculate relative path string
+                    # +1 for the separator
+                    rel_path_str = line[len(directory_str) + 1:]
+                    # Ensure forward slashes for consistency
+                    if os.sep == '\\':
+                        rel_path_str = rel_path_str.replace('\\', '/')
+
+                    # Apply ignore patterns (optimized)
+                    if self._ignore_matcher.match(rel_path_str):
+                        logger.trace(f"Ignoring path per .bmignore: {rel_path_str}")
+                        continue
+
+                    file_paths.append(rel_path_str)
                 except ValueError:
                     # Path is not relative to directory, skip it
                     logger.warning(f"Skipping file not under directory: {line}")
@@ -1267,17 +1293,26 @@ class SyncService:
         results = []
         subdirs = []
 
-        for entry in entries:
-            entry_path = Path(entry.path)
+        # Optimize: Pre-calculate directory string for relative path calculation
+        directory_str = str(directory)
 
-            # Check ignore patterns
-            if should_ignore_path(entry_path, directory, self._ignore_patterns):
-                logger.trace(f"Ignoring path per .bmignore: {entry_path.relative_to(directory)}")
+        for entry in entries:
+            # Optimization: Check ignore patterns on string path before creating Path object
+            # Calculate relative path string
+            rel_path_str = entry.path[len(directory_str) + 1:]
+
+            # Ensure forward slashes for consistency
+            if os.sep == '\\':
+                rel_path_str = rel_path_str.replace('\\', '/')
+
+            # Check ignore patterns (optimized)
+            if self._ignore_matcher.match(rel_path_str):
+                logger.trace(f"Ignoring path per .bmignore: {rel_path_str}")
                 continue
 
             if entry.is_dir(follow_symlinks=False):
                 # Collect subdirectories to recurse into
-                subdirs.append(entry_path)
+                subdirs.append(Path(entry.path))
             elif entry.is_file(follow_symlinks=False):
                 # Get cached stat info (no extra syscall!)
                 stat_info = entry.stat(follow_symlinks=False)
