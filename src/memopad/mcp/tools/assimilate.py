@@ -398,28 +398,51 @@ async def _clone_github_repo(url: str, max_files: int = 0) -> dict:
     # 1. Clone
     temp_dir = tempfile.mkdtemp(prefix="memopad_git_")
     try:
-        logger.info(f"Cloning {url} to {temp_dir}")
+        logger.info(f"assimilate: cloning {url} to {temp_dir}")
         
         # --- Git subprocess execution with comprehensive error handling ---
         # Trigger: User attempts to assimilate a GitHub repository
         # Why: Git may not be installed, clone may fail, or operation may timeout
         # Outcome: Return descriptive error message instead of crashing MCP tool
         try:
-            process = await asyncio.create_subprocess_exec(
-                "git", "clone", "--depth", "1", url, temp_dir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            # 5 minute timeout for large repositories
-            _, stderr = await asyncio.wait_for(process.communicate(), timeout=300.0)
+            import sys
+            if sys.platform == "win32":
+                import subprocess
+                
+                def run_git():
+                    return subprocess.run(
+                        ["git", "clone", "--depth", "1", url, temp_dir],
+                        capture_output=True,
+                        timeout=300.0,
+                    )
+                
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(None, run_git)
+                returncode = result.returncode
+                stderr = result.stderr
+            else:
+                process = await asyncio.create_subprocess_exec(
+                    "git", "clone", "--depth", "1", url, temp_dir,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                # 5 minute timeout for large repositories
+                _, stderr = await asyncio.wait_for(process.communicate(), timeout=300.0)
+                returncode = process.returncode
+
         except FileNotFoundError:
             error_msg = "Git is not installed or not in PATH. Please install git to clone GitHub repositories."
             logger.error(f"assimilate: {error_msg}")
             empty_result["errors"] = [error_msg]
             return empty_result
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):
             error_msg = f"Git clone timed out after 5 minutes for {url}. The repository may be too large."
             logger.error(f"assimilate: {error_msg}")
+            empty_result["errors"] = [error_msg]
+            return empty_result
+        except asyncio.CancelledError:
+            error_msg = f"Git clone was cancelled for {url}. Try pre-cloning the repo manually."
+            logger.warning(f"assimilate: {error_msg}")
             empty_result["errors"] = [error_msg]
             return empty_result
         except PermissionError as e:
@@ -433,7 +456,7 @@ async def _clone_github_repo(url: str, max_files: int = 0) -> dict:
             empty_result["errors"] = [error_msg]
             return empty_result
         
-        if process.returncode != 0:
+        if returncode != 0:
             stderr_text = stderr.decode() if stderr else "No error message"
             error_msg = f"Git clone failed for {url}: {stderr_text}"
             logger.error(f"assimilate: {error_msg}")
@@ -441,6 +464,7 @@ async def _clone_github_repo(url: str, max_files: int = 0) -> dict:
             return empty_result
 
         # 2. Walk and find interesting files
+        logger.debug(f"assimilate: scanning for interesting files in {temp_dir}")
         pages = []
         file_patterns = [
             "**/*.md", "**/*.txt", "**/*.rst", 
@@ -452,6 +476,8 @@ async def _clone_github_repo(url: str, max_files: int = 0) -> dict:
         found_files = []
         for pattern in file_patterns:
              found_files.extend(glob.glob(os.path.join(temp_dir, pattern), recursive=True))
+
+        logger.info(f"assimilate: found {len(found_files)} potential files in repo")
 
         # Prioritize important files
         def priority(fpath):
@@ -587,10 +613,12 @@ async def crawl(
 
             result = await _fetch_page(http_client, url)
             if result is None:
+                logger.warning(f"assimilate: failed to fetch {url}")
                 errors.append(url)
                 continue
 
             html, final_url = result
+            logger.debug(f"assimilate: fetched {url} (final_url={final_url})")
             
             # If this is the start URL, update base_domain based on where we landed
             # to handle redirects (e.g. http -> https, non-www -> www)
@@ -955,6 +983,25 @@ async def assimilate(
     open_browser: bool = False,
     context: Context | None = None,
 ) -> str:
+    """MCP tool wrapper for _assimilate_impl."""
+    return await _assimilate_impl(
+        url=url,
+        project=project,
+        max_depth=max_depth,
+        max_pages=max_pages,
+        open_browser=open_browser,
+        context=context,
+    )
+
+
+async def _assimilate_impl(
+    url: str,
+    project: Optional[str] = None,
+    max_depth: int = 10,
+    max_pages: int = 0,
+    open_browser: bool = False,
+    context: Context | None = None,
+) -> str:
     """Assimilate knowledge from a URL into memopad.
 
     Crawls the URL and linked pages, extracts agent profiles, skills, rules,
@@ -1081,50 +1128,67 @@ async def assimilate(
             return f"# Error\n\nCould not fetch any content from {url}"
 
         # Build notes
+        logger.info("assimilate: building structured notes from gathered data")
         notes_to_write: list[tuple[str, str]] = []
 
         overview = _build_overview_note(url, data)
         notes_to_write.append(("Overview", overview))
 
+        logger.debug("assimilate: checking for agent profiles")
         agent_note = _build_agent_profiles_note(data)
         if agent_note:
+            logger.info("assimilate: found agent profiles")
             notes_to_write.append(("Agent Profiles", agent_note))
 
+        logger.debug("assimilate: checking for skills and rules")
         skills_note = _build_skills_rules_note(data)
         if skills_note:
+            logger.info("assimilate: found skills and rules")
             notes_to_write.append(("Skills and Rules", skills_note))
 
+        logger.debug("assimilate: checking for concepts and ideas")
         concepts_note = _build_concepts_note(data)
         if concepts_note:
+            logger.info("assimilate: found concepts and ideas")
             notes_to_write.append(("Concepts and Ideas", concepts_note))
 
+        logger.debug("assimilate: checking for soul files")
         soul_note = _build_soul_files_note(data)
         if soul_note:
+            logger.info("assimilate: found soul files")
             notes_to_write.append(("Soul Files", soul_note))
 
+        logger.debug("assimilate: checking for tools and functions")
         tools_note = _build_tools_functions_note(data)
         if tools_note:
+            logger.info("assimilate: found tools and functions")
             notes_to_write.append(("Tools and Functions", tools_note))
 
+        logger.debug("assimilate: checking for algorithms")
         algo_note = _build_algorithms_note(data)
         if algo_note:
+            logger.info("assimilate: found algorithms")
             notes_to_write.append(("Algorithms", algo_note))
 
+        logger.debug("assimilate: checking for decision structures")
         decision_note = _build_decision_structure_note(data)
         if decision_note:
+            logger.info("assimilate: found decision structures")
             notes_to_write.append(("Decision Structures", decision_note))
 
+        logger.debug("assimilate: generating functional diagram")
         diagram_note = _build_functional_diagram_note(data)
         if diagram_note:
             notes_to_write.append(("Functional Diagram", diagram_note))
 
+        logger.debug("assimilate: gathering github links")
         github_note = _build_github_links_note(data)
         if github_note:
             notes_to_write.append(("GitHub Links Index", github_note))
 
         # Store notes in memopad
         # explicitly controlled directory path
-        directory = domain  # No 'Assimilated/' prefix!
+        directory = f"{domain}_Assimilated"
 
         async with get_client() as client:
             active_project = await get_active_project(client, project, context)
@@ -1144,13 +1208,13 @@ async def assimilate(
                 )
                 try:
                     try:
-                        result = await knowledge_client.create_entity(entity.model_dump(), fast=False)
+                        result = await knowledge_client.create_entity(entity.model_dump(), fast=True)
                     except Exception as e:
                         if "409" in str(e) or "conflict" in str(e).lower() or "already exists" in str(e).lower():
                             if entity.permalink:
                                 entity_id = await knowledge_client.resolve_entity(entity.permalink)
                                 result = await knowledge_client.update_entity(
-                                    entity_id, entity.model_dump(), fast=False
+                                    entity_id, entity.model_dump(), fast=True
                                 )
                             else:
                                 raise
@@ -1185,6 +1249,13 @@ async def assimilate(
         summary_result = "\n".join(summary_lines)
         return add_project_metadata(summary_result, active_project.name)
 
+    except asyncio.CancelledError:
+        logger.warning(f"assimilate: CancelledError for {url} — operation was cancelled")
+        return (
+            f"# Error\n\nAssimilation was cancelled for {url}.\n\n"
+            "This can happen during long-running operations on Windows. "
+            "Try:\n- Pre-cloning the repo manually\n- Limiting `max_pages`\n- Re-running the script (partial progress is retained)"
+        )
     except Exception as e:
         # Catch-all for any unhandled exceptions
         logger.exception(f"assimilate: unhandled error for {url}")

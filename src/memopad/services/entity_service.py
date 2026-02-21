@@ -432,8 +432,9 @@ class EntityService(BaseService[EntityModel]):
         file_path = Path(existing.file_path) if existing else Path(schema.file_path)
 
         if not existing and await self.file_service.exists(file_path):
-            raise EntityCreationError(
-                f"file for entity {schema.directory}/{schema.title} already exists: {file_path}"
+            logger.warning(
+                f"File already exists for entity {schema.directory}/{schema.title}: {file_path}. "
+                "Overwriting (likely a retry/re-assimilation)."
             )
 
         # --- Frontmatter Overrides ---

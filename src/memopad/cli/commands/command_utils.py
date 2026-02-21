@@ -39,6 +39,10 @@ def run_with_cleanup(coro: Coroutine[Any, Any, T]) -> T:
         finally:
             await db.shutdown_db()
 
+    import sys
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
     return asyncio.run(_with_cleanup())
 
 

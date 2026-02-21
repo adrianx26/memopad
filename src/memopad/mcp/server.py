@@ -7,6 +7,13 @@ import sys
 from contextlib import asynccontextmanager
 
 
+# On Windows, use SelectorEventLoop to avoid ProactorEventLoop issues:
+# - aiosqlite "IndexError: pop from an empty deque" during shutdown
+# - NotImplementedError in async event loop mechanisms
+# Must be set before any event loop is created (i.e. before FastMCP init).
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 from fastmcp import FastMCP
 from loguru import logger
 

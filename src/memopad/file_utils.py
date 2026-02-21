@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import shlex
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -230,32 +231,51 @@ async def format_file(
         # Parse command into args list for safer execution (no shell=True)
         args = shlex.split(cmd)
 
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        # On Windows with SelectorEventLoop, we must use blocking subprocess.run
+        # and wrap it in run_in_executor to avoid blocking the event loop.
+        if sys.platform == "win32":
+            import subprocess
 
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=config.formatter_timeout,
-            )
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            logger.warning(
-                "Formatter timed out",
-                path=str(path),
-                timeout=config.formatter_timeout,
-            )
-            return None
+            def run_sync():
+                return subprocess.run(
+                    args,
+                    capture_output=True,
+                    timeout=config.formatter_timeout,
+                    check=False,
+                )
 
-        if proc.returncode != 0:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, run_sync)
+            stdout, stderr = result.stdout, result.stderr
+            returncode = result.returncode
+        else:
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=config.formatter_timeout,
+                )
+                returncode = proc.returncode
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                logger.warning(
+                    "Formatter timed out",
+                    path=str(path),
+                    timeout=config.formatter_timeout,
+                )
+                return None
+
+        if returncode != 0:
             logger.warning(
                 "Formatter exited with non-zero status",
                 path=str(path),
-                returncode=proc.returncode,
+                returncode=returncode,
                 stderr=stderr.decode("utf-8", errors="replace") if stderr else "",
             )
             # Still try to read the file - formatter may have partially worked
