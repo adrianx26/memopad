@@ -1,4 +1,4 @@
-﻿"""Two-Queue (2Q) Cache Implementation.
+"""Two-Queue (2Q) Cache Implementation.
 
 Phase 2 Optimization #5: Advanced cache eviction policy with scan resistance.
 
@@ -27,8 +27,8 @@ class TwoQueueCache(Generic[K, V]):
     """Two-Queue cache with scan resistance.
     
     Maintains two queues:
-    - A1 (recent): FIFO queue for recently accessed items
-    - Am (frequent): LRU queue for frequently accessed items
+    - A1 (recent): FIFO queue for recent items
+    - Am (frequent): LRU queue for frequent items
     
     When an item is accessed:
     1. First access: Goes to A1 (recent queue)
@@ -155,6 +155,17 @@ class TwoQueueCache(Generic[K, V]):
     def __contains__(self, key: K) -> bool:
         """Check if key is in cache."""
         return key in self.a1 or key in self.am
+
+    def __getitem__(self, key: K) -> V:
+        """Get item with [] syntax. Raises KeyError if not found."""
+        value = self.get(key)
+        if value is None:
+            raise KeyError(key)
+        return value
+
+    def __setitem__(self, key: K, value: V) -> None:
+        """Set item with [] syntax."""
+        self.put(key, value)
     
     @property
     def hit_rate(self) -> float:

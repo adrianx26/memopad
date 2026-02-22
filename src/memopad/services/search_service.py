@@ -416,28 +416,27 @@ class SearchService:
     async def handle_delete(self, entity: Entity):
         """Handle complete entity deletion from search index including observations and relations.
 
-        This replicates the logic from sync_service.handle_delete() to properly clean up
-        all search index entries for an entity and its related data.
+        Efficiently deletes all search index entries associated with the entity:
+        1. Deletes all "owned" items (entity itself, observations, outgoing relations) by entity_id
+        2. Deletes all incoming relations by permalink
         """
         logger.debug(
-            f"Cleaning up search index for entity_id={entity.id}, file_path={entity.file_path}, "
-            f"observations={len(entity.observations)}, relations={len(entity.outgoing_relations)}"
+            f"Cleaning up search index for entity_id={entity.id}, file_path={entity.file_path}"
         )
 
-        # Clean up search index - same logic as sync_service.handle_delete()
-        permalinks = (
-            [entity.permalink]
-            + [o.permalink for o in entity.observations]
-            + [r.permalink for r in entity.outgoing_relations]
-        )
+        # 1. Bulk delete all items owned by this entity (entity, observations, outgoing relations)
+        # These are all indexed with entity_id = entity.id
+        await self.delete_by_entity_id(entity.id)
 
-        logger.debug(
-            f"Deleting search index entries for entity_id={entity.id}, "
-            f"index_entries={len(permalinks)}"
-        )
+        # 2. Delete incoming relations (owned by OTHER entities, but pointing to this one)
+        # These are indexed with entity_id = source_entity.id, so we must delete by permalink
+        # incoming_relations are usually loaded eagerly by repositories
+        incoming_permalinks = [r.permalink for r in entity.incoming_relations if r.permalink]
 
-        for permalink in permalinks:
-            if permalink:
-                await self.delete_by_permalink(permalink)
-            else:
-                await self.delete_by_entity_id(entity.id)
+        if incoming_permalinks:
+            logger.debug(
+                f"Deleting {len(incoming_permalinks)} incoming relation search entries for entity_id={entity.id}"
+            )
+            await self.repository.bulk_delete_by_permalinks(incoming_permalinks)
+
+        logger.info(f"Completed search index cleanup for entity_id={entity.id}")

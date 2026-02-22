@@ -59,6 +59,10 @@ class SearchRepository(Protocol):
         """Delete item by permalink."""
         ...
 
+    async def bulk_delete_by_permalinks(self, permalinks: List[str]) -> None:
+        """Delete items by permalink in bulk."""
+        ...
+
     async def delete_by_entity_id(self, entity_id: int) -> None:
         """Delete items by entity ID."""
         ...
