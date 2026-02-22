@@ -24,6 +24,7 @@ from memopad.mcp.tools.project_management import (
     create_memory_project,
     delete_project,
 )
+from memopad.mcp.tools.optimize_storage import optimize_storage
 
 # ChatGPT-compatible tools
 from memopad.mcp.tools.chatgpt_tools import search, fetch
@@ -40,6 +41,7 @@ __all__ = [
     "list_directory",
     "list_memory_projects",
     "move_note",
+    "optimize_storage",
     "read_content",
     "read_note",
     "recent_activity",
