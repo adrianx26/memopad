@@ -223,6 +223,32 @@ class SearchRepositoryBase(ABC):
             )
             await session.commit()
 
+    async def bulk_delete_by_permalinks(self, permalinks: List[str]) -> None:
+        """Delete multiple search index entries by permalink in bulk.
+
+        This implementation is shared across backends as it uses standard SQL DELETE.
+        """
+        if not permalinks:
+            return
+
+        async with db.scoped_session(self.session_maker) as session:
+            # Batch deletions to avoid hitting SQL parameter limits
+            batch_size = 500
+            for i in range(0, len(permalinks), batch_size):
+                batch = permalinks[i : i + batch_size]
+                # Use parameterized query with IN clause
+                placeholders = ",".join(f":p{j}" for j in range(len(batch)))
+                params = {f"p{j}": p for j, p in enumerate(batch)}
+                params["project_id"] = self.project_id
+
+                await session.execute(
+                    text(
+                        f"DELETE FROM search_index WHERE permalink IN ({placeholders}) AND project_id = :project_id"
+                    ),
+                    params,
+                )
+            await session.commit()
+
     async def execute_query(
         self,
         query: Executable,
