@@ -1,4 +1,4 @@
-﻿"""CLI tool commands for Basic Memory."""
+"""CLI tool commands for Basic Memory."""
 
 import json
 import sys
@@ -16,9 +16,6 @@ from memopad.config import ConfigManager
 # Import prompts
 from memopad.mcp.prompts.continue_conversation import (
     continue_conversation as mcp_continue_conversation,
-)
-from memopad.mcp.prompts.recent_activity import (
-    recent_activity_prompt as recent_activity_prompt,
 )
 from memopad.mcp.tools import build_context as mcp_build_context
 from memopad.mcp.tools import read_note as mcp_read_note
@@ -392,22 +389,3 @@ def continue_conversation(
             typer.echo(f"Error continuing conversation: {e}", err=True)
             raise typer.Exit(1)
         raise
-
-
-# @tool_app.command(name="show-recent-activity")
-# def show_recent_activity(
-#     timeframe: Annotated[
-#         str, typer.Option(help="How far back to look for activity")
-#     ] = "7d",
-# ):
-#     """Prompt to show recent activity."""
-#     try:
-#         # Prompt functions return formatted strings directly
-#         session = asyncio.run(recent_activity_prompt(timeframe=timeframe))
-#         rprint(session)
-#     except Exception as e:  # pragma: no cover
-#         if not isinstance(e, typer.Exit):
-#             logger.exception("Error continuing conversation", e)
-#             typer.echo(f"Error continuing conversation: {e}", err=True)
-#             raise typer.Exit(1)
-#         raise
