@@ -301,7 +301,8 @@ class WatchService:
         # because of our atomic writes on updates, an add may be an existing file
         # Avoid mutating `adds` while iterating (can skip items).
         reclassified_as_modified: List[str] = []
-        for added_path in list(adds):  # pragma: no cover TODO add test
+        for added_path in list(adds):
+            # Check if this file already exists in the database
             entity = await sync_service.entity_repository.get_by_file_path(added_path)
             if entity is not None:
                 logger.debug(f"Existing file will be processed as modified, path={added_path}")
