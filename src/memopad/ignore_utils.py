@@ -1,8 +1,9 @@
-﻿"""Utilities for handling .gitignore patterns and file filtering."""
+"""Utilities for handling .gitignore patterns and file filtering."""
 
 import fnmatch
+import functools
 from pathlib import Path
-from typing import Set
+from typing import Set, Tuple, List
 
 
 # Common directories and patterns to ignore by default
@@ -206,6 +207,173 @@ def load_gitignore_patterns(base_path: Path, use_gitignore: bool = True) -> Set[
     return patterns
 
 
+class IgnoreMatcher:
+    """Efficient matcher for ignore patterns using set lookups and pre-compiled logic."""
+
+    def __init__(self, patterns: Set[str]):
+        self.patterns = patterns
+        self.exact_names: Set[str] = set()
+        self.extension_patterns: Set[str] = set()
+        self.root_relative_patterns: List[Tuple[str, bool]] = []  # (pattern, is_dir)
+
+        # simple_globs: patterns with NO slash but WITH wildcards.
+        # e.g. "temp_*", "*.log" (if not covered by extension_patterns)
+        self.simple_globs: List[Tuple[str, bool]] = []  # (pattern, is_dir)
+
+        # path_patterns: patterns WITH slash (anywhere).
+        # e.g. "foo/bar", "src/*.py"
+        self.path_patterns: List[Tuple[str, bool]] = []  # (pattern, is_dir)
+
+        for pattern in patterns:
+            # Check for directory marker
+            is_dir = pattern.endswith("/")
+            clean_pattern = pattern[:-1] if is_dir else pattern
+
+            if pattern.startswith("/"):
+                # Root relative pattern
+                # Remove leading slash for matching
+                pat = clean_pattern[1:]
+                self.root_relative_patterns.append((pat, is_dir))
+            elif "/" in clean_pattern:
+                # Contains path separator (but not at start) -> path match
+                self.path_patterns.append((clean_pattern, is_dir))
+            else:
+                # No path separator -> name match or simple glob
+                if "*" in clean_pattern or "?" in clean_pattern or "[" in clean_pattern:
+                    if (
+                        clean_pattern.startswith("*.")
+                        and clean_pattern.count("*") == 1
+                        and "?" not in clean_pattern
+                        and "[" not in clean_pattern
+                    ):
+                        # Simple extension pattern *.ext
+                        self.extension_patterns.add(clean_pattern[1:])  # store .ext
+                    else:
+                        self.simple_globs.append((clean_pattern, is_dir))
+                else:
+                    # Exact name match
+                    self.exact_names.add(clean_pattern)
+
+    def match(self, path: Path, base_path: Path) -> bool:
+        """Check if path matches ignore patterns.
+
+        Args:
+            path: Absolute path to check
+            base_path: Base directory for relative path calculation
+        """
+        try:
+            # Ensure path is relative to base_path first to match legacy behavior
+            # and ensure we don't ignore files outside the project
+            relative_path = path.relative_to(base_path)
+        except ValueError:
+            return False
+
+        # We need name and relative path
+        name = path.name
+
+        # Fast check on name
+        if name in self.exact_names:
+            return True
+
+        # Check extension
+        if self.extension_patterns:
+            for ext in self.extension_patterns:
+                if name.endswith(ext):
+                    return True
+
+        # Need relative path for other checks
+        rel_posix = relative_path.as_posix()
+
+        return self._match_relative(name, rel_posix, path.is_dir())
+
+    def match_entry(self, name: str, relative_path: str, is_dir: bool = False) -> bool:
+        """Check if entry matches ignore patterns using pre-computed relative path string.
+
+        Args:
+            name: File/Directory name
+            relative_path: Relative path string (posix style)
+            is_dir: Whether entry is a directory
+        """
+        # Fast check on name
+        if name in self.exact_names:
+            return True
+
+        # Check extension
+        if self.extension_patterns:
+            for ext in self.extension_patterns:
+                if name.endswith(ext):
+                    return True
+
+        return self._match_relative(name, relative_path, is_dir)
+
+    def _match_relative(self, name: str, rel_posix: str, is_dir: bool) -> bool:
+        parts = None # Lazy split
+
+        # Check root relative patterns
+        for pat, pat_is_dir in self.root_relative_patterns:
+            if pat_is_dir:
+                # Pattern demands directory
+                # "foo/" matches "foo" (if dir) or "foo/bar"
+                # Check if first part of path matches
+                if parts is None: parts = rel_posix.split("/")
+                if parts and parts[0] == pat:
+                    return True
+            else:
+                if fnmatch.fnmatch(rel_posix, pat):
+                    return True
+
+        # Check simple globs (no slash)
+        for pat, pat_is_dir in self.simple_globs:
+            # Optimization: check name first
+            if fnmatch.fnmatch(name, pat):
+                if pat_is_dir:
+                    # If pattern is "foo/" and name is "foo", match only if is_dir or path is deeper
+                    if is_dir: return True
+                    # If path is "src/foo/bar.txt", name is "bar.txt". If pattern is "foo/", it doesn't match name.
+                else:
+                    return True
+
+            # Must check all parts if it's a deep path
+            # e.g. pattern "temp_*" matches "src/temp_dir/file.txt"
+            if parts is None: parts = rel_posix.split("/")
+
+            # Check other parts (parents)
+            for part in parts[:-1]:
+                if fnmatch.fnmatch(part, pat):
+                    # For simple globs, any matching component triggers ignore
+                    return True
+
+        # Check path patterns (has slash)
+        for pat, pat_is_dir in self.path_patterns:
+            # Match full relative path
+            if fnmatch.fnmatch(rel_posix, pat):
+                if pat_is_dir:
+                    if is_dir: return True
+                else:
+                    return True
+
+            # Match prefix (e.g. "src/temp_data" ignoring "src/temp_data/file.txt")
+            if rel_posix.startswith(pat + "/"):
+                return True
+
+        # If name is in exact_names, we already returned True at start of match_entry/match.
+        # But if we have "src/foo/bar.txt" and "foo" is in exact_names...
+        # We need to check if any PART is in exact_names
+        if self.exact_names:
+            if parts is None: parts = rel_posix.split("/")
+            # We already checked name (last part)
+            if len(parts) > 1:
+                # Check parent parts
+                for part in parts[:-1]:
+                    if part in self.exact_names:
+                        return True
+
+        return False
+
+@functools.lru_cache(maxsize=128)
+def _get_matcher(patterns_tuple: Tuple[str]) -> IgnoreMatcher:
+    return IgnoreMatcher(set(patterns_tuple))
+
 def should_ignore_path(file_path: Path, base_path: Path, ignore_patterns: Set[str]) -> bool:
     """Check if a file path should be ignored based on gitignore patterns.
 
@@ -217,56 +385,10 @@ def should_ignore_path(file_path: Path, base_path: Path, ignore_patterns: Set[st
     Returns:
         True if the path should be ignored, False otherwise
     """
-    # Get the relative path from base
-    try:
-        relative_path = file_path.relative_to(base_path)
-        relative_str = str(relative_path)
-        relative_posix = relative_path.as_posix()  # Use forward slashes for matching
-
-        # Check each pattern
-        for pattern in ignore_patterns:
-            # Handle patterns starting with / (root relative)
-            if pattern.startswith("/"):
-                root_pattern = pattern[1:]  # Remove leading /
-
-                # For directory patterns ending with /
-                if root_pattern.endswith("/"):
-                    dir_name = root_pattern[:-1]  # Remove trailing /
-                    # Check if the first part of the path matches the directory name
-                    if len(relative_path.parts) > 0 and relative_path.parts[0] == dir_name:
-                        return True
-                else:
-                    # Regular root-relative pattern
-                    if fnmatch.fnmatch(relative_posix, root_pattern):
-                        return True
-                continue
-
-            # Handle directory patterns (ending with /)
-            if pattern.endswith("/"):
-                dir_name = pattern[:-1]  # Remove trailing /
-                # Check if any path part matches the directory name
-                if dir_name in relative_path.parts:
-                    return True
-                continue
-
-            # Direct name match (e.g., ".git", "node_modules")
-            if pattern in relative_path.parts:
-                return True
-
-            # Check if any individual path part matches the glob pattern
-            # This handles cases like ".*" matching ".hidden.md" in "concept/.hidden.md"
-            for part in relative_path.parts:
-                if fnmatch.fnmatch(part, pattern):
-                    return True
-
-            # Glob pattern match on full path
-            if fnmatch.fnmatch(relative_posix, pattern) or fnmatch.fnmatch(relative_str, pattern):
-                return True  # pragma: no cover
-
-        return False
-    except ValueError:
-        # If we can't get relative path, don't ignore
-        return False
+    # Use cached matcher factory to avoid re-parsing patterns
+    # Convert set to sorted tuple for deterministic caching
+    matcher = _get_matcher(tuple(sorted(ignore_patterns)))
+    return matcher.match(file_path, base_path)
 
 
 def filter_files(
@@ -285,11 +407,13 @@ def filter_files(
     if ignore_patterns is None:
         ignore_patterns = load_gitignore_patterns(base_path)
 
+    matcher = _get_matcher(tuple(sorted(ignore_patterns)))
+
     filtered_files = []
     ignored_count = 0
 
     for file_path in files:
-        if should_ignore_path(file_path, base_path, ignore_patterns):
+        if matcher.match(file_path, base_path):
             ignored_count += 1
         else:
             filtered_files.append(file_path)
