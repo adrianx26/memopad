@@ -651,6 +651,16 @@ class FileService:
         if full_path.suffix == ".canvas":
             mime_type = "application/json"
 
+        # Security: Prevent Stored XSS by refusing to serve potentially executable
+        # content types that browsers might render as HTML or execute scripts.
+        # We map these to text/plain to ensure they are treated as non-executable data.
+        if mime_type in ["text/html", "application/xhtml+xml", "image/svg+xml"]:
+            logger.warning(
+                f"Potentially dangerous content type '{mime_type}' detected for {path}. "
+                "Mapping to 'text/plain' for security."
+            )
+            mime_type = "text/plain"
+
         content_type = mime_type or "text/plain"
         return content_type
 
