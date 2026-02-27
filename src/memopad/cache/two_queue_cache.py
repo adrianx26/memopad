@@ -102,6 +102,42 @@ class TwoQueueCache(Generic[K, V]):
         logger.trace(f"2Q miss: {key}")
         return None
     
+    def __getitem__(self, key: K) -> V:
+        """Get value from cache using dictionary-style access.
+        
+        Args:
+            key: Cache key
+        
+        Returns:
+            Cached value
+        
+        Raises:
+            KeyError: If key is not found in cache
+        """
+        # Check frequent queue first
+        if key in self.am:
+            self.am.move_to_end(key)
+            self.hits += 1
+            logger.trace(f"2Q hit (Am): {key}")
+            return self.am[key]
+        
+        # Check recent queue
+        if key in self.a1:
+            # Second access - promote to frequent queue
+            value = self.a1.pop(key)
+            self.am[key] = value
+            self.am.move_to_end(key)
+            self.promotions += 1
+            self.hits += 1
+            self._evict_if_needed()
+            logger.trace(f"2Q hit (A1->Am promotion): {key}")
+            return value
+        
+        # Cache miss
+        self.misses += 1
+        logger.trace(f"2Q miss: {key}")
+        raise KeyError(key)
+    
     def put(self, key: K, value: V) -> None:
         """Put value into cache.
         

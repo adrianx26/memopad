@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MemoPad Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --font-body: 'Inter', system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+    --bg: #0f0f0f;
+    --surface: #1a1a1a;
+    --surface-2: #252525;
+    --border: #333;
+    --text: #e0e0e0;
+    --text-dim: #888;
+    --accent: #00d4aa;
+    --accent-dim: rgba(0, 212, 170, 0.15);
+    --secondary: #6b8aff;
+    --secondary-dim: rgba(107, 138, 255, 0.15);
+    --warning: #ffb347;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-body);
+    padding: 48px 32px;
+    line-height: 1.6;
+  }
+
+  .container { max-width: 1200px; margin: 0 auto; }
+
+  header {
+    text-align: center;
+    margin-bottom: 64px;
+    padding-bottom: 48px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  h1 {
+    font-size: 48px;
+    font-weight: 700;
+    margin-bottom: 16px;
+    background: linear-gradient(135deg, var(--accent), var(--secondary));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .subtitle {
+    color: var(--text-dim);
+    font-size: 18px;
+    font-weight: 400;
+  }
+
+  h2 {
+    font-size: 28px;
+    font-weight: 600;
+    margin: 56px 0 24px;
+    color: var(--accent);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  h2::before {
+    content: '';
+    width: 4px;
+    height: 28px;
+    background: var(--accent);
+    border-radius: 2px;
+  }
+
+  .section-intro {
+    color: var(--text-dim);
+    font-size: 16px;
+    margin-bottom: 32px;
+    max-width: 800px;
+    line-height: 1.8;
+  }
+
+  .diagram-container {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 32px;
+    margin: 32px 0;
+    overflow: auto;
+  }
+
+  .mermaid {
+    display: flex;
+    justify-content: center;
+  }
+
+  .legend {
+    display: flex;
+    gap: 24px;
+    flex-wrap: wrap;
+    margin-top: 24px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+
+  .legend-color {
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+  }
+
+  .code-block {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    overflow-x: auto;
+    margin: 16px 0;
+  }
+
+  .code-block .comment { color: #6a9955; }
+  .code-block .keyword { color: #569cd6; }
+  .code-block .string { color: #ce9178; }
+  .code-block .tag { color: #569cd6; }
+  .code-block .attr { color: #9cdcfe; }
+
+  .principle-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+    gap: 20px;
+    margin: 32px 0;
+  }
+
+  .principle-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px;
+  }
+
+  .principle-card h3 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    color: var(--accent);
+  }
+
+  .principle-card p {
+    font-size: 14px;
+    color: var(--text-dim);
+    line-height: 1.7;
+  }
+
+  .flow-note {
+    background: var(--surface-2);
+    border-left: 3px solid var(--accent);
+    padding: 16px 20px;
+    margin: 20px 0;
+    border-radius: 0 8px 8px 0;
+    font-size: 14px;
+    color: var(--text-dim);
+  }
+
+  .flow-note strong {
+    color: var(--text);
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+
+<header>
+  <h1>MemoPad Architecture</h1>
+  <p class="subtitle">Local-First Knowledge Management System</p>
+</header>
+
+<h2>What is MemoPad?</h2>
+<p class="section-intro">
+  MemoPad is a local-first knowledge management system that lets you build persistent knowledge through natural conversations with LLMs like Claude.
+  Everything stays in Markdown files on your computer while the system maintains a searchable knowledge graph.
+</p>
+
+<h2>1. System Overview</h2>
+<p class="section-intro">
+  MemoPad creates a bridge between human editors and AI assistants. Both read and write Markdown files,
+  while a sync engine maintains a searchable database index.
+</p>
+
+<div class="diagram-container">
+  <pre class="mermaid">
+    flowchart LR
+      subgraph Left["Human Side"]
+        Human["Human"]
+        Editor["Obsidian/VS Code"]
+        CLI["memopad CLI"]
+      end
+
+      subgraph Center["MemoPad Core"]
+        direction TB
+        MCP["MCP Server"]
+        API["FastAPI"]
+        Services["Services"]
+        Sync["Sync Engine"]
+      end
+
+      subgraph Right["AI Side"]
+        Claude["Claude Desktop"]
+        LLM["Other LLMs"]
+      end
+
+      subgraph Storage["Storage"]
+        Files["Markdown Files"]
+        DB[("SQLite Index")]
+      end
+
+      Human <-->|edit| Editor
+      Editor <-->|read/write| Files
+      CLI --> Services
+
+      Claude <-->|MCP tools| MCP
+      LLM <-->|MCP tools| MCP
+      MCP --> API
+      API --> Services
+
+      Services --> Sync
+      Sync <-->|watch changes| Files
+      Sync <-->|index| DB
+
+      Files -.->|parsed into| Entities["Entities, Observations, Relations"]
+
+      style Human fill:#1a3a3a,stroke:#00d4aa
+      style Claude fill:#2a3a5a,stroke:#6b8aff
+      style Files fill:#3a2a1a,stroke:#ffb347,stroke-width:3px
+  </pre>
+  <div class="legend">
+    <div class="legend-item"><div class="legend-color" style="background:#00d4aa"></div>Human Interface</div>
+    <div class="legend-item"><div class="legend-color" style="background:#6b8aff"></div>AI Interface</div>
+    <div class="legend-item"><div class="legend-color" style="background:#ffb347"></div>Source of Truth</div>
+    <div class="legend-item"><div class="legend-color" style="background:#444"></div>Index</div>
+  </div>
+</div>
+
+<div class="flow-note">
+  <strong>Key Concept:</strong> The yellow box (Markdown Files) is the <strong>source of truth</strong>.
+  Both humans and AI read and write the same files. The database is just an index for fast search.
+</div>
+
+<h2>2. Data Flow (File Operations)</h2>
+<p class="section-intro">
+  The sync engine keeps files and database synchronized bidirectionally.
+</p>
+
+<div class="diagram-container">
+  <pre class="mermaid">
+    sequenceDiagram
+      actor Human
+      participant File as "coffee.md"
+      participant Watch as "File Watcher"
+      participant Sync as "Sync Service"
+      participant Parser as "Markdown Parser"
+      participant DB as "SQLite"
+
+      Note over Human,DB: Human edits file
+      Human->>File: Edit content
+      File-->>Watch: File changed event
+      Watch->>Sync: Trigger sync
+
+      Sync->>File: Read markdown
+      Sync->>Parser: Parse content
+
+      Note right of Parser: Extract:<br/>- Frontmatter<br/>- Observations<br/>- Relations
+
+      Parser-->>Sync: Entity object
+      Sync->>DB: Upsert entity
+      Sync->>DB: Update observations
+      Sync->>DB: Update relations
+      Sync->>DB: Update FTS index
+
+      Note over Human,DB: AI reads via MCP
+      actor AI
+      AI->>Sync: read_note("coffee")
+      Sync->>DB: Query entity
+      DB-->>Sync: Entity + Obs + Rels
+      Sync-->>AI: Formatted response
+
+      Note over Human,DB: AI writes via MCP
+      AI->>Sync: write_note(title, content)
+      Sync->>DB: Create entity
+      Sync->>File: Write markdown
+      File-->>Human: Visible in editor
+  </pre>
+</div>
+
+<div class="flow-note">
+  <strong>Key Point:</strong> Files are the source of truth. The database is just an index for search and fast lookups.
+  Any change to files triggers a sync; any AI write updates both DB and files.
+</div>
+
+<h2>3. Knowledge Graph Structure</h2>
+<p class="section-intro">
+  Three core concepts form the knowledge graph. Each Markdown file becomes an entity with observations (facts) and relations (links).
+</p>
+
+<div class="diagram-container">
+  <pre class="mermaid">
+    erDiagram
+      ENTITY {
+        string title "Coffee Brewing"
+        string permalink "coffee-brewing"
+        string file_path "coffee.md"
+        datetime created_at
+        datetime updated_at
+      }
+
+      OBSERVATION {
+        string category "method"
+        string content "Pour over extracts more..."
+        string tags "brewing"
+      }
+
+      RELATION {
+        string relation_type "relates_to"
+        string target "bean-origins"
+        string context "see also"
+      }
+
+      ENTITY ||--o{ OBSERVATION : "has many"
+      ENTITY ||--o{ RELATION : "links via"
+      RELATION }o--o| ENTITY : "connects to"
+  </pre>
+</div>
+
+<div class="code-block">
+<span class="comment"># Example: coffee.md</span>
+---
+title: Coffee Brewing
+permalink: coffee-brewing
+tags: [coffee, brewing]
+---
+
+<span class="comment">## Observations (facts)</span>
+- [<span class="keyword">method</span>] Pour over extracts more floral notes
+- [<span class="keyword">technique</span>] Water temp 205°F is optimal <span class="string">#brewing</span>
+- [<span class="keyword">preference</span>] Ethiopian beans have bright flavors
+
+<span class="comment">## Relations (links)</span>
+- relates_to [[<span class="string">Bean Origins</span>]]
+- requires [[<span class="string">Grinding Technique</span>]]
+- pairs_well_with [[<span class="string">Chocolate</span>]]
+</div>
+
+<h2>4. Architecture Layers</h2>
+<p class="section-intro">
+  Clean separation of concerns with explicit dependency injection through composition roots.
+</p>
+
+<div class="diagram-container">
+  <pre class="mermaid">
+    flowchart TB
+      subgraph L6["Layer 6: Entrypoints"]
+        API_R["API Routers"]
+        MCP_T["MCP Tools"]
+        CLI_C["CLI Commands"]
+      end
+
+      subgraph L5["Layer 5: Clients"]
+        KC["KnowledgeClient"]
+        SC["SearchClient"]
+        MC["MemoryClient"]
+      end
+
+      subgraph L4["Layer 4: Services"]
+        ES["EntityService"]
+        SS["SearchService"]
+        FS["FileService"]
+      end
+
+      subgraph L3["Layer 3: Repositories"]
+        ER["EntityRepository"]
+        OR["ObservationRepository"]
+        RR["RelationRepository"]
+      end
+
+      subgraph L2["Layer 2: Data Access"]
+        SQL["SQLite / PostgreSQL"]
+        FSys["File System"]
+      end
+
+      subgraph L1["Layer 1: Storage"]
+        MD["Markdown Files\n(Source of Truth)"]
+      end
+
+      MCP_T --> KC
+      API_R --> ES
+      CLI_C --> FS
+
+      KC --> ES
+      SC --> SS
+
+      ES --> ER
+      SS --> OR
+      FS --> FSys
+
+      ER --> SQL
+      OR --> SQL
+
+      SQL -.->|index| MD
+      FSys --> MD
+
+      style L6 fill:#1a3a3a,stroke:#00d4aa
+      style L1 fill:#3a2a1a,stroke:#ffb347
+  </pre>
+</div>
+
+<h2>5. MCP Tool Flow</h2>
+<p class="section-intro">
+  When Claude calls a tool, it flows through the typed client to the API, then through services to the database.
+</p>
+
+<div class="diagram-container">
+  <pre class="mermaid">
+    sequenceDiagram
+      participant Claude as "Claude Desktop"
+      participant MCP as "MCP Server"
+      participant Client as "KnowledgeClient"
+      participant API as "FastAPI Router"
+      participant Service as "EntityService"
+      participant Repo as "EntityRepository"
+      participant DB as "Database"
+
+      Claude->>MCP: Call tool: write_note()
+      MCP->>MCP: Get async HTTP client
+      MCP->>Client: Create KnowledgeClient
+
+      Client->>API: POST /knowledge/entities
+      Note right of Client: Validates response<br/>with Pydantic models
+
+      API->>Service: entity_service.create()
+      Service->>Service: Business logic
+      Service->>Repo: entity_repo.create()
+
+      Repo->>DB: INSERT/UPDATE
+      DB-->>Repo: Entity record
+      Repo-->>Service: Entity model
+
+      Service->>Service: Sync to file
+      Service-->>API: EntityResponse
+      API-->>Client: JSON response
+      Client-->>MCP: Validated object
+      MCP-->>Claude: Tool result
+  </pre>
+</div>
+
+<h2>6. Runtime Modes</h2>
+<p class="section-intro">
+  Three runtime modes support different environments. Resolution: TEST > CLOUD > LOCAL.
+</p>
+
+<div class="diagram-container">
+  <pre class="mermaid">
+    flowchart TD
+      A([Start]) --> B{Test Environment?}
+      B -->|Yes| TEST["TEST MODE"]
+      B -->|No| C{Cloud Enabled?}
+      C -->|Yes| CLOUD["CLOUD MODE"]
+      C -->|No| LOCAL["LOCAL MODE"]
+
+      TEST --> T1["• In-memory SQLite<br/>• Temp directories<br/>• No auth<br/>• Fast tests"]
+
+      LOCAL --> L1["• SQLite on disk<br/>• Local files<br/>• ASGI routing<br/>• No auth"]
+
+      CLOUD --> C1["• PostgreSQL<br/>• Cloud storage<br/>• HTTP routing<br/>• JWT + subscription"]
+
+      style TEST fill:#2d4a3e,stroke:#00d4aa
+      style LOCAL fill:#3d4a2e,stroke:#6b8aff
+      style CLOUD fill:#4a3d2e,stroke:#ffb347
+  </pre>
+</div>
+
+<h2>Key Design Principles</h2>
+
+<div class="principle-grid">
+  <div class="principle-card">
+    <h3>Local-First</h3>
+    <p>Markdown files are the source of truth. You own your data. The database is just an index for search and performance.</p>
+  </div>
+
+  <div class="principle-card">
+    <h3>Bi-Directional</h3>
+    <p>Both humans and AI assistants read and write to the same files. No separate "AI knowledge base" — just shared Markdown.</p>
+  </div>
+
+  <div class="principle-card">
+    <h3>Composition Root Pattern</h3>
+    <p>Each entrypoint (API, MCP, CLI) has its own container that wires dependencies explicitly. No hidden global state.</p>
+  </div>
+
+  <div class="principle-card">
+    <h3>Semantic Markup</h3>
+ <p>Simple Markdown patterns unlock rich knowledge graphs. Observations with <code>[category]</code> and Relations with <code>[[WikiLinks]]</code>.</p>
+  </div>
+
+  <div class="principle-card">
+    <h3>Three Entrypoints</h3>
+    <p>API for REST clients, MCP for AI assistants, CLI for terminal users. All share the same service layer.</p>
+  </div>
+
+  <div class="principle-card">
+    <h3>Explicit Dependencies</h3>
+    <p>Configuration flows through composition roots. Services receive dependencies explicitly, not through globals.</p>
+  </div>
+</div>
+
+</div>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+  mermaid.registerLayoutLoaders(elkLayouts);
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    look: 'classic',
+    layout: 'elk',
+    themeVariables: {
+      primaryColor: '#1a3a3a',
+      primaryBorderColor: '#00d4aa',
+      primaryTextColor: '#e0e0e0',
+      secondaryColor: '#2a3a5a',
+      secondaryBorderColor: '#6b8aff',
+      secondaryTextColor: '#e0e0e0',
+      tertiaryColor: '#3a3a2a',
+      tertiaryBorderColor: '#ffb347',
+      tertiaryTextColor: '#e0e0e0',
+      lineColor: '#444',
+      fontSize: '14px',
+      fontFamily: "'Inter', sans-serif",
+    }
+  });
+</script>
+
+</body>
+</html>

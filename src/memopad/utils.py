@@ -1,13 +1,13 @@
 ﻿"""Utility functions for memopad."""
 
-import os
-
 import logging
+import mimetypes
+import os
 import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Protocol, Union, runtime_checkable, List
+from typing import List, Protocol, Tuple, Union, runtime_checkable
 
 from loguru import logger
 from unidecode import unidecode
@@ -68,6 +68,140 @@ class PathLike(Protocol):
 FilePath = Union[Path, str]
 
 
+def _normalize_path(file_path: Union[Path, str, PathLike]) -> str:
+    """Convert Path to POSIX string format."""
+    return Path(str(file_path)).as_posix()
+
+
+def _split_extension(path_str: str, split_extension: bool) -> Tuple[str, str]:
+    """Split file extension using mimetypes for detection.
+
+    Uses mimetypes to detect real extensions, avoiding misinterpreting
+    periods in version numbers (e.g., "2.0.0").
+    """
+    mime_type, _ = mimetypes.guess_type(path_str)
+    has_real_extension = mime_type is not None
+
+    if has_real_extension and split_extension:
+        return os.path.splitext(path_str)
+    return path_str, ""
+
+
+def _has_cjk_chars(text: str) -> bool:
+    """Check if text contains CJK characters.
+
+    CJK ranges: \u4e00-\u9fff (CJK Unified Ideographs), \u3000-\u303f (CJK symbols),
+    \u3400-\u4dbf (CJK Extension A), \uff00-\uffef (Fullwidth forms)
+    """
+    return any(
+        "\u4e00" <= char <= "\u9fff"
+        or "\u3000" <= char <= "\u303f"
+        or "\u3400" <= char <= "\u4dbf"
+        or "\uff00" <= char <= "\uffef"
+        for char in text
+    )
+
+
+def _process_cjk_path(base: str) -> str:
+    """Process path containing CJK characters.
+
+    For text with CJK characters, selectively transliterate only Latin accented chars.
+    Preserves CJK ideographs while normalizing ASCII portions.
+    """
+    result = ""
+    for char in base:
+        if (
+            "\u4e00" <= char <= "\u9fff"
+            or "\u3000" <= char <= "\u303f"
+            or "\u3400" <= char <= "\u4dbf"
+        ):
+            # Preserve CJK ideographs and symbols
+            result += char
+        elif "\uff00" <= char <= "\uffef":
+            # Remove Chinese fullwidth punctuation entirely (like ，！？)
+            continue
+        else:
+            # Transliterate Latin accented characters to ASCII
+            result += unidecode(char)
+
+    # Insert hyphens between CJK and Latin character transitions
+    # Match: CJK followed by Latin letter/digit, or Latin letter/digit followed by CJK
+    result = re.sub(
+        r"([\u4e00-\u9fff\u3000-\u303f\u3400-\u4dbf])([a-zA-Z0-9])", r"\1-\2", result
+    )
+    result = re.sub(
+        r"([a-zA-Z0-9])([\u4e00-\u9fff\u3000-\u303f\u3400-\u4dbf])", r"\1-\2", result
+    )
+
+    # Insert dash between camelCase
+    result = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", result)
+
+    # Convert ASCII letters to lowercase, preserve CJK
+    lower_text = "".join(c.lower() if c.isascii() and c.isalpha() else c for c in result)
+
+    # Replace underscores with hyphens
+    text_with_hyphens = lower_text.replace("_", "-")
+
+    # Remove apostrophes entirely (don't replace with hyphens)
+    text_no_apostrophes = text_with_hyphens.replace("'", "")
+
+    # Replace unsafe chars with hyphens, but preserve CJK characters and periods
+    clean_text = re.sub(
+        r"[^a-z0-9\u4e00-\u9fff\u3000-\u303f\u3400-\u4dbf/\-\.]", "-", text_no_apostrophes
+    )
+
+    return clean_text
+
+
+def _process_ascii_path(base: str) -> str:
+    """Process ASCII-only path.
+
+    Original ASCII-only processing for backward compatibility.
+    Transliterates unicode to ascii and normalizes formatting.
+    """
+    # Transliterate unicode to ascii
+    ascii_text = unidecode(base)
+
+    # Insert dash between camelCase
+    ascii_text = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", ascii_text)
+
+    # Convert to lowercase
+    lower_text = ascii_text.lower()
+
+    # Replace underscores with hyphens
+    text_with_hyphens = lower_text.replace("_", "-")
+
+    # Remove apostrophes entirely (don't replace with hyphens)
+    text_no_apostrophes = text_with_hyphens.replace("'", "")
+
+    # Replace remaining invalid chars with hyphens, preserving periods
+    clean_text = re.sub(r"[^a-z0-9/\-\.]", "-", text_no_apostrophes)
+
+    return clean_text
+
+
+def _finalize_permalink(clean_text: str, extension: str, split_extension: bool) -> str:
+    """Clean segments and return final permalink.
+
+    Collapses multiple hyphens, cleans path segments, and optionally
+    appends file extension back.
+    """
+    # Collapse multiple hyphens
+    clean_text = re.sub(r"-+", "-", clean_text)
+
+    # Clean each path segment
+    segments = clean_text.split("/")
+    clean_segments = [s.strip("-") for s in segments]
+
+    return_val = "/".join(clean_segments)
+
+    # Append file extension back, if necessary
+    if not split_extension and extension:  # pragma: no cover
+        return_val += extension  # pragma: no cover
+
+    return return_val
+
+
 def generate_permalink(file_path: Union[Path, str, PathLike], split_extension: bool = True) -> str:
     """Generate a stable permalink from a file path.
 
@@ -94,112 +228,15 @@ def generate_permalink(file_path: Union[Path, str, PathLike], split_extension: b
         >>> generate_permalink("Version 2.0.0")
         'version-2.0.0'
     """
-    # Convert Path to string if needed
-    path_str = Path(str(file_path)).as_posix()
+    path_str = _normalize_path(file_path)
+    base, extension = _split_extension(path_str, split_extension)
 
-    # Only split extension if there's a real file extension
-    # Use mimetypes to detect real extensions, avoiding misinterpreting periods in version numbers
-    import mimetypes
-
-    mime_type, _ = mimetypes.guess_type(path_str)
-    has_real_extension = mime_type is not None
-
-    if has_real_extension and split_extension:
-        # Real file extension detected - split it off
-        (base, extension) = os.path.splitext(path_str)
+    if _has_cjk_chars(base):
+        clean_text = _process_cjk_path(base)
     else:
-        # No real extension or split_extension=False - process the whole string
-        base = path_str
-        extension = ""
+        clean_text = _process_ascii_path(base)
 
-    # Check if we have CJK characters that should be preserved
-    # CJK ranges: \u4e00-\u9fff (CJK Unified Ideographs), \u3000-\u303f (CJK symbols),
-    # \u3400-\u4dbf (CJK Extension A), \uff00-\uffef (Fullwidth forms)
-    has_cjk_chars = any(
-        "\u4e00" <= char <= "\u9fff"
-        or "\u3000" <= char <= "\u303f"
-        or "\u3400" <= char <= "\u4dbf"
-        or "\uff00" <= char <= "\uffef"
-        for char in base
-    )
-
-    if has_cjk_chars:
-        # For text with CJK characters, selectively transliterate only Latin accented chars
-        result = ""
-        for char in base:
-            if (
-                "\u4e00" <= char <= "\u9fff"
-                or "\u3000" <= char <= "\u303f"
-                or "\u3400" <= char <= "\u4dbf"
-            ):
-                # Preserve CJK ideographs and symbols
-                result += char
-            elif "\uff00" <= char <= "\uffef":
-                # Remove Chinese fullwidth punctuation entirely (like ，！？)
-                continue
-            else:
-                # Transliterate Latin accented characters to ASCII
-                result += unidecode(char)
-
-        # Insert hyphens between CJK and Latin character transitions
-        # Match: CJK followed by Latin letter/digit, or Latin letter/digit followed by CJK
-        result = re.sub(
-            r"([\u4e00-\u9fff\u3000-\u303f\u3400-\u4dbf])([a-zA-Z0-9])", r"\1-\2", result
-        )
-        result = re.sub(
-            r"([a-zA-Z0-9])([\u4e00-\u9fff\u3000-\u303f\u3400-\u4dbf])", r"\1-\2", result
-        )
-
-        # Insert dash between camelCase
-        result = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", result)
-
-        # Convert ASCII letters to lowercase, preserve CJK
-        lower_text = "".join(c.lower() if c.isascii() and c.isalpha() else c for c in result)
-
-        # Replace underscores with hyphens
-        text_with_hyphens = lower_text.replace("_", "-")
-
-        # Remove apostrophes entirely (don't replace with hyphens)
-        text_no_apostrophes = text_with_hyphens.replace("'", "")
-
-        # Replace unsafe chars with hyphens, but preserve CJK characters and periods
-        clean_text = re.sub(
-            r"[^a-z0-9\u4e00-\u9fff\u3000-\u303f\u3400-\u4dbf/\-\.]", "-", text_no_apostrophes
-        )
-    else:
-        # Original ASCII-only processing for backward compatibility
-        # Transliterate unicode to ascii
-        ascii_text = unidecode(base)
-
-        # Insert dash between camelCase
-        ascii_text = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", ascii_text)
-
-        # Convert to lowercase
-        lower_text = ascii_text.lower()
-
-        # replace underscores with hyphens
-        text_with_hyphens = lower_text.replace("_", "-")
-
-        # Remove apostrophes entirely (don't replace with hyphens)
-        text_no_apostrophes = text_with_hyphens.replace("'", "")
-
-        # Replace remaining invalid chars with hyphens, preserving periods
-        clean_text = re.sub(r"[^a-z0-9/\-\.]", "-", text_no_apostrophes)
-
-    # Collapse multiple hyphens
-    clean_text = re.sub(r"-+", "-", clean_text)
-
-    # Clean each path segment
-    segments = clean_text.split("/")
-    clean_segments = [s.strip("-") for s in segments]
-
-    return_val = "/".join(clean_segments)
-
-    # Append file extension back, if necessary
-    if not split_extension and extension:  # pragma: no cover
-        return_val += extension  # pragma: no cover
-
-    return return_val
+    return _finalize_permalink(clean_text, extension, split_extension)
 
 
 def setup_logging(

@@ -344,10 +344,7 @@ class EntityRepository(Repository[Entity]):
         return list(result.scalars().all())
 
     async def upsert_entity(self, entity: Entity) -> Entity:
-        """Insert or update entity using simple try/catch with database-level conflict resolution.
-
-        Handles file_path race conditions by checking for existing entity on IntegrityError.
-        For permalink conflicts, generates a unique permalink with numeric suffix.
+        """Insert or update entity with clean separation of concerns.
 
         Args:
             entity: The entity to insert or update
@@ -356,93 +353,104 @@ class EntityRepository(Repository[Entity]):
             The inserted or updated entity
         """
         async with db.scoped_session(self.session_maker) as session:
-            # Set project_id if applicable and not already set
             self._set_project_id_if_needed(entity)
 
-            # Try simple insert first
             try:
-                session.add(entity)
-                await session.flush()
-
-                # Return with relationships loaded
-                query = (
-                    self.select()
-                    .where(Entity.file_path == entity.file_path)
-                    .options(*self.get_load_options())
-                )
-                result = await session.execute(query)
-                found = result.scalar_one_or_none()
-                if not found:  # pragma: no cover
-                    raise RuntimeError(
-                        f"Failed to retrieve entity after insert: {entity.file_path}"
-                    )
-                return found
-
+                return await self._try_insert_entity(session, entity)
             except IntegrityError as e:
-                # Check if this is a FOREIGN KEY constraint failure
-                # SQLite: "FOREIGN KEY constraint failed"
-                # Postgres: "violates foreign key constraint"
-                error_str = str(e)
-                if (
-                    "FOREIGN KEY constraint failed" in error_str
-                    or "violates foreign key constraint" in error_str
-                ):
-                    # Import locally to avoid circular dependency (repository -> services -> repository)
-                    from memopad.services.exceptions import SyncFatalError
+                return await self._handle_upsert_conflict(session, entity, e)
 
-                    # Project doesn't exist in database - this is a fatal sync error
-                    raise SyncFatalError(
-                        f"Cannot sync file '{entity.file_path}': "
-                        f"project_id={entity.project_id} does not exist in database. "
-                        f"The project may have been deleted. This sync will be terminated."
-                    ) from e
+    async def _try_insert_entity(self, session: AsyncSession, entity: Entity) -> Entity:
+        """Attempt to insert a new entity."""
+        session.add(entity)
+        await session.flush()
 
-                await session.rollback()
+        query = (
+            self.select()
+            .where(Entity.file_path == entity.file_path)
+            .options(*self.get_load_options())
+        )
+        result = await session.execute(query)
+        found = result.scalar_one_or_none()
+        if not found:  # pragma: no cover
+            raise RuntimeError(f"Failed to retrieve entity after insert: {entity.file_path}")
+        return found
 
-                # Re-query after rollback to get a fresh, attached entity
-                existing_result = await session.execute(
-                    select(Entity)
-                    .where(
-                        Entity.file_path == entity.file_path, Entity.project_id == entity.project_id
-                    )
-                    .options(*self.get_load_options())
-                )
-                existing_entity = existing_result.scalar_one_or_none()
+    async def _handle_upsert_conflict(
+        self, session: AsyncSession, entity: Entity, error: IntegrityError
+    ) -> Entity:
+        """Route to appropriate conflict handler based on error type."""
+        error_str = str(error)
 
-                if existing_entity:
-                    # File path conflict - update the existing entity
-                    logger.debug(
-                        f"Resolving file_path conflict for {entity.file_path}, "
-                        f"entity_id={existing_entity.id}, observations={len(entity.observations)}"
-                    )
-                    # Use merge to avoid session state conflicts
-                    # Set the ID to update existing entity
-                    entity.id = existing_entity.id
+        if self._is_foreign_key_error(error_str):
+            raise self._create_sync_fatal_error(entity) from error
 
-                    # Ensure observations reference the correct entity_id
-                    for obs in entity.observations:
-                        obs.entity_id = existing_entity.id
-                        # Clear any existing ID to force INSERT as new observation
-                        obs.id = None
+        await session.rollback()
 
-                    # Merge the entity which will update the existing one
-                    merged_entity = await session.merge(entity)
+        # Check for file_path conflict
+        existing = await self._find_entity_by_file_path(session, entity.file_path, entity.project_id)
+        if existing:
+            return await self._merge_entity_update(session, entity, existing)
 
-                    await session.commit()
+        # Must be permalink conflict
+        return await self._resolve_permalink_conflict(session, entity)
 
-                    # Re-query to get proper relationships loaded
-                    final_result = await session.execute(
-                        select(Entity)
-                        .where(Entity.id == merged_entity.id)
-                        .options(*self.get_load_options())
-                    )
-                    return final_result.scalar_one()
+    def _is_foreign_key_error(self, error_str: str) -> bool:
+        """Check if error is a foreign key constraint failure."""
+        return (
+            "FOREIGN KEY constraint failed" in error_str
+            or "violates foreign key constraint" in error_str
+        )
 
-                else:
-                    # No file_path conflict - must be permalink conflict
-                    # Generate unique permalink and retry
-                    entity = await self._handle_permalink_conflict(entity, session)
-                    return entity
+    def _create_sync_fatal_error(self, entity: Entity) -> Exception:
+        """Create appropriate SyncFatalError for foreign key violations."""
+        from memopad.services.exceptions import SyncFatalError
+
+        return SyncFatalError(
+            f"Cannot sync file '{entity.file_path}': "
+            f"project_id={entity.project_id} does not exist in database. "
+            f"The project may have been deleted. This sync will be terminated."
+        )
+
+    async def _find_entity_by_file_path(
+        self, session: AsyncSession, file_path: str, project_id: int
+    ) -> Optional[Entity]:
+        """Find entity by file path within a specific project."""
+        result = await session.execute(
+            select(Entity)
+            .where(Entity.file_path == file_path, Entity.project_id == project_id)
+            .options(*self.get_load_options())
+        )
+        return result.scalar_one_or_none()
+
+    async def _merge_entity_update(
+        self, session: AsyncSession, new_entity: Entity, existing_entity: Entity
+    ) -> Entity:
+        """Merge new entity data into existing entity."""
+        logger.debug(
+            f"Resolving file_path conflict for {new_entity.file_path}, "
+            f"entity_id={existing_entity.id}, observations={len(new_entity.observations)}"
+        )
+
+        # Set ID to update existing entity
+        new_entity.id = existing_entity.id
+
+        # Ensure observations reference correct entity_id
+        for obs in new_entity.observations:
+            obs.entity_id = existing_entity.id
+            obs.id = None  # Force INSERT as new observation
+
+        # Merge and commit
+        merged = await session.merge(new_entity)
+        await session.commit()
+
+        # Re-query to get proper relationships
+        final_result = await session.execute(
+            select(Entity)
+            .where(Entity.id == merged.id)
+            .options(*self.get_load_options())
+        )
+        return final_result.scalar_one()
 
     async def get_all_file_paths(self) -> List[str]:
         """Get all file paths for this project - optimized for deletion detection.
@@ -519,7 +527,7 @@ class EntityRepository(Repository[Entity]):
         result = await self.execute_query(query, use_query_options=False)
         return list(result.scalars().all())
 
-    async def _handle_permalink_conflict(self, entity: Entity, session: AsyncSession) -> Entity:
+    async def _resolve_permalink_conflict(self, session: AsyncSession, entity: Entity) -> Entity:
         """Handle permalink conflicts by generating a unique permalink."""
         base_permalink = entity.permalink
         suffix = 1

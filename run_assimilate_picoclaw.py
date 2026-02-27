@@ -1,40 +1,28 @@
-"""Run assimilation directly without MCP layer, with content truncation."""
+"""Run assimilation for picoclaw repository directly without MCP layer."""
 import asyncio
 import sys
-import argparse
 sys.path.insert(0, 'src')
 
 MAX_FILE_TEXT = 50_000   # max chars per file to include in a note
 MAX_NOTE_CONTENT = 800_000  # max total chars per note (well below 1M limit)
 
 async def run():
-    from memopad.mcp.tools.assimilate.github import is_github_repo, clone_github_repo
-    from memopad.mcp.tools.assimilate import (
-        _build_overview_note, _build_skills_rules_note,
-        _build_agent_profiles_note, _build_tools_functions_note,
-        _build_concepts_note, _build_functional_diagram_note
-    )
+    from memopad.mcp.tools.assimilate import is_github_repo, clone_github_repo
+    from memopad.mcp.tools.assimilate import _build_overview_note, _build_skills_rules_note
+    from memopad.mcp.tools.assimilate import _build_agent_profiles_note, _build_tools_functions_note
+    from memopad.mcp.tools.assimilate import _build_concepts_note, _build_functional_diagram_note
     from memopad.mcp.async_client import get_client
     from memopad.mcp.project_context import get_active_project
     from memopad.mcp.clients import KnowledgeClient
     from memopad.schemas.base import Entity
     from urllib.parse import urlparse
 
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Assimilate a URL into memopad')
-    parser.add_argument('url', help='URL to assimilate')
-    parser.add_argument('--project', default='imported', help='Target project name')
-    parser.add_argument('--max-depth', type=int, default=3, help='Maximum crawl depth')
-    parser.add_argument('--max-pages', type=int, default=50, help='Maximum pages to fetch')
-    args = parser.parse_args()
-
-    url = args.url
-    project = args.project
-    max_pages = args.max_pages
+    url = 'https://github.com/sipeed/picoclaw'
+    project = None  # Use default project
 
     print(f'Is github repo: {is_github_repo(url)}')
     print('Cloning...')
-    data = await clone_github_repo(url, max_files=max_pages)
+    data = await clone_github_repo(url)
     print(f'Pages found: {len(data["pages"])}')
     print(f'Errors: {data["errors"]}')
 

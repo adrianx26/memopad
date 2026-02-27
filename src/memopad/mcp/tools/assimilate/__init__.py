@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 import httpx
 from fastmcp import Context
-from loguru import logger
+from loguru import logger as global_logger
 
 from memopad.mcp.async_client import get_client
 from memopad.mcp.project_context import get_active_project, add_project_metadata
@@ -22,6 +22,7 @@ from .config import DEFAULT_CONFIG, DIRECT_DOWNLOAD_EXTENSIONS, DIRECT_DOWNLOAD_
 from .crawler import crawl, get_http_client
 from .file_processor import FileProcessor
 from .github import clone_github_repo, is_github_repo
+from .logger import get_logger as get_assimilate_logger
 from .note_builders import build_all_notes, build_overview_note, build_github_links_note, build_note, build_functional_diagram_note, truncate_content
 from .types import CrawlResult
 
@@ -148,10 +149,14 @@ async def _assimilate_impl(
     context: Context | None = None,
 ) -> str:
     """Assimilate knowledge from a URL into memopad."""
-    logger.info(
+    global_logger.info(
         f"MCP tool call tool=assimilate url={url} "
         f"max_depth={max_depth} max_pages={max_pages} open_browser={open_browser}"
     )
+
+    # Initialize assimilate logger
+    assimilate_logger = get_assimilate_logger()
+    log_entry = None
 
     try:
         # Validate URL
@@ -166,16 +171,18 @@ async def _assimilate_impl(
         # Open in browser if requested
         if open_browser:
             try:
-                logger.info(f"Opening browser for {url}")
+                global_logger.info(f"Opening browser for {url}")
                 webbrowser.open(url)
             except Exception as e:
-                logger.error(f"Failed to open browser for {url}: {e}")
+                global_logger.error(f"Failed to open browser for {url}: {e}")
 
         data: CrawlResult | None = None
+        strategy = "unknown"
 
         # Strategy 1: GitHub Repo
         if is_github_repo(url):
-            logger.info(f"assimilate: detected GitHub repo, cloning {url}")
+            strategy = "github"
+            global_logger.info(f"assimilate: detected GitHub repo, cloning {url}")
             data = await clone_github_repo(url, max_files=max_pages)
             path_parts = parsed.path.strip("/").split("/")
             if len(path_parts) >= 2:
@@ -201,7 +208,7 @@ async def _assimilate_impl(
                     pass  # Ignore HEAD errors, fall back to crawl
 
             if should_download_directly:
-                logger.info(f"assimilate: detected direct file download for {url}")
+                global_logger.info(f"assimilate: detected direct file download for {url}")
                 try:
                     async with get_http_client() as client:
                         resp = await client.get(
@@ -228,7 +235,7 @@ async def _assimilate_impl(
                             "errors": [],
                         }
                 except Exception as e:
-                    logger.error(f"Failed to download file {url}: {e}")
+                    global_logger.error(f"Failed to download file {url}: {e}")
                     data = {
                         "pages": [],
                         "all_github_links": [],
@@ -238,10 +245,10 @@ async def _assimilate_impl(
 
         # Strategy 3: Generic Crawl (Fallback)
         if data is None:
-            logger.info(f"assimilate: starting generic crawl of {url}")
+            global_logger.info(f"assimilate: starting generic crawl of {url}")
             data = await crawl(url, max_depth=max_depth, max_pages=max_pages)
 
-        logger.info(
+        global_logger.info(
             f"assimilate: processing complete — {len(data['pages'])} pages/files, "
             f"{len(data['all_github_links'])} github links"
         )
@@ -253,7 +260,7 @@ async def _assimilate_impl(
             return f"# Error\n\nCould not fetch any content from {url}"
 
         # Build notes
-        logger.info("assimilate: building structured notes from gathered data")
+        global_logger.info("assimilate: building structured notes from gathered data")
         notes_to_write = build_all_notes(url, data)
 
         # Store notes in memopad
@@ -261,6 +268,17 @@ async def _assimilate_impl(
 
         async with get_client() as client:
             active_project = await get_active_project(client, project, context)
+
+            # Start assimilate logging
+            log_entry = assimilate_logger.start_operation(
+                url=url,
+                project=active_project.name,
+                project_path=getattr(active_project, 'path', 'unknown'),
+                strategy=strategy,
+                max_depth=max_depth,
+                max_pages=max_pages,
+            )
+            assimilate_logger.log_detection(url, strategy)
 
             from memopad.mcp.clients import KnowledgeClient
 
@@ -295,11 +313,23 @@ async def _assimilate_impl(
                                     result = await knowledge_client.update_entity(
                                         entity_id, entity.model_dump(), fast=False
                                     )
-                                    logger.info(
-                                        f"assimilate: updated existing note '{title}' at {result.permalink}"
+                                    global_logger.info(
+                                        f"assimilate: updated existing note "
+                                        f"'{title}' at {result.permalink}"
+                                    )
+
+                                    # Log file update to assimilate logger
+                                    file_path = f"{directory}/{title}.md"
+                                    assimilate_logger.log_file_saved(
+                                        title=title,
+                                        file_path=file_path,
+                                        permalink=result.permalink,
+                                        directory=directory,
+                                        operation="updated",
+                                        content_length=len(content),
                                     )
                                 except Exception as update_err:
-                                    logger.error(
+                                    global_logger.error(
                                         f"assimilate: update failed for '{title}': {update_err}"
                                     )
                                     raise update_err
@@ -308,10 +338,35 @@ async def _assimilate_impl(
                         else:
                             raise
                     stored.append(f"- {title}: {result.permalink}")
-                    logger.info(f"assimilate: stored note '{title}' at {result.permalink}")
+                    global_logger.info(
+                        f"assimilate: stored note '{title}' at {result.permalink}"
+                    )
+
+                    # Log file save to assimilate logger
+                    file_path = f"{directory}/{title}.md"
+                    assimilate_logger.log_file_saved(
+                        title=title,
+                        file_path=file_path,
+                        permalink=result.permalink,
+                        directory=directory,
+                        operation="created",
+                        content_length=len(content),
+                    )
                 except Exception as e:
                     stored.append(f"- {title}: FAILED ({e})")
-                    logger.error(f"assimilate: failed to store note '{title}': {e}")
+                    global_logger.error(f"assimilate: failed to store note '{title}': {e}")
+                    assimilate_logger.log_error(
+                        error_type="save_failed",
+                        message=str(e),
+                        details={"title": title, "directory": directory},
+                    )
+
+        # Complete logging
+        assimilate_logger.complete_operation(
+            status="completed",
+            items_processed=len(data["pages"]),
+            github_links_found=len(data["all_github_links"]),
+        )
 
         # Build summary
         summary_lines = [
@@ -340,7 +395,14 @@ async def _assimilate_impl(
         return add_project_metadata(summary_result, active_project.name)
 
     except asyncio.CancelledError:
-        logger.warning(f"assimilate: CancelledError for {url} — operation was cancelled")
+        global_logger.warning(
+            f"assimilate: CancelledError for {url} — operation was cancelled"
+        )
+        assimilate_logger.complete_operation(
+            status="cancelled",
+            items_processed=0,
+            github_links_found=0,
+        )
         return (
             f"# Error\n\nAssimilation was cancelled for {url}.\n\n"
             "This can happen during long-running operations on Windows. "
@@ -348,7 +410,17 @@ async def _assimilate_impl(
             "- Re-running the script (partial progress is retained)"
         )
     except Exception as e:
-        logger.exception(f"assimilate: unhandled error for {url}")
+        global_logger.exception(f"assimilate: unhandled error for {url}")
+        assimilate_logger.log_error(
+            error_type="unhandled_exception",
+            message=str(e),
+            details={"exception_type": type(e).__name__},
+        )
+        assimilate_logger.complete_operation(
+            status="failed",
+            items_processed=0,
+            github_links_found=0,
+        )
         return (
             f"# Error\n\nAssimilation failed for {url}:\n\n"
             f"**{type(e).__name__}**: {e}\n\n"

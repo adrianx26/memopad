@@ -61,6 +61,7 @@ class FileService:
         self._metadata_cache: OrderedDict[str, Tuple[FileMetadata, float]] = OrderedDict()
         self._max_metadata_cache_size = 5000  # Prevent unbounded memory growth
         self._metadata_cache_ttl = 60.0  # Base TTL - can be adaptive per file
+        self._cache_lock = asyncio.Lock()  # Lock for thread-safe cache operations
 
     def get_entity_path(self, entity: Union[EntityModel, EntitySchema]) -> Path:
         """Generate absolute filesystem path for entity.
@@ -512,23 +513,25 @@ class FileService:
         # Convert string to Path if needed
         path_obj = self.base_path / path if isinstance(path, str) else path
         full_path = path_obj if path_obj.is_absolute() else self.base_path / path_obj
-        
+
         # Use path string as cache key
         cache_key = str(full_path.as_posix())
-        
-        # Check cache if enabled
-        if use_cache and cache_key in self._metadata_cache:
-            cached_metadata, cached_time = self._metadata_cache[cache_key]
-            current_time = time.time()
-            
-            # Check if cache entry is still valid (within TTL)
-            if current_time - cached_time < self._metadata_cache_ttl:
-                logger.trace(f"File metadata cache hit: {cache_key}")
-                return cached_metadata
-            else:
-                # Cache expired - remove stale entry
-                del self._metadata_cache[cache_key]
-                logger.trace(f"File metadata cache expired: {cache_key}")
+
+        # Check cache if enabled (with lock for thread safety)
+        if use_cache:
+            async with self._cache_lock:
+                if cache_key in self._metadata_cache:
+                    cached_metadata, cached_time = self._metadata_cache[cache_key]
+                    current_time = time.time()
+
+                    # Check if cache entry is still valid (within TTL)
+                    if current_time - cached_time < self._metadata_cache_ttl:
+                        logger.trace(f"File metadata cache hit: {cache_key}")
+                        return cached_metadata
+                    else:
+                        # Cache expired - remove stale entry
+                        del self._metadata_cache[cache_key]
+                        logger.trace(f"File metadata cache expired: {cache_key}")
 
         # Run blocking stat() in thread pool to maintain async compatibility
         loop = asyncio.get_event_loop()
@@ -539,35 +542,36 @@ class FileService:
             created_at=datetime.fromtimestamp(stat_result.st_ctime).astimezone(),
             modified_at=datetime.fromtimestamp(stat_result.st_mtime).astimezone(),
         )
-        
-        # Cache the result with current timestamp
+
+        # Cache the result with current timestamp (with lock for thread safety)
         if use_cache:
-            import time as time_module
-            self._metadata_cache[cache_key] = (metadata, time_module.time())
-            logger.trace(f"Cached file metadata: {cache_key}")
-        
+            async with self._cache_lock:
+                self._metadata_cache[cache_key] = (metadata, time.time())
+                logger.trace(f"Cached file metadata: {cache_key}")
+
         return metadata
     
-    def invalidate_metadata_cache(self, path: Optional[FilePath] = None) -> None:
+    async def invalidate_metadata_cache(self, path: Optional[FilePath] = None) -> None:
         """Invalidate file metadata cache.
-        
+
         Args:
             path: Specific path to invalidate, or None to clear entire cache
         """
-        if path is None:
-            # Clear entire cache
-            cleared_count = len(self._metadata_cache)
-            self._metadata_cache.clear()
-            logger.debug(f"Cleared entire metadata cache ({cleared_count} entries)")
-        else:
-            # Clear specific path
-            path_obj = self.base_path / path if isinstance(path, str) else path
-            full_path = path_obj if path_obj.is_absolute() else self.base_path / path_obj
-            cache_key = str(full_path.as_posix())
-            
-            if cache_key in self._metadata_cache:
-                del self._metadata_cache[cache_key]
-                logger.trace(f"Invalidated metadata cache: {cache_key}")
+        async with self._cache_lock:
+            if path is None:
+                # Clear entire cache
+                cleared_count = len(self._metadata_cache)
+                self._metadata_cache.clear()
+                logger.debug(f"Cleared entire metadata cache ({cleared_count} entries)")
+            else:
+                # Clear specific path
+                path_obj = self.base_path / path if isinstance(path, str) else path
+                full_path = path_obj if path_obj.is_absolute() else self.base_path / path_obj
+                cache_key = str(full_path.as_posix())
+
+                if cache_key in self._metadata_cache:
+                    del self._metadata_cache[cache_key]
+                    logger.trace(f"Invalidated metadata cache: {cache_key}")
     
     def _calculate_adaptive_ttl(self, file_path: Path) -> float:
         """Calculate adaptive TTL based on file characteristics.
@@ -602,34 +606,33 @@ class FileService:
         except Exception:
             return self._metadata_cache_ttl  # Default fallback
     
-    def _evict_metadata_cache_if_needed(self) -> None:
+    async def _evict_metadata_cache_if_needed(self) -> None:
         """Enforce both TTL and size limits on metadata cache.
-        
+
         Phase 1 Optimization #1: Combined TTL and LRU eviction.
-        
+
         This prevents:
         1. Stale data (TTL eviction)
         2. Unbounded memory growth (size limit + LRU eviction)
         """
-        import time
-        
-        # Remove expired entries (TTL eviction)
-        now = time.time()
-        expired_keys = [
-            k for k, (_, timestamp) in self._metadata_cache.items()
-            if now - timestamp > self._metadata_cache_ttl
-        ]
-        
-        for key in expired_keys:
-            del self._metadata_cache[key]
-        
-        if expired_keys:
-            logger.trace(f"Evicted {len(expired_keys)} expired metadata entries")
-        
-        # Enforce size limit (LRU eviction - remove oldest)
-        while len(self._metadata_cache) > self._max_metadata_cache_size:
-            evicted_key, _ = self._metadata_cache.popitem(last=False)
-            logger.trace(f"LRU evicted metadata: {evicted_key}")
+        async with self._cache_lock:
+            # Remove expired entries (TTL eviction)
+            now = time.time()
+            expired_keys = [
+                k for k, (_, timestamp) in self._metadata_cache.items()
+                if now - timestamp > self._metadata_cache_ttl
+            ]
+
+            for key in expired_keys:
+                del self._metadata_cache[key]
+
+            if expired_keys:
+                logger.trace(f"Evicted {len(expired_keys)} expired metadata entries")
+
+            # Enforce size limit (LRU eviction - remove oldest)
+            while len(self._metadata_cache) > self._max_metadata_cache_size:
+                evicted_key, _ = self._metadata_cache.popitem(last=False)
+                logger.trace(f"LRU evicted metadata: {evicted_key}")
 
 
     def content_type(self, path: FilePath) -> str:

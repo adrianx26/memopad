@@ -2,15 +2,15 @@
 
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import List, Optional, Protocol, Sequence, Tuple, TypeVar, Union
 
 import frontmatter
 import yaml
 from loguru import logger
 from sqlalchemy.exc import IntegrityError
 
-
-from memopad.config import ProjectConfig, MemoPadConfig
+from memopad.cache import TwoQueueCache
+from memopad.config import ProjectConfig, MemoPadConfig, DEFAULT_PERMALINK_CACHE_SIZE
 from memopad.file_utils import (
     has_frontmatter,
     parse_frontmatter,
@@ -39,6 +39,23 @@ from memopad.services.link_resolver import LinkResolver
 from memopad.services.search_service import SearchService
 from memopad.utils import generate_permalink
 
+K = TypeVar("K")
+V = TypeVar("V")
+
+
+class CacheProtocol(Protocol[K, V]):
+    """Protocol for cache implementations.
+
+    Defines the minimal interface required for permalink caching.
+    Allows for dependency injection of different cache implementations.
+    """
+
+    def get(self, key: K) -> Optional[V]: ...
+    def put(self, key: K, value: V) -> None: ...
+    def clear(self) -> None: ...
+    def __contains__(self, key: K) -> bool: ...
+    def __getitem__(self, key: K) -> V: ...
+
 
 class EntityService(BaseService[EntityModel]):
     """Service for managing entities in the database."""
@@ -53,6 +70,7 @@ class EntityService(BaseService[EntityModel]):
         link_resolver: LinkResolver,
         search_service: Optional[SearchService] = None,
         app_config: Optional[MemoPadConfig] = None,
+        permalink_cache: Optional[CacheProtocol[str, str]] = None,
     ):
         super().__init__(entity_repository)
         self.observation_repository = observation_repository
@@ -62,11 +80,17 @@ class EntityService(BaseService[EntityModel]):
         self.link_resolver = link_resolver
         self.search_service = search_service
         self.app_config = app_config
-        
+
         # Phase 2 Optimization #5: 2Q cache for scan resistance
-        # Better hit rates (10-20%) than simple LRU, especially for mixed workloads
-        from memopad.cache import TwoQueueCache
-        self._permalink_cache = TwoQueueCache[str, str](total_size=1000)
+        # Use injected cache or create default with configurable size
+        if permalink_cache is not None:
+            self._permalink_cache = permalink_cache
+        else:
+            # Get cache size from config with fallback to default
+            cache_size = DEFAULT_PERMALINK_CACHE_SIZE
+            if app_config is not None:
+                cache_size = getattr(app_config, "permalink_cache_size", DEFAULT_PERMALINK_CACHE_SIZE)
+            self._permalink_cache = TwoQueueCache[str, str](total_size=cache_size)
 
     async def detect_file_path_conflicts(
         self, file_path: str, skip_check: bool = False

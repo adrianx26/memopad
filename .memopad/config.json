@@ -24,10 +24,5 @@
   "formatter_command": null,
   "formatters": {},
   "formatter_timeout": 5.0,
-  "project_root": null,
-  "cloud_client_id": "client_01K6KWQPW6J1M8VV7R3TZP5A6M",
-  "cloud_domain": "https://eloquent-lotus-05.authkit.app",
-  "cloud_host": "https://cloud.basicmemory.com",
-  "cloud_mode": false,
-  "cloud_projects": {}
+  "project_root": null
 }

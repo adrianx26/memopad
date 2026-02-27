@@ -5,6 +5,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
 from typing import Any, Dict, Literal, Optional, List, Tuple
 from enum import Enum
 
@@ -13,6 +14,9 @@ from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from memopad.utils import setup_logging, generate_permalink
+
+# Cache configuration defaults
+DEFAULT_PERMALINK_CACHE_SIZE = 1000
 
 
 DATABASE_NAME = "memory.db"
@@ -54,7 +58,7 @@ class MemoPadConfig(BaseSettings):
 
     projects: Dict[str, str] = Field(
         default_factory=lambda: {
-            "main": str(Path(os.getenv("MEMOPAD_HOME", Path.home() / "memopad")))
+            "main": str(Path(os.getenv("MEMOPAD_HOME", Path.home() / ".memopad")))
         }
         if os.getenv("MEMOPAD_HOME")
         else {},
@@ -144,6 +148,12 @@ class MemoPadConfig(BaseSettings):
         description="Disable automatic permalink generation in frontmatter. When enabled, new notes won't have permalinks added and sync won't update permalinks. Existing permalinks will still work for reading.",
     )
 
+    permalink_cache_size: int = Field(
+        default=DEFAULT_PERMALINK_CACHE_SIZE,
+        description="Size of the permalink cache for faster entity lookups. Larger values improve performance for large projects but use more memory. Default 1000.",
+        gt=0,
+    )
+
     skip_initialization_sync: bool = Field(
         default=False,
         description="Skip expensive initialization synchronization. Useful for cloud/stateless deployments where project reconciliation is not needed.",
@@ -213,7 +223,7 @@ class MemoPadConfig(BaseSettings):
         # Ensure at least one project exists; if none exist then create main
         if not self.projects:  # pragma: no cover
             self.projects["main"] = str(
-                Path(os.getenv("MEMOPAD_HOME", Path.home() / "memopad"))
+                Path(os.getenv("MEMOPAD_HOME", Path.home() / ".memopad"))
             )
 
         # Ensure default project is valid (i.e. points to an existing project)
@@ -270,8 +280,43 @@ class MemoPadConfig(BaseSettings):
         return Path.home() / DATA_DIR_NAME
 
 
-# Module-level cache for configuration
-_CONFIG_CACHE: Optional[MemoPadConfig] = None
+class _ConfigCache:
+    """Thread-safe config cache with explicit invalidation support.
+
+    This class provides a singleton cache for MemoPadConfig instances
+    with proper support for test isolation through clear() method.
+    """
+
+    def __init__(self):
+        self._cache: Optional[MemoPadConfig] = None
+        self._lock = Lock()
+
+    def get(self) -> Optional[MemoPadConfig]:
+        """Get cached config if available."""
+        return self._cache
+
+    def set(self, config: MemoPadConfig) -> None:
+        """Cache a config instance."""
+        with self._lock:
+            self._cache = config
+
+    def clear(self) -> None:
+        """Clear the cache. Used by tests for isolation."""
+        with self._lock:
+            self._cache = None
+
+
+# Global cache instance
+_config_cache = _ConfigCache()
+
+
+def clear_config_cache() -> None:
+    """Clear the configuration cache.
+
+    This function is primarily intended for tests to ensure isolation
+    between test cases that modify configuration.
+    """
+    _config_cache.clear()
 
 
 class ConfigManager:
@@ -307,11 +352,10 @@ class ConfigManager:
 
         Uses module-level cache for performance across ConfigManager instances.
         """
-        global _CONFIG_CACHE
-
         # Return cached config if available
-        if _CONFIG_CACHE is not None:
-            return _CONFIG_CACHE
+        cached = _config_cache.get()
+        if cached is not None:
+            return cached
 
         if self.config_file.exists():
             try:
@@ -337,8 +381,9 @@ class ConfigManager:
                         # Environment variable is set, use it
                         merged_data[field_name] = env_dict[field_name]
 
-                _CONFIG_CACHE = MemoPadConfig(**merged_data)
-                return _CONFIG_CACHE
+                config = MemoPadConfig(**merged_data)
+                _config_cache.set(config)
+                return config
             except Exception as e:  # pragma: no cover
                 logger.exception(f"Failed to load config: {e}")
                 raise e
@@ -349,10 +394,9 @@ class ConfigManager:
 
     def save_config(self, config: MemoPadConfig) -> None:
         """Save configuration to file and invalidate cache."""
-        global _CONFIG_CACHE
         save_MEMOPAD_config(self.config_file, config)
         # Invalidate cache so next load_config() reads fresh data
-        _CONFIG_CACHE = None
+        _config_cache.clear()
 
     @property
     def projects(self) -> Dict[str, str]:

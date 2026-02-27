@@ -25,6 +25,7 @@ from memopad.mcp.tools import read_note as mcp_read_note
 from memopad.mcp.tools import recent_activity as mcp_recent_activity
 from memopad.mcp.tools import search_notes as mcp_search
 from memopad.mcp.tools import write_note as mcp_write_note
+from memopad.mcp.tools import optimize_storage as mcp_optimize_storage
 from memopad.schemas.base import TimeFrame
 from memopad.schemas.memory import MemoryUrl
 from memopad.schemas.search import SearchItemType
@@ -390,6 +391,42 @@ def continue_conversation(
         if not isinstance(e, typer.Exit):
             logger.exception("Error continuing conversation", e)
             typer.echo(f"Error continuing conversation: {e}", err=True)
+            raise typer.Exit(1)
+        raise
+
+
+@tool_app.command(name="optimize-storage")
+def optimize_storage(
+    project: Annotated[
+        Optional[str],
+        typer.Option(
+            help="The project to optimize storage for. If not provided, the default project will be used."
+        ),
+    ] = None,
+):
+    """Optimize Memopad storage by removing duplicates and optimizing file sizes."""
+    try:
+        # look for the project in the config
+        config_manager = ConfigManager()
+        project_name = None
+        if project is not None:
+            project_name, _ = config_manager.get_project(project)
+            if not project_name:
+                typer.echo(f"No project found named: {project}", err=True)
+                raise typer.Exit(1)
+
+        # use the project name, or the default from the config
+        project_name = project_name or config_manager.default_project
+
+        result = run_with_cleanup(mcp_optimize_storage.fn(project=project_name))
+        rprint(result)
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    except Exception as e:  # pragma: no cover
+        if not isinstance(e, typer.Exit):
+            logger.exception("Error optimizing storage", e)
+            typer.echo(f"Error optimizing storage: {e}", err=True)
             raise typer.Exit(1)
         raise
 

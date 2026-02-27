@@ -574,75 +574,82 @@ class ProjectService:
             system=system,
         )
 
-    async def get_statistics(self, project_id: int) -> ProjectStatistics:
-        """Get statistics about the specified project.
-
-        Args:
-            project_id: ID of the project to get statistics for (required).
-        """
-        if not self.repository:  # pragma: no cover
-            raise ValueError("Repository is required for get_statistics")
-
-        # Get basic counts
-        entity_count_result = await self.repository.execute_query(
+    async def _get_entity_count(self, project_id: int) -> int:
+        result = await self.repository.execute_query(
             text("SELECT COUNT(*) FROM entity WHERE project_id = :project_id"),
             {"project_id": project_id},
         )
-        total_entities = entity_count_result.scalar() or 0
+        return result.scalar() or 0
 
-        observation_count_result = await self.repository.execute_query(
+    async def _get_observation_count(self, project_id: int) -> int:
+        result = await self.repository.execute_query(
             text(
                 "SELECT COUNT(*) FROM observation o JOIN entity e ON o.entity_id = e.id WHERE e.project_id = :project_id"
             ),
             {"project_id": project_id},
         )
-        total_observations = observation_count_result.scalar() or 0
+        return result.scalar() or 0
 
-        relation_count_result = await self.repository.execute_query(
+    async def _get_relation_count(self, project_id: int) -> int:
+        result = await self.repository.execute_query(
             text(
                 "SELECT COUNT(*) FROM relation r JOIN entity e ON r.from_id = e.id WHERE e.project_id = :project_id"
             ),
             {"project_id": project_id},
         )
-        total_relations = relation_count_result.scalar() or 0
+        return result.scalar() or 0
 
-        unresolved_count_result = await self.repository.execute_query(
+    async def _get_unresolved_count(self, project_id: int) -> int:
+        result = await self.repository.execute_query(
             text(
                 "SELECT COUNT(*) FROM relation r JOIN entity e ON r.from_id = e.id WHERE r.to_id IS NULL AND e.project_id = :project_id"
             ),
             {"project_id": project_id},
         )
-        total_unresolved = unresolved_count_result.scalar() or 0
+        return result.scalar() or 0
 
-        # Get entity counts by type
-        entity_types_result = await self.repository.execute_query(
+    async def _get_isolated_count(self, project_id: int) -> int:
+        result = await self.repository.execute_query(
+            text("""
+            SELECT COUNT(e.id)
+            FROM entity e
+            LEFT JOIN relation r1 ON e.id = r1.from_id
+            LEFT JOIN relation r2 ON e.id = r2.to_id
+            WHERE e.project_id = :project_id AND r1.id IS NULL AND r2.id IS NULL
+        """),
+            {"project_id": project_id},
+        )
+        return result.scalar() or 0
+
+    async def _get_entity_types(self, project_id: int) -> Dict[str, int]:
+        result = await self.repository.execute_query(
             text(
                 "SELECT entity_type, COUNT(*) FROM entity WHERE project_id = :project_id GROUP BY entity_type"
             ),
             {"project_id": project_id},
         )
-        entity_types = {row[0]: row[1] for row in entity_types_result.fetchall()}
+        return {row[0]: row[1] for row in result.fetchall()}
 
-        # Get observation counts by category
-        category_result = await self.repository.execute_query(
+    async def _get_observation_categories(self, project_id: int) -> Dict[str, int]:
+        result = await self.repository.execute_query(
             text(
                 "SELECT o.category, COUNT(*) FROM observation o JOIN entity e ON o.entity_id = e.id WHERE e.project_id = :project_id GROUP BY o.category"
             ),
             {"project_id": project_id},
         )
-        observation_categories = {row[0]: row[1] for row in category_result.fetchall()}
+        return {row[0]: row[1] for row in result.fetchall()}
 
-        # Get relation counts by type
-        relation_types_result = await self.repository.execute_query(
+    async def _get_relation_types(self, project_id: int) -> Dict[str, int]:
+        result = await self.repository.execute_query(
             text(
                 "SELECT r.relation_type, COUNT(*) FROM relation r JOIN entity e ON r.from_id = e.id WHERE e.project_id = :project_id GROUP BY r.relation_type"
             ),
             {"project_id": project_id},
         )
-        relation_types = {row[0]: row[1] for row in relation_types_result.fetchall()}
+        return {row[0]: row[1] for row in result.fetchall()}
 
-        # Find most connected entities (most outgoing relations) - project filtered
-        connected_result = await self.repository.execute_query(
+    async def _get_most_connected(self, project_id: int) -> list[dict]:
+        result = await self.repository.execute_query(
             text("""
             SELECT e.id, e.title, e.permalink, COUNT(r.id) AS relation_count, e.file_path
             FROM entity e
@@ -654,7 +661,7 @@ class ProjectService:
         """),
             {"project_id": project_id},
         )
-        most_connected = [
+        return [
             {
                 "id": row[0],
                 "title": row[1],
@@ -662,21 +669,39 @@ class ProjectService:
                 "relation_count": row[3],
                 "file_path": row[4],
             }
-            for row in connected_result.fetchall()
+            for row in result.fetchall()
         ]
 
-        # Count isolated entities (no relations) - project filtered
-        isolated_result = await self.repository.execute_query(
-            text("""
-            SELECT COUNT(e.id)
-            FROM entity e
-            LEFT JOIN relation r1 ON e.id = r1.from_id
-            LEFT JOIN relation r2 ON e.id = r2.to_id
-            WHERE e.project_id = :project_id AND r1.id IS NULL AND r2.id IS NULL
-        """),
-            {"project_id": project_id},
-        )
-        isolated_count = isolated_result.scalar() or 0
+    async def get_statistics(self, project_id: int) -> ProjectStatistics:
+        """Get statistics about the specified project with batched queries.
+
+        Args:
+            project_id: ID of the project to get statistics for (required).
+        """
+        if not self.repository:  # pragma: no cover
+            raise ValueError("Repository is required for get_statistics")
+
+        # Execute independent count queries in parallel
+        count_queries = [
+            self._get_entity_count(project_id),
+            self._get_observation_count(project_id),
+            self._get_relation_count(project_id),
+            self._get_unresolved_count(project_id),
+            self._get_isolated_count(project_id),
+        ]
+
+        counts = await asyncio.gather(*count_queries)
+        total_entities, total_observations, total_relations, total_unresolved, isolated_count = counts
+
+        # Execute category/type queries in parallel
+        type_queries = [
+            self._get_entity_types(project_id),
+            self._get_observation_categories(project_id),
+            self._get_relation_types(project_id),
+            self._get_most_connected(project_id),
+        ]
+
+        entity_types, observation_categories, relation_types, most_connected = await asyncio.gather(*type_queries)
 
         return ProjectStatistics(
             total_entities=total_entities,
