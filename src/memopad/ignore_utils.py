@@ -172,6 +172,91 @@ def load_bmignore_patterns() -> Set[str]:
     return patterns
 
 
+class IgnoreMatcher:
+    """Optimized file pattern matcher.
+
+    Categorizes patterns to use O(1) Set lookups for exact names, extensions,
+    and directory names where possible, falling back to fnmatch for complex patterns.
+    """
+    def __init__(self, patterns: Set[str]):
+        self.exact_names = set()
+        self.extensions = set()
+        self.dir_names = set()
+        self.complex_patterns = []
+
+        for p in patterns:
+            # Extension like *.py
+            if p.startswith('*') and '*' not in p[1:] and '?' not in p and '[' not in p and '/' not in p:
+                self.extensions.add(p[1:])
+            # Exact name like node_modules
+            elif '/' not in p and '*' not in p and '?' not in p and '[' not in p:
+                self.exact_names.add(p)
+            # Directory like .git/
+            elif p.endswith('/') and '/' not in p[:-1] and '*' not in p and '?' not in p and '[' not in p:
+                self.dir_names.add(p[:-1])
+            # Other complex patterns like .*, src/*/test
+            else:
+                self.complex_patterns.append(p)
+
+    def match(self, relative_path: Path) -> bool:
+        relative_posix = relative_path.as_posix()
+        parts = relative_path.parts
+
+        # 1. Fast O(1) lookups
+        for part in parts:
+            if part in self.exact_names:
+                return True
+            for ext in self.extensions:
+                if part.endswith(ext):
+                    return True
+
+        for d in self.dir_names:
+            if d in parts:
+                return True
+
+        # 2. Slower fallback to fnmatch
+        if not self.complex_patterns:
+            return False
+
+        relative_str = str(relative_path)
+        for pattern in self.complex_patterns:
+            # Handle patterns starting with / (root relative)
+            if pattern.startswith("/"):
+                root_pattern = pattern[1:]  # Remove leading /
+
+                # For directory patterns ending with /
+                if root_pattern.endswith("/"):
+                    dir_name = root_pattern[:-1]  # Remove trailing /
+                    # Check if the first part of the path matches the directory name
+                    if len(parts) > 0 and parts[0] == dir_name:
+                        return True
+                else:
+                    # Regular root-relative pattern
+                    if fnmatch.fnmatch(relative_posix, root_pattern):
+                        return True
+                continue
+
+            # Handle directory patterns (ending with /)
+            if pattern.endswith("/"):
+                dir_name = pattern[:-1]  # Remove trailing /
+                # Check if any path part matches the directory name
+                if dir_name in parts:
+                    return True
+                continue
+
+            # Check if any individual path part matches the glob pattern
+            # This handles cases like ".*" matching ".hidden.md" in "concept/.hidden.md"
+            for part in parts:
+                if fnmatch.fnmatch(part, pattern):
+                    return True
+
+            # Glob pattern match on full path
+            if fnmatch.fnmatch(relative_posix, pattern) or fnmatch.fnmatch(relative_str, pattern):
+                return True  # pragma: no cover
+
+        return False
+
+
 def load_gitignore_patterns(base_path: Path, use_gitignore: bool = True) -> Set[str]:
     """Load gitignore patterns from .gitignore file and .bmignore.
 
@@ -220,50 +305,9 @@ def should_ignore_path(file_path: Path, base_path: Path, ignore_patterns: Set[st
     # Get the relative path from base
     try:
         relative_path = file_path.relative_to(base_path)
-        relative_str = str(relative_path)
-        relative_posix = relative_path.as_posix()  # Use forward slashes for matching
-
-        # Check each pattern
-        for pattern in ignore_patterns:
-            # Handle patterns starting with / (root relative)
-            if pattern.startswith("/"):
-                root_pattern = pattern[1:]  # Remove leading /
-
-                # For directory patterns ending with /
-                if root_pattern.endswith("/"):
-                    dir_name = root_pattern[:-1]  # Remove trailing /
-                    # Check if the first part of the path matches the directory name
-                    if len(relative_path.parts) > 0 and relative_path.parts[0] == dir_name:
-                        return True
-                else:
-                    # Regular root-relative pattern
-                    if fnmatch.fnmatch(relative_posix, root_pattern):
-                        return True
-                continue
-
-            # Handle directory patterns (ending with /)
-            if pattern.endswith("/"):
-                dir_name = pattern[:-1]  # Remove trailing /
-                # Check if any path part matches the directory name
-                if dir_name in relative_path.parts:
-                    return True
-                continue
-
-            # Direct name match (e.g., ".git", "node_modules")
-            if pattern in relative_path.parts:
-                return True
-
-            # Check if any individual path part matches the glob pattern
-            # This handles cases like ".*" matching ".hidden.md" in "concept/.hidden.md"
-            for part in relative_path.parts:
-                if fnmatch.fnmatch(part, pattern):
-                    return True
-
-            # Glob pattern match on full path
-            if fnmatch.fnmatch(relative_posix, pattern) or fnmatch.fnmatch(relative_str, pattern):
-                return True  # pragma: no cover
-
-        return False
+        # Use our optimized matcher
+        matcher = IgnoreMatcher(ignore_patterns)
+        return matcher.match(relative_path)
     except ValueError:
         # If we can't get relative path, don't ignore
         return False
