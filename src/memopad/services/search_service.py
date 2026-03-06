@@ -409,6 +409,10 @@ class SearchService:
         """Delete an item from the search index."""
         await self.repository.delete_by_permalink(permalink)
 
+    async def bulk_delete_by_permalinks(self, permalinks: List[str]):
+        """Delete multiple items from the search index."""
+        await self.repository.bulk_delete_by_permalinks(permalinks)
+
     async def delete_by_entity_id(self, entity_id: int):
         """Delete an item from the search index."""
         await self.repository.delete_by_entity_id(entity_id)
@@ -436,8 +440,11 @@ class SearchService:
             f"index_entries={len(permalinks)}"
         )
 
-        for permalink in permalinks:
-            if permalink:
-                await self.delete_by_permalink(permalink)
-            else:
-                await self.delete_by_entity_id(entity.id)
+        valid_permalinks = [p for p in permalinks if p]
+
+        if valid_permalinks:
+            await self.bulk_delete_by_permalinks(valid_permalinks)
+
+        # If any permalink was None, we still need to delete by entity id to be safe
+        if len(valid_permalinks) < len(permalinks):
+            await self.delete_by_entity_id(entity.id)
