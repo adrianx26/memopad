@@ -1,6 +1,8 @@
 ﻿"""Utilities for handling .gitignore patterns and file filtering."""
 
 import fnmatch
+import os
+import re
 from pathlib import Path
 from typing import Set
 
@@ -172,6 +174,139 @@ def load_bmignore_patterns() -> Set[str]:
     return patterns
 
 
+class IgnoreMatcher:
+    """Optimized matcher for gitignore/bmignore patterns.
+
+    Pre-compiles patterns and uses pure string matching instead of Path objects
+    for significant performance improvements during bulk directory scans.
+    """
+
+    def __init__(self, patterns: Set[str]):
+        self.exact_names: Set[str] = set()
+        self.exact_dirs: Set[str] = set()
+        self.glob_patterns: list[re.Pattern] = []
+        self.root_patterns: list[tuple[str, bool]] = []
+        self.complex_patterns: list[str] = []
+
+        for p in patterns:
+            # Root patterns
+            if p.startswith("/"):
+                root_p = p[1:]
+                if root_p.endswith("/"):
+                    self.root_patterns.append((root_p[:-1], True))
+                else:
+                    self.root_patterns.append((root_p, False))
+                continue
+
+            # Directory patterns
+            if p.endswith("/"):
+                p_dir = p[:-1]
+                if "*" not in p_dir and "?" not in p_dir and "[" not in p_dir and "/" not in p_dir:
+                    self.exact_dirs.add(p_dir)
+                else:
+                    self.complex_patterns.append(p)
+                continue
+
+            # Regular patterns
+            if "/" in p:
+                self.complex_patterns.append(p)
+            elif "*" in p or "?" in p or "[" in p:
+                # Compile regex for glob patterns for faster matching
+                regex_str = fnmatch.translate(p)
+                self.glob_patterns.append(re.compile(regex_str))
+            else:
+                self.exact_names.add(p)
+
+    def match(self, path: Path | str, base: Path | str) -> bool:
+        """Check if a path matches the ignore patterns.
+
+        Uses pure string operations for speed.
+
+        Args:
+            path: Path to check
+            base: Base directory for relative path calculation
+
+        Returns:
+            True if path should be ignored
+        """
+        try:
+            # Fast path string processing
+            path_str = str(path)
+            base_str = str(base)
+
+            # Ensure base_str ends with sep to avoid false prefix matches
+            # e.g. base="/app/dir" matching path="/app/dir2/file.txt"
+            if not base_str.endswith(os.sep):
+                base_str += os.sep
+
+            # Simple string prefix check
+            if not path_str.startswith(base_str) and path_str != str(base):
+                # Fallback to relative_to if it's not a simple string prefix
+                # (e.g. symlinks or weird paths)
+                if isinstance(path, Path) and isinstance(base, Path):
+                    rel = path.relative_to(base)
+                    rel_posix = rel.as_posix()
+                    parts = rel.parts
+                else:
+                    return False
+            else:
+                if path_str == str(base):
+                    return False
+                rel_path = path_str[len(base_str):]
+
+                # Convert backslashes to forward slashes for matching
+                if os.sep == "\\":
+                    rel_posix = rel_path.replace("\\", "/") # pragma: no cover
+                else:
+                    rel_posix = rel_path
+
+                parts = tuple(rel_posix.split("/"))
+
+            # Empty path (matches base dir)
+            if not parts or (len(parts) == 1 and parts[0] == ""):
+                return False
+
+            # Check root patterns
+            if self.root_patterns:
+                for rp, is_dir in self.root_patterns:
+                    if is_dir:
+                        if parts[0] == rp:
+                            return True
+                    else:
+                        if fnmatch.fnmatch(rel_posix, rp):
+                            return True
+
+            # Check exact names/dirs on all parts
+            if self.exact_names or self.exact_dirs:
+                for part in parts:
+                    if part in self.exact_names or part in self.exact_dirs:
+                        return True
+
+            # Check glob patterns
+            if self.glob_patterns:
+                for part in parts:
+                    for regex in self.glob_patterns:
+                        if regex.match(part):
+                            return True
+
+            # Check complex patterns (fallback to fnmatch on whole path)
+            if self.complex_patterns:
+                for p in self.complex_patterns:
+                    if p.endswith("/"):
+                        dir_name = p[:-1]
+                        if dir_name in parts:
+                            return True
+                        # handle wildcards e.g. temp_*/
+                        elif fnmatch.fnmatch(rel_posix + "/", p) or fnmatch.fnmatch(rel_posix, p):
+                            return True
+                    if fnmatch.fnmatch(rel_posix, p):
+                        return True
+
+            return False
+        except ValueError:
+            return False
+
+
 def load_gitignore_patterns(base_path: Path, use_gitignore: bool = True) -> Set[str]:
     """Load gitignore patterns from .gitignore file and .bmignore.
 
@@ -209,6 +344,9 @@ def load_gitignore_patterns(base_path: Path, use_gitignore: bool = True) -> Set[
 def should_ignore_path(file_path: Path, base_path: Path, ignore_patterns: Set[str]) -> bool:
     """Check if a file path should be ignored based on gitignore patterns.
 
+    This function instantiates a new IgnoreMatcher on each call.
+    For performance in loops, instantiate IgnoreMatcher directly and call match().
+
     Args:
         file_path: The file path to check
         base_path: The base directory for relative path calculation
@@ -217,56 +355,8 @@ def should_ignore_path(file_path: Path, base_path: Path, ignore_patterns: Set[st
     Returns:
         True if the path should be ignored, False otherwise
     """
-    # Get the relative path from base
-    try:
-        relative_path = file_path.relative_to(base_path)
-        relative_str = str(relative_path)
-        relative_posix = relative_path.as_posix()  # Use forward slashes for matching
-
-        # Check each pattern
-        for pattern in ignore_patterns:
-            # Handle patterns starting with / (root relative)
-            if pattern.startswith("/"):
-                root_pattern = pattern[1:]  # Remove leading /
-
-                # For directory patterns ending with /
-                if root_pattern.endswith("/"):
-                    dir_name = root_pattern[:-1]  # Remove trailing /
-                    # Check if the first part of the path matches the directory name
-                    if len(relative_path.parts) > 0 and relative_path.parts[0] == dir_name:
-                        return True
-                else:
-                    # Regular root-relative pattern
-                    if fnmatch.fnmatch(relative_posix, root_pattern):
-                        return True
-                continue
-
-            # Handle directory patterns (ending with /)
-            if pattern.endswith("/"):
-                dir_name = pattern[:-1]  # Remove trailing /
-                # Check if any path part matches the directory name
-                if dir_name in relative_path.parts:
-                    return True
-                continue
-
-            # Direct name match (e.g., ".git", "node_modules")
-            if pattern in relative_path.parts:
-                return True
-
-            # Check if any individual path part matches the glob pattern
-            # This handles cases like ".*" matching ".hidden.md" in "concept/.hidden.md"
-            for part in relative_path.parts:
-                if fnmatch.fnmatch(part, pattern):
-                    return True
-
-            # Glob pattern match on full path
-            if fnmatch.fnmatch(relative_posix, pattern) or fnmatch.fnmatch(relative_str, pattern):
-                return True  # pragma: no cover
-
-        return False
-    except ValueError:
-        # If we can't get relative path, don't ignore
-        return False
+    matcher = IgnoreMatcher(ignore_patterns)
+    return matcher.match(file_path, base_path)
 
 
 def filter_files(
@@ -285,11 +375,12 @@ def filter_files(
     if ignore_patterns is None:
         ignore_patterns = load_gitignore_patterns(base_path)
 
+    matcher = IgnoreMatcher(ignore_patterns)
     filtered_files = []
     ignored_count = 0
 
     for file_path in files:
-        if should_ignore_path(file_path, base_path, ignore_patterns):
+        if matcher.match(file_path, base_path):
             ignored_count += 1
         else:
             filtered_files.append(file_path)

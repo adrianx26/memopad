@@ -4,7 +4,6 @@ import pytest
 
 from memopad.mcp.tools.assimilate import (
     LinkExtractor,
-    HTMLToText,
     extract_links,
     html_to_text,
     categorize_links,

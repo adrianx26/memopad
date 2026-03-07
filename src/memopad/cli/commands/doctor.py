@@ -13,7 +13,6 @@ import typer
 
 from memopad.cli.app import app
 from memopad.cli.commands.command_utils import run_with_cleanup
-from memopad.cli.commands.command_utils import run_with_cleanup
 from memopad.markdown.entity_parser import EntityParser
 from memopad.markdown.markdown_processor import MarkdownProcessor
 from memopad.markdown.schemas import EntityFrontmatter, EntityMarkdown
