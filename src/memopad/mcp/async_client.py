@@ -1,12 +1,10 @@
-﻿import os
-from contextlib import asynccontextmanager, AbstractAsyncContextManager
+﻿from contextlib import asynccontextmanager, AbstractAsyncContextManager
 from typing import AsyncIterator, Callable, Optional
 
 from httpx import ASGITransport, AsyncClient, Timeout
 from loguru import logger
 
 from memopad.api.app import app as fastapi_app
-from memopad.config import ConfigManager
 
 
 
