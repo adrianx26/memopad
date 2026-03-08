@@ -1,0 +1,3 @@
+## 2023-10-24 - Efficient file counting with find and raw bytes
+**Learning:** Using shell pipe (`find ... | wc -l`) with `asyncio.create_subprocess_shell` forces the use of a shell subprocess, adding overhead and increasing the risk of command injection. Decoding `find` output to Python strings (`stdout.decode().splitlines()`) just to count files or iterate through lines adds significant processing overhead and can fail on non-UTF-8 filenames.
+**Action:** Use `asyncio.create_subprocess_exec('find', ...)` without pipes. For counting lines, use `stdout.count(b'\n')` on the raw bytes. For parsing lines, iterate over `stdout.split(b'\n')` and decode only the lines actually needed, using `errors='replace'` to guarantee safety on badly encoded filenames.
