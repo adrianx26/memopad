@@ -217,9 +217,9 @@ class TestConfigManager:
 
         config_manager = ConfigManager()
 
-        # Should use default location
-        assert config_manager.config_dir == config_home / ".memopad"
-        assert config_manager.config_file == config_home / ".memopad" / "config.json"
+        # Should use default location (new visible directory, not hidden .memopad)
+        assert config_manager.config_dir == config_home / "memopad"
+        assert config_manager.config_file == config_home / "memopad" / "config.json"
 
     def test_remove_project_with_exact_name_match(self, temp_config_manager):
         """Test remove_project when project name matches config key exactly."""

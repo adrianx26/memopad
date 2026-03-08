@@ -40,6 +40,7 @@ from memopad.repository.sqlite_search_repository import SQLiteSearchRepository
 # Module level state
 _engine: Optional[AsyncEngine] = None
 _session_maker: Optional[async_sessionmaker[AsyncSession]] = None
+_stoolap_db = None  # stoolap.AsyncDatabase instance (lazily initialized)
 
 
 class DatabaseType(Enum):
@@ -48,6 +49,7 @@ class DatabaseType(Enum):
     MEMORY = auto()
     FILESYSTEM = auto()
     POSTGRES = auto()
+    STOOLAP = auto()  # Stoolap embedded Rust SQL database
 
     @classmethod
     def get_db_url(
@@ -324,6 +326,68 @@ async def shutdown_db() -> None:  # pragma: no cover
         await _engine.dispose()
         _engine = None
         _session_maker = None
+
+
+async def get_stoolap_db(config: Optional[MemoPadConfig] = None):
+    """Get or create the global Stoolap AsyncDatabase instance.
+
+    On first call, opens the database file (or in-memory DB), runs DDL
+    to create all required tables, and caches the instance. Subsequent
+    calls return the cached instance without touching the schema.
+
+    Args:
+        config: Optional MemoPadConfig. If not provided, reads from ConfigManager.
+
+    Returns:
+        stoolap.AsyncDatabase instance ready for query execution.
+    """
+    global _stoolap_db
+
+    if _stoolap_db is not None:
+        return _stoolap_db
+
+    try:
+        from stoolap import AsyncDatabase  # type: ignore[import]
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError(
+            "stoolap-python is required for the Stoolap backend. "
+            "Install it with: pip install stoolap-python"
+        ) from exc
+
+    if config is None:
+        config = ConfigManager().config
+
+    # Resolve database path
+    raw_path = config.stoolap_path
+    if raw_path:
+        path = str(Path(raw_path).expanduser().resolve()) if raw_path != ":memory:" else ":memory:"
+    else:
+        # Default: store alongside the SQLite DB in the data directory
+        path = str(config.database_path.parent / "stoolap.db")
+
+    logger.info(f"Opening Stoolap database at: {path}")
+    _stoolap_db = await AsyncDatabase.open(path)
+
+    # Apply DDL schema (idempotent — uses CREATE TABLE IF NOT EXISTS)
+    from memopad.repository.stoolap_schema import STOOLAP_DDL
+    for statement in STOOLAP_DDL:
+        await _stoolap_db.execute(statement)
+
+    logger.info("Stoolap schema initialised successfully")
+    return _stoolap_db
+
+
+async def shutdown_stoolap_db() -> None:  # pragma: no cover
+    """Close the global Stoolap database connection gracefully."""
+    global _stoolap_db
+    if _stoolap_db is not None:
+        try:
+            await _stoolap_db.close()
+            logger.info("Stoolap database closed")
+        except Exception as exc:
+            logger.warning(f"Error closing Stoolap database: {exc}")
+        finally:
+            _stoolap_db = None
 
 
 @asynccontextmanager

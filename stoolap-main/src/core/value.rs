@@ -1,0 +1,1875 @@
+// Copyright 2025 Stoolap Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Value type for Stoolap - runtime values with type information
+//!
+//! This module provides a unified Value enum that represents SQL values
+//! with full type information and conversion capabilities.
+
+use std::cmp::Ordering;
+use std::fmt;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
+
+use super::error::{Error, Result};
+use super::types::DataType;
+use crate::common::{CompactArc, SmartString};
+
+/// Timestamp formats supported for parsing
+/// Order matters - more specific formats first
+const TIMESTAMP_FORMATS: &[&str] = &[
+    "%Y-%m-%dT%H:%M:%S%.f%:z", // RFC3339 with fractional seconds
+    "%Y-%m-%dT%H:%M:%S%:z",    // RFC3339
+    "%Y-%m-%dT%H:%M:%SZ",      // RFC3339 UTC
+    "%Y-%m-%dT%H:%M:%S",       // ISO without timezone
+    "%Y-%m-%d %H:%M:%S%.f",    // SQL-style with fractional seconds
+    "%Y-%m-%d %H:%M:%S",       // SQL-style
+    "%Y-%m-%d",                // Date only
+    "%Y/%m/%d %H:%M:%S",       // Alternative with slashes
+    "%Y/%m/%d",                // Alternative date only
+    "%m/%d/%Y",                // US format
+    "%d/%m/%Y",                // European format
+];
+
+const TIME_FORMATS: &[&str] = &[
+    "%H:%M:%S%.f", // High precision
+    "%H:%M:%S",    // Standard
+    "%H:%M",       // Hours and minutes only
+];
+
+/// A runtime value with type information
+///
+/// Each variant carries its data directly, avoiding the need for interface
+/// indirection or separate value references.
+///
+/// ## Memory Layout (16 bytes)
+///
+/// Value is exactly 16 bytes due to niche optimization:
+/// - Text(SmartString): 16 bytes with niches in tag byte (values 17-255 unused)
+/// - Extension(CompactArc<[u8]>): 8 bytes (thin pointer), leaving niche bytes free
+/// - Rust stores Value's discriminant in SmartString's niche values
+///
+/// ## Extension Variant
+///
+/// The Extension variant is a catch-all for all complex types (JSON, Vector, Blob, etc.)
+/// It stores a single `CompactArc<[u8]>` (8 bytes) where byte[0] is the DataType tag
+/// and byte[1..] is the payload. This keeps Value at exactly 7 variants forever —
+/// new types are added by extending DataType (a 1-byte `#[repr(u8)]` enum).
+///
+/// Note: Text uses SmartString for inline storage of strings up to 15 bytes.
+/// Longer strings use Arc<String> for O(1) clone and sharing.
+#[derive(Debug, Clone)]
+pub enum Value {
+    /// NULL value with optional type hint
+    Null(DataType),
+
+    /// 64-bit signed integer
+    Integer(i64),
+
+    /// 64-bit floating point
+    Float(f64),
+
+    /// UTF-8 text string (SmartString: inline ≤15 bytes, Arc for larger)
+    Text(SmartString),
+
+    /// Boolean value
+    Boolean(bool),
+
+    /// Timestamp (UTC)
+    Timestamp(DateTime<Utc>),
+
+    /// Extension type: byte[0] = DataType tag, byte[1..] = payload
+    /// - Json: byte[0]=6, byte[1..]=UTF-8 bytes (access via `as_json()`)
+    /// - Vector: byte[0]=7, byte[1..]=packed LE f32 bytes (access via `as_vector_f32()`)
+    /// - Future types (Blob, Array, etc.) add DataType variants, not Value variants
+    Extension(CompactArc<[u8]>),
+}
+
+/// Static NULL value for zero-cost reuse
+pub const NULL_VALUE: Value = Value::Null(DataType::Null);
+
+impl Value {
+    // =========================================================================
+    // Constructors
+    // =========================================================================
+
+    /// Create a NULL value with a type hint
+    #[inline]
+    pub fn null(data_type: DataType) -> Self {
+        Value::Null(data_type)
+    }
+
+    /// Create a NULL value with unknown type
+    #[inline(always)]
+    pub fn null_unknown() -> Self {
+        Value::Null(DataType::Null)
+    }
+
+    /// Create an integer value
+    pub fn integer(value: i64) -> Self {
+        Value::Integer(value)
+    }
+
+    /// Create a float value
+    pub fn float(value: f64) -> Self {
+        Value::Float(value)
+    }
+
+    /// Create a text value
+    ///
+    /// Uses SmartString::from_string_shared() for heap strings to enable
+    /// O(1) clone via Arc<str>. This allows string sharing between
+    /// Arena, Index, and VersionStore.
+    pub fn text(value: impl Into<String>) -> Self {
+        Value::Text(SmartString::from_string_shared(value.into()))
+    }
+
+    /// Create a text value from Arc<str> (zero-copy for heap strings)
+    ///
+    /// Preserves the Arc reference for O(1) clone and sharing.
+    pub fn text_arc(value: Arc<str>) -> Self {
+        Value::Text(SmartString::from(value))
+    }
+
+    /// Create a boolean value
+    pub fn boolean(value: bool) -> Self {
+        Value::Boolean(value)
+    }
+
+    /// Create a timestamp value
+    pub fn timestamp(value: DateTime<Utc>) -> Self {
+        Value::Timestamp(value)
+    }
+
+    /// Create a JSON value (stored as UTF-8 bytes in Extension, tag byte prepended)
+    pub fn json(value: impl Into<String>) -> Self {
+        let s_bytes = value.into().into_bytes();
+        let mut bytes = Vec::with_capacity(1 + s_bytes.len());
+        bytes.push(DataType::Json as u8);
+        bytes.extend_from_slice(&s_bytes);
+        Value::Extension(CompactArc::from(bytes))
+    }
+
+    /// Create a vector value from f32 data (stored as packed LE f32 bytes in Extension)
+    pub fn vector(data: Vec<f32>) -> Self {
+        let mut bytes = Vec::with_capacity(1 + data.len() * 4);
+        bytes.push(DataType::Vector as u8);
+        for f in &data {
+            bytes.extend_from_slice(&f.to_le_bytes());
+        }
+        Value::Extension(CompactArc::from(bytes))
+    }
+
+    /// Create a vector value from pre-packed f32 bytes (prepends tag)
+    pub fn vector_from_bytes(raw_f32_bytes: CompactArc<[u8]>) -> Self {
+        let mut bytes = Vec::with_capacity(1 + raw_f32_bytes.len());
+        bytes.push(DataType::Vector as u8);
+        bytes.extend_from_slice(&raw_f32_bytes);
+        Value::Extension(CompactArc::from(bytes))
+    }
+
+    // =========================================================================
+    // Type accessors
+    // =========================================================================
+
+    /// Returns the data type of this value
+    pub fn data_type(&self) -> DataType {
+        match self {
+            Value::Null(dt) => *dt,
+            Value::Integer(_) => DataType::Integer,
+            Value::Float(_) => DataType::Float,
+            Value::Text(_) => DataType::Text,
+            Value::Boolean(_) => DataType::Boolean,
+            Value::Timestamp(_) => DataType::Timestamp,
+            Value::Extension(data) => data
+                .first()
+                .and_then(|&b| DataType::from_u8(b))
+                .unwrap_or(DataType::Null),
+        }
+    }
+
+    /// Returns true if this value is NULL
+    #[inline(always)]
+    pub fn is_null(&self) -> bool {
+        matches!(self, Value::Null(_))
+    }
+
+    // =========================================================================
+    // Value extractors
+    // =========================================================================
+
+    /// Extract as i64, with type coercion
+    ///
+    /// Returns None if:
+    /// - Value is NULL
+    /// - Conversion is not possible
+    pub fn as_int64(&self) -> Option<i64> {
+        match self {
+            Value::Null(_) => None,
+            Value::Integer(v) => Some(*v),
+            Value::Float(v) => Some(*v as i64),
+            Value::Text(s) => s
+                .parse::<i64>()
+                .ok()
+                .or_else(|| s.parse::<f64>().ok().map(|f| f as i64)),
+            Value::Boolean(b) => Some(if *b { 1 } else { 0 }),
+            Value::Timestamp(t) => Some(t.timestamp_nanos_opt().unwrap_or(0)),
+            Value::Extension(_) => None,
+        }
+    }
+
+    /// Extract as f64, with type coercion
+    pub fn as_float64(&self) -> Option<f64> {
+        match self {
+            Value::Null(_) => None,
+            Value::Integer(v) => Some(*v as f64),
+            Value::Float(v) => Some(*v),
+            Value::Text(s) => s.parse::<f64>().ok(),
+            Value::Boolean(b) => Some(if *b { 1.0 } else { 0.0 }),
+            Value::Timestamp(_) | Value::Extension(_) => None,
+        }
+    }
+
+    /// Extract as boolean, with type coercion
+    pub fn as_boolean(&self) -> Option<bool> {
+        match self {
+            Value::Null(_) => None,
+            Value::Integer(v) => Some(*v != 0),
+            Value::Float(v) => Some(*v != 0.0),
+            Value::Text(s) => {
+                // OPTIMIZATION: Use eq_ignore_ascii_case to avoid allocation
+                let s_ref: &str = s.as_ref();
+                if s_ref.eq_ignore_ascii_case("true")
+                    || s_ref.eq_ignore_ascii_case("t")
+                    || s_ref.eq_ignore_ascii_case("yes")
+                    || s_ref.eq_ignore_ascii_case("y")
+                    || s_ref == "1"
+                {
+                    Some(true)
+                } else if s_ref.eq_ignore_ascii_case("false")
+                    || s_ref.eq_ignore_ascii_case("f")
+                    || s_ref.eq_ignore_ascii_case("no")
+                    || s_ref.eq_ignore_ascii_case("n")
+                    || s_ref == "0"
+                    || s_ref.is_empty()
+                {
+                    Some(false)
+                } else {
+                    s_ref.parse::<f64>().ok().map(|f| f != 0.0)
+                }
+            }
+            Value::Boolean(b) => Some(*b),
+            Value::Timestamp(_) | Value::Extension(_) => None,
+        }
+    }
+
+    /// Extract as String, with type coercion
+    pub fn as_string(&self) -> Option<String> {
+        match self {
+            Value::Null(_) => None,
+            Value::Integer(v) => Some(v.to_string()),
+            Value::Float(v) => Some(format_float(*v)),
+            Value::Text(s) => Some(s.to_string()),
+            Value::Boolean(b) => Some(if *b { "true" } else { "false" }.to_string()),
+            Value::Timestamp(t) => Some(t.to_rfc3339()),
+            Value::Extension(data) if data.first() == Some(&(DataType::Json as u8)) => {
+                // SAFETY: Json data is always stored as valid UTF-8
+                Some(std::str::from_utf8(&data[1..]).unwrap_or("").to_string())
+            }
+            Value::Extension(data) if data.first() == Some(&(DataType::Vector as u8)) => {
+                Some(format_vector_bytes(&data[1..]))
+            }
+            Value::Extension(data) => {
+                // Generic fallback: try payload as UTF-8
+                if data.len() > 1 {
+                    std::str::from_utf8(&data[1..]).ok().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Extract as string reference (avoids clone for Text/Json)
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Value::Text(s) => Some(s.as_str()),
+            // SAFETY: Json data is always stored as valid UTF-8 (tag at [0], payload at [1..])
+            Value::Extension(data) if data.first() == Some(&(DataType::Json as u8)) => {
+                Some(std::str::from_utf8(&data[1..]).unwrap_or(""))
+            }
+            _ => None,
+        }
+    }
+
+    /// Extract as DateTime<Utc>
+    pub fn as_timestamp(&self) -> Option<DateTime<Utc>> {
+        match self {
+            Value::Null(_) => None,
+            Value::Timestamp(t) => Some(*t),
+            Value::Text(s) => parse_timestamp(s).ok(),
+            Value::Integer(nanos) => {
+                // Interpret as nanoseconds since Unix epoch
+                DateTime::from_timestamp(*nanos / 1_000_000_000, (*nanos % 1_000_000_000) as u32)
+            }
+            _ => None,
+        }
+    }
+
+    /// Extract as JSON string
+    pub fn as_json(&self) -> Option<&str> {
+        match self {
+            Value::Null(_) => Some("{}"),
+            // SAFETY: Json data is always stored as valid UTF-8 (tag at [0], payload at [1..])
+            Value::Extension(data) if data.first() == Some(&(DataType::Json as u8)) => {
+                Some(std::str::from_utf8(&data[1..]).unwrap_or(""))
+            }
+            _ => None,
+        }
+    }
+
+    /// Extract vector as Vec<f32> (reads packed LE f32 bytes from Extension payload)
+    pub fn as_vector_f32(&self) -> Option<Vec<f32>> {
+        match self {
+            Value::Extension(data) if data.first() == Some(&(DataType::Vector as u8)) => {
+                let payload = &data[1..];
+                let len = payload.len() / 4;
+                let mut result = Vec::with_capacity(len);
+                for i in 0..len {
+                    let bytes = [
+                        payload[i * 4],
+                        payload[i * 4 + 1],
+                        payload[i * 4 + 2],
+                        payload[i * 4 + 3],
+                    ];
+                    result.push(f32::from_le_bytes(bytes));
+                }
+                Some(result)
+            }
+            _ => None,
+        }
+    }
+
+    // =========================================================================
+    // Comparison
+    // =========================================================================
+
+    /// Compare two values for ordering
+    ///
+    /// Returns:
+    /// - Ok(Ordering::Less) if self < other
+    /// - Ok(Ordering::Equal) if self == other
+    /// - Ok(Ordering::Greater) if self > other
+    /// - Err if comparison is not possible
+    pub fn compare(&self, other: &Value) -> Result<Ordering> {
+        // Handle NULL comparisons
+        if self.is_null() || other.is_null() {
+            if self.is_null() && other.is_null() {
+                return Ok(Ordering::Equal);
+            }
+            return Err(Error::NullComparison);
+        }
+
+        // Same type comparison (most efficient path)
+        if self.data_type() == other.data_type() {
+            return self.compare_same_type(other);
+        }
+
+        // Cross-type numeric comparison (integer vs float)
+        if self.data_type().is_numeric() && other.data_type().is_numeric() {
+            let v1 = self.as_float64().unwrap();
+            let v2 = other.as_float64().unwrap();
+            return Ok(compare_floats(v1, v2));
+        }
+
+        // Timestamp ↔ Text: try parsing the text side as a timestamp
+        match (self, other) {
+            (Value::Timestamp(ts), Value::Text(s)) => {
+                if let Ok(parsed) = parse_timestamp(s) {
+                    return Ok(ts.cmp(&parsed));
+                }
+            }
+            (Value::Timestamp(ts), Value::Extension(data))
+                if data.first() == Some(&(DataType::Json as u8)) =>
+            {
+                // SAFETY: Json data is always valid UTF-8
+                let s = std::str::from_utf8(&data[1..]).unwrap_or("");
+                if let Ok(parsed) = parse_timestamp(s) {
+                    return Ok(ts.cmp(&parsed));
+                }
+            }
+            (Value::Text(s), Value::Timestamp(ts)) => {
+                if let Ok(parsed) = parse_timestamp(s) {
+                    return Ok(parsed.cmp(ts));
+                }
+            }
+            (Value::Extension(data), Value::Timestamp(ts))
+                if data.first() == Some(&(DataType::Json as u8)) =>
+            {
+                // SAFETY: Json data is always valid UTF-8
+                let s = std::str::from_utf8(&data[1..]).unwrap_or("");
+                if let Ok(parsed) = parse_timestamp(s) {
+                    return Ok(parsed.cmp(ts));
+                }
+            }
+            _ => {}
+        }
+
+        // Fall back to string comparison for mixed types
+        let s1 = self.as_string().unwrap_or_default();
+        let s2 = other.as_string().unwrap_or_default();
+        Ok(s1.cmp(&s2))
+    }
+
+    /// Compare values of the same type
+    fn compare_same_type(&self, other: &Value) -> Result<Ordering> {
+        match (self, other) {
+            (Value::Integer(a), Value::Integer(b)) => Ok(a.cmp(b)),
+            (Value::Float(a), Value::Float(b)) => Ok(compare_floats(*a, *b)),
+            (Value::Text(a), Value::Text(b)) => Ok(a.cmp(b)),
+            (Value::Boolean(a), Value::Boolean(b)) => Ok(a.cmp(b)),
+            (Value::Timestamp(a), Value::Timestamp(b)) => Ok(a.cmp(b)),
+            (Value::Extension(a), Value::Extension(b)) => {
+                // Extension: tag byte is [0], so same-tag comparison is data equality
+                if a.first() != b.first() {
+                    return Err(Error::IncomparableTypes);
+                }
+                // All extension types: equality only (not orderable)
+                if a == b {
+                    Ok(Ordering::Equal)
+                } else {
+                    Err(Error::IncomparableTypes)
+                }
+            }
+            _ => Err(Error::IncomparableTypes),
+        }
+    }
+
+    // =========================================================================
+    // Construction from typed values
+    // =========================================================================
+
+    /// Create a Value from a typed value with explicit data type
+    pub fn from_typed(value: Option<&dyn std::any::Any>, data_type: DataType) -> Self {
+        match value {
+            None => Value::Null(data_type),
+            Some(v) => {
+                // Try to downcast based on expected type
+                match data_type {
+                    DataType::Integer => {
+                        if let Some(&i) = v.downcast_ref::<i64>() {
+                            Value::Integer(i)
+                        } else if let Some(&i) = v.downcast_ref::<i32>() {
+                            Value::Integer(i as i64)
+                        } else if let Some(s) = v.downcast_ref::<String>() {
+                            s.parse::<i64>()
+                                .map(Value::Integer)
+                                .unwrap_or(Value::Null(data_type))
+                        } else {
+                            Value::Null(data_type)
+                        }
+                    }
+                    DataType::Float => {
+                        if let Some(&f) = v.downcast_ref::<f64>() {
+                            Value::Float(f)
+                        } else if let Some(&i) = v.downcast_ref::<i64>() {
+                            Value::Float(i as f64)
+                        } else if let Some(s) = v.downcast_ref::<String>() {
+                            s.parse::<f64>()
+                                .map(Value::Float)
+                                .unwrap_or(Value::Null(data_type))
+                        } else {
+                            Value::Null(data_type)
+                        }
+                    }
+                    DataType::Text => {
+                        if let Some(s) = v.downcast_ref::<String>() {
+                            Value::Text(SmartString::new(s))
+                        } else if let Some(&s) = v.downcast_ref::<&str>() {
+                            Value::Text(SmartString::from(s))
+                        } else {
+                            Value::Null(data_type)
+                        }
+                    }
+                    DataType::Boolean => {
+                        if let Some(&b) = v.downcast_ref::<bool>() {
+                            Value::Boolean(b)
+                        } else if let Some(&i) = v.downcast_ref::<i64>() {
+                            Value::Boolean(i != 0)
+                        } else {
+                            Value::Null(data_type)
+                        }
+                    }
+                    DataType::Timestamp => {
+                        if let Some(&t) = v.downcast_ref::<DateTime<Utc>>() {
+                            Value::Timestamp(t)
+                        } else if let Some(s) = v.downcast_ref::<String>() {
+                            parse_timestamp(s)
+                                .map(Value::Timestamp)
+                                .unwrap_or(Value::Null(data_type))
+                        } else {
+                            Value::Null(data_type)
+                        }
+                    }
+                    DataType::Json => {
+                        if let Some(s) = v.downcast_ref::<String>() {
+                            // Validate JSON
+                            if serde_json::from_str::<serde_json::Value>(s).is_ok() {
+                                Value::json(s)
+                            } else {
+                                Value::Null(data_type)
+                            }
+                        } else {
+                            Value::Null(data_type)
+                        }
+                    }
+                    DataType::Vector => {
+                        if let Some(vec) = v.downcast_ref::<Vec<f32>>() {
+                            Value::vector(vec.clone())
+                        } else {
+                            Value::Null(data_type)
+                        }
+                    }
+                    DataType::Null => Value::Null(DataType::Null),
+                }
+            }
+        }
+    }
+
+    // =========================================================================
+    // Type coercion
+    // =========================================================================
+
+    /// Coerce this value to the target data type
+    ///
+    /// Type coercion rules:
+    /// - Integer column receiving Float → converts to Integer
+    /// - Float column receiving Integer → converts to Float
+    /// - Text column receiving any type → converts to Text
+    /// - Timestamp column receiving String → parses timestamp
+    /// - JSON column receiving valid JSON string → stores as JSON
+    /// - Boolean column receiving Integer/String → converts to Boolean
+    ///
+    /// Returns the coerced value, or NULL if coercion fails.
+    pub fn coerce_to_type(&self, target_type: DataType) -> Value {
+        // NULL stays NULL (with target type hint)
+        if self.is_null() {
+            return Value::Null(target_type);
+        }
+
+        // Same type - no conversion needed
+        if self.data_type() == target_type {
+            return self.clone();
+        }
+
+        match target_type {
+            DataType::Integer => {
+                // Convert to INTEGER
+                match self {
+                    Value::Integer(v) => Value::Integer(*v),
+                    Value::Float(v) => Value::Integer(*v as i64),
+                    Value::Text(s) => s
+                        .parse::<i64>()
+                        .map(Value::Integer)
+                        .unwrap_or(Value::Null(target_type)),
+                    Value::Boolean(b) => Value::Integer(if *b { 1 } else { 0 }),
+                    _ => Value::Null(target_type),
+                }
+            }
+            DataType::Float => {
+                // Convert to FLOAT
+                match self {
+                    Value::Float(v) => Value::Float(*v),
+                    Value::Integer(v) => Value::Float(*v as f64),
+                    Value::Text(s) => s
+                        .parse::<f64>()
+                        .map(Value::Float)
+                        .unwrap_or(Value::Null(target_type)),
+                    Value::Boolean(b) => Value::Float(if *b { 1.0 } else { 0.0 }),
+                    _ => Value::Null(target_type),
+                }
+            }
+            DataType::Text => {
+                // Convert to TEXT - everything can become text
+                match self {
+                    Value::Text(s) => Value::Text(s.clone()),
+                    Value::Integer(v) => Value::Text(SmartString::from_string(v.to_string())),
+                    Value::Float(v) => Value::Text(SmartString::from_string(format_float(*v))),
+                    Value::Boolean(b) => {
+                        Value::Text(SmartString::new(if *b { "true" } else { "false" }))
+                    }
+                    Value::Timestamp(t) => Value::Text(SmartString::from_string(t.to_rfc3339())),
+                    Value::Extension(data) if data.first() == Some(&(DataType::Json as u8)) => {
+                        Value::Text(SmartString::new(
+                            std::str::from_utf8(&data[1..]).unwrap_or(""),
+                        ))
+                    }
+                    Value::Extension(data) if data.first() == Some(&(DataType::Vector as u8)) => {
+                        Value::Text(SmartString::from_string(format_vector_bytes(&data[1..])))
+                    }
+                    Value::Extension(_) => Value::Null(target_type),
+                    Value::Null(_) => Value::Null(target_type),
+                }
+            }
+            DataType::Boolean => {
+                // Convert to BOOLEAN
+                match self {
+                    Value::Boolean(b) => Value::Boolean(*b),
+                    Value::Integer(v) => Value::Boolean(*v != 0),
+                    Value::Float(v) => Value::Boolean(*v != 0.0),
+                    Value::Text(s) => {
+                        // OPTIMIZATION: Use eq_ignore_ascii_case to avoid allocation
+                        let s_ref: &str = s.as_ref();
+                        if s_ref.eq_ignore_ascii_case("true")
+                            || s_ref.eq_ignore_ascii_case("t")
+                            || s_ref.eq_ignore_ascii_case("yes")
+                            || s_ref.eq_ignore_ascii_case("y")
+                            || s_ref == "1"
+                        {
+                            Value::Boolean(true)
+                        } else if s_ref.eq_ignore_ascii_case("false")
+                            || s_ref.eq_ignore_ascii_case("f")
+                            || s_ref.eq_ignore_ascii_case("no")
+                            || s_ref.eq_ignore_ascii_case("n")
+                            || s_ref == "0"
+                        {
+                            Value::Boolean(false)
+                        } else {
+                            Value::Null(target_type)
+                        }
+                    }
+                    _ => Value::Null(target_type),
+                }
+            }
+            DataType::Timestamp => {
+                // Convert to TIMESTAMP
+                match self {
+                    Value::Timestamp(t) => Value::Timestamp(*t),
+                    Value::Text(s) => parse_timestamp(s)
+                        .map(Value::Timestamp)
+                        .unwrap_or(Value::Null(target_type)),
+                    Value::Integer(nanos) => {
+                        // Interpret as nanoseconds since Unix epoch
+                        DateTime::from_timestamp(
+                            *nanos / 1_000_000_000,
+                            (*nanos % 1_000_000_000) as u32,
+                        )
+                        .map(Value::Timestamp)
+                        .unwrap_or(Value::Null(target_type))
+                    }
+                    _ => Value::Null(target_type),
+                }
+            }
+            DataType::Json => {
+                // Convert to JSON
+                match self {
+                    Value::Extension(data) if data.first() == Some(&(DataType::Json as u8)) => {
+                        self.clone()
+                    }
+                    Value::Text(s) => {
+                        // Validate JSON
+                        if serde_json::from_str::<serde_json::Value>(s.as_str()).is_ok() {
+                            Value::json(s.as_str())
+                        } else {
+                            Value::Null(target_type)
+                        }
+                    }
+                    // Convert other types to JSON representation
+                    Value::Integer(v) => Value::json(v.to_string()),
+                    Value::Float(v) => Value::json(format_float(*v)),
+                    Value::Boolean(b) => Value::json(if *b { "true" } else { "false" }),
+                    _ => Value::Null(target_type),
+                }
+            }
+            DataType::Vector => match self {
+                Value::Extension(data) if data.first() == Some(&(DataType::Vector as u8)) => {
+                    self.clone()
+                }
+                Value::Text(s) => {
+                    if let Some(floats) = parse_vector_str(s.as_str()) {
+                        Value::vector(floats)
+                    } else {
+                        Value::Null(target_type)
+                    }
+                }
+                _ => Value::Null(target_type),
+            },
+            DataType::Null => Value::Null(DataType::Null),
+        }
+    }
+
+    /// Coerce value to target type, consuming self
+    /// OPTIMIZATION: Avoids clone when types already match
+    #[inline]
+    pub fn into_coerce_to_type(self, target_type: DataType) -> Value {
+        // NULL stays NULL (with target type hint)
+        if self.is_null() {
+            return Value::Null(target_type);
+        }
+
+        // Same type - no conversion needed, return self directly
+        if self.data_type() == target_type {
+            return self;
+        }
+
+        match target_type {
+            DataType::Integer => match &self {
+                Value::Integer(v) => Value::Integer(*v),
+                Value::Float(v) => Value::Integer(*v as i64),
+                Value::Text(s) => s
+                    .parse::<i64>()
+                    .map(Value::Integer)
+                    .unwrap_or(Value::Null(target_type)),
+                Value::Boolean(b) => Value::Integer(if *b { 1 } else { 0 }),
+                _ => Value::Null(target_type),
+            },
+            DataType::Float => match &self {
+                Value::Float(v) => Value::Float(*v),
+                Value::Integer(v) => Value::Float(*v as f64),
+                Value::Text(s) => s
+                    .parse::<f64>()
+                    .map(Value::Float)
+                    .unwrap_or(Value::Null(target_type)),
+                Value::Boolean(b) => Value::Float(if *b { 1.0 } else { 0.0 }),
+                _ => Value::Null(target_type),
+            },
+            DataType::Text => match self {
+                Value::Text(s) => Value::Text(s),
+                Value::Integer(v) => Value::Text(SmartString::from_string(v.to_string())),
+                Value::Float(v) => Value::Text(SmartString::from_string(format_float(v))),
+                Value::Boolean(b) => {
+                    Value::Text(SmartString::new(if b { "true" } else { "false" }))
+                }
+                Value::Timestamp(t) => Value::Text(SmartString::from_string(t.to_rfc3339())),
+                Value::Extension(data) if data.first() == Some(&(DataType::Json as u8)) => {
+                    Value::Text(SmartString::new(
+                        std::str::from_utf8(&data[1..]).unwrap_or(""),
+                    ))
+                }
+                Value::Extension(data) if data.first() == Some(&(DataType::Vector as u8)) => {
+                    Value::Text(SmartString::from_string(format_vector_bytes(&data[1..])))
+                }
+                Value::Extension(_) | Value::Null(_) => Value::Null(target_type),
+            },
+            DataType::Boolean => match &self {
+                Value::Boolean(b) => Value::Boolean(*b),
+                Value::Integer(v) => Value::Boolean(*v != 0),
+                Value::Float(v) => Value::Boolean(*v != 0.0),
+                Value::Text(s) => {
+                    // OPTIMIZATION: Use eq_ignore_ascii_case to avoid allocation
+                    let s_ref: &str = s.as_ref();
+                    if s_ref.eq_ignore_ascii_case("true")
+                        || s_ref.eq_ignore_ascii_case("t")
+                        || s_ref.eq_ignore_ascii_case("yes")
+                        || s_ref.eq_ignore_ascii_case("y")
+                        || s_ref == "1"
+                    {
+                        Value::Boolean(true)
+                    } else if s_ref.eq_ignore_ascii_case("false")
+                        || s_ref.eq_ignore_ascii_case("f")
+                        || s_ref.eq_ignore_ascii_case("no")
+                        || s_ref.eq_ignore_ascii_case("n")
+                        || s_ref == "0"
+                    {
+                        Value::Boolean(false)
+                    } else {
+                        Value::Null(target_type)
+                    }
+                }
+                _ => Value::Null(target_type),
+            },
+            DataType::Timestamp => match self {
+                Value::Timestamp(t) => Value::Timestamp(t),
+                Value::Text(s) => parse_timestamp(&s)
+                    .map(Value::Timestamp)
+                    .unwrap_or(Value::Null(target_type)),
+                Value::Integer(nanos) => {
+                    DateTime::from_timestamp(nanos / 1_000_000_000, (nanos % 1_000_000_000) as u32)
+                        .map(Value::Timestamp)
+                        .unwrap_or(Value::Null(target_type))
+                }
+                _ => Value::Null(target_type),
+            },
+            DataType::Json => match self {
+                Value::Extension(ref data) if data.first() == Some(&(DataType::Json as u8)) => self,
+                Value::Text(s) => {
+                    if serde_json::from_str::<serde_json::Value>(s.as_str()).is_ok() {
+                        Value::json(s.as_str())
+                    } else {
+                        Value::Null(target_type)
+                    }
+                }
+                Value::Integer(v) => Value::json(v.to_string()),
+                Value::Float(v) => Value::json(format_float(v)),
+                Value::Boolean(b) => Value::json(if b { "true" } else { "false" }),
+                _ => Value::Null(target_type),
+            },
+            DataType::Vector => match self {
+                Value::Extension(ref data) if data.first() == Some(&(DataType::Vector as u8)) => {
+                    self
+                }
+                Value::Text(s) => {
+                    if let Some(floats) = parse_vector_str(s.as_str()) {
+                        Value::vector(floats)
+                    } else {
+                        Value::Null(target_type)
+                    }
+                }
+                _ => Value::Null(target_type),
+            },
+            DataType::Null => Value::Null(DataType::Null),
+        }
+    }
+}
+
+// =========================================================================
+// Trait implementations
+// =========================================================================
+
+impl Default for Value {
+    fn default() -> Self {
+        Value::Null(DataType::Null)
+    }
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Null(_) => write!(f, "NULL"),
+            Value::Integer(v) => write!(f, "{}", v),
+            Value::Float(v) => write!(f, "{}", format_float(*v)),
+            Value::Text(s) => write!(f, "{}", s),
+            Value::Boolean(b) => write!(f, "{}", if *b { "true" } else { "false" }),
+            Value::Timestamp(t) => write!(f, "{}", t.to_rfc3339()),
+            Value::Extension(data) => {
+                let tag = data.first().copied().unwrap_or(0);
+                if tag == DataType::Json as u8 {
+                    write!(f, "{}", std::str::from_utf8(&data[1..]).unwrap_or(""))
+                } else if tag == DataType::Vector as u8 {
+                    write!(f, "{}", format_vector_bytes(&data[1..]))
+                } else {
+                    write!(f, "<extension:{}>", tag)
+                }
+            }
+        }
+    }
+}
+
+impl PartialEq for Value {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        // Single match handles NULL and all type comparisons without redundant is_null() calls
+        match (self, other) {
+            // NULL handling: NULL == NULL (SQL equality semantics for grouping)
+            (Value::Null(_), Value::Null(_)) => true,
+            // NULL != any non-NULL value
+            (Value::Null(_), _) | (_, Value::Null(_)) => false,
+            // Same type comparisons
+            (Value::Integer(a), Value::Integer(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => {
+                // Handle NaN: NaN != NaN in IEEE 754, but we consider them equal
+                if a.is_nan() && b.is_nan() {
+                    true
+                } else {
+                    a == b
+                }
+            }
+            // Cross-type numeric comparison: Integer vs Float
+            // This is critical for queries like WHERE id = 5.0 or WHERE price = 100
+            (Value::Integer(i), Value::Float(f)) | (Value::Float(f), Value::Integer(i)) => {
+                *f == (*i as f64)
+            }
+            (Value::Text(a), Value::Text(b)) => a == b,
+            (Value::Boolean(a), Value::Boolean(b)) => a == b,
+            (Value::Timestamp(a), Value::Timestamp(b)) => a == b,
+            (Value::Extension(a), Value::Extension(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Value {}
+
+/// Maximum i64 value that can be safely hashed as i64 without f64 conversion.
+/// Integers in the range [I64_SAFE_MIN, I64_SAFE_MAX] have unique f64 representations,
+/// while integers outside this range may round to the same f64 value.
+/// This is 2^53 - 1 = 9007199254740991.
+const I64_SAFE_MAX: i64 = (1_i64 << 53) - 1;
+const I64_SAFE_MIN: i64 = -I64_SAFE_MAX;
+
+/// WyHash-style 128-bit multiply mixing function.
+/// Provides excellent avalanche properties - small input changes produce
+/// completely different outputs. This pre-mixes values before the hasher
+/// sees them, fixing collision problems with simple hashers like FxHash.
+#[inline(always)]
+fn wymix(a: u64, b: u64) -> u64 {
+    let r = (a as u128).wrapping_mul(b as u128);
+    (r as u64) ^ ((r >> 64) as u64)
+}
+
+// WyHash prime constants for mixing
+const WY_P1: u64 = 0xa0761d6478bd642f;
+const WY_P2: u64 = 0xe7037ed1a0b428db;
+
+impl Hash for Value {
+    #[inline(always)]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Pre-mix strategy: Instead of writing raw values that may have poor
+        // distribution (causing collisions in simple hashers like FxHash),
+        // we pre-mix everything using WyHash-style 128-bit multiply mixing.
+        // This gives ANY hasher well-distributed inputs.
+        //
+        // Constraint: Integer(5) == Float(5.0) must have equal hashes.
+        // We handle this by using the same mixing for whole-number floats.
+        match self {
+            Value::Null(_) => {
+                // All NULLs hash the same
+                state.write_u64(0);
+            }
+            Value::Integer(v) => {
+                // Pre-mix integer with discriminant
+                match *v {
+                    I64_SAFE_MIN..=I64_SAFE_MAX => {
+                        state.write_u64(wymix(1 ^ (*v as u64), WY_P1));
+                    }
+                    _ => {
+                        // Large integer: use f64 bits for consistency with Float
+                        state.write_u64(wymix(1 ^ (*v as f64).to_bits(), WY_P1));
+                    }
+                }
+            }
+            Value::Float(v) => {
+                if v.is_nan() {
+                    // All NaNs are equal, so they must hash the same
+                    state.write_u64(wymix(6 ^ f64::NAN.to_bits(), WY_P1));
+                } else if v.fract() == 0.0 {
+                    // Whole number float - must hash same as equivalent Integer
+                    match *v as i64 {
+                        i @ I64_SAFE_MIN..=I64_SAFE_MAX => {
+                            state.write_u64(wymix(1 ^ (i as u64), WY_P1));
+                        }
+                        _ => {
+                            state.write_u64(wymix(1 ^ v.to_bits(), WY_P1));
+                        }
+                    }
+                } else {
+                    // Fractional float - use discriminant 6 (can't equal any Integer)
+                    state.write_u64(wymix(6 ^ v.to_bits(), WY_P1));
+                }
+            }
+            Value::Text(s) => {
+                // Pre-hash string with WyHash-style mixing, write single u64
+                let bytes = s.as_bytes();
+                let len = bytes.len();
+                let mut h = wymix(2 ^ (len as u64), WY_P1);
+
+                // Process 8 bytes at a time
+                let chunks = len / 8;
+                let ptr = bytes.as_ptr();
+                for i in 0..chunks {
+                    // SAFETY: We iterate i from 0..chunks where chunks = len/8.
+                    // So i*8 is always < len, and we read 8 bytes which is valid
+                    // since (i+1)*8 <= chunks*8 <= len. read_unaligned handles alignment.
+                    let chunk = unsafe { (ptr.add(i * 8) as *const u64).read_unaligned() };
+                    h = wymix(h ^ chunk, WY_P2);
+                }
+
+                // Handle tail bytes (0-7)
+                let tail_start = chunks * 8;
+                if tail_start < len {
+                    let mut tail = 0u64;
+                    for (j, &b) in bytes[tail_start..].iter().enumerate() {
+                        tail |= (b as u64) << (j * 8);
+                    }
+                    h = wymix(h ^ tail, WY_P1);
+                }
+
+                state.write_u64(h);
+            }
+            Value::Boolean(b) => {
+                // Pre-mixed boolean
+                state.write_u64(wymix(if *b { 5 } else { 4 }, WY_P1));
+            }
+            Value::Timestamp(t) => {
+                // Pre-mix timestamp nanos
+                let nanos = t.timestamp_nanos_opt().unwrap_or(i64::MAX);
+                state.write_u64(wymix(3 ^ (nanos as u64), WY_P1));
+            }
+            Value::Extension(data) => {
+                // Pre-hash extension data with WyHash-style mixing
+                // Tag byte is included in data, so discriminant is embedded
+                let bytes: &[u8] = data;
+                let len = bytes.len();
+                let mut h = wymix(10 ^ (len as u64), WY_P1);
+
+                let chunks = len / 8;
+                let ptr = bytes.as_ptr();
+                for i in 0..chunks {
+                    // SAFETY: We iterate i from 0..chunks where chunks = len/8.
+                    // So i*8 is always < len, and we read 8 bytes which is valid
+                    // since (i+1)*8 <= chunks*8 <= len. read_unaligned handles alignment.
+                    let chunk = unsafe { (ptr.add(i * 8) as *const u64).read_unaligned() };
+                    h = wymix(h ^ chunk, WY_P2);
+                }
+
+                let tail_start = chunks * 8;
+                if tail_start < len {
+                    let mut tail = 0u64;
+                    for (j, &b) in bytes[tail_start..].iter().enumerate() {
+                        tail |= (b as u64) << (j * 8);
+                    }
+                    h = wymix(h ^ tail, WY_P1);
+                }
+
+                state.write_u64(h);
+            }
+        }
+    }
+}
+
+// Note: PartialOrd intentionally differs from Ord for SQL semantics
+// - PartialOrd: SQL comparison (NULL returns None, cross-type numeric comparison)
+// - Ord: BTreeMap ordering (NULLs first, type discriminant ordering)
+#[allow(clippy::non_canonical_partial_ord_impl)]
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        // Use the original compare method for semantic correctness in SQL operations
+        // This preserves NULL comparison semantics (returning None for NULL comparisons)
+        // and proper cross-type numeric comparison (Integer vs Float)
+        self.compare(other).ok()
+    }
+}
+
+/// Total ordering implementation for Value
+///
+/// This is required for using Value as a key in BTreeMap/BTreeSet.
+/// The ordering is defined as follows:
+/// 1. NULLs are always ordered first (smallest)
+/// 2. Numeric types (Integer, Float) are compared by numeric value (consistent with PartialEq)
+/// 3. Other different data types are ordered by their type discriminant
+/// 4. Same data types use their natural ordering
+///
+/// IMPORTANT: This ordering MUST be consistent with PartialEq. Since Integer(5) == Float(5.0)
+/// per PartialEq, we must ensure Integer(5).cmp(&Float(5.0)) == Ordering::Equal.
+/// Violating this contract causes BTreeMap corruption.
+///
+/// Note: This differs from SQL NULL semantics where NULL comparisons
+/// return UNKNOWN. This ordering is only for internal index structure.
+impl Ord for Value {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Handle NULL comparisons - NULLs are ordered first
+        match (self.is_null(), other.is_null()) {
+            (true, true) => return Ordering::Equal,
+            (true, false) => return Ordering::Less,
+            (false, true) => return Ordering::Greater,
+            (false, false) => {} // Continue to value comparison
+        }
+
+        // Cross-type numeric comparison: Integer vs Float
+        // This MUST be consistent with PartialEq where Integer(5) == Float(5.0)
+        match (self, other) {
+            (Value::Integer(i), Value::Float(f)) => {
+                let i_as_f64 = *i as f64;
+                // Handle NaN: NaN is ordered last
+                if f.is_nan() {
+                    return Ordering::Less; // Any number < NaN
+                }
+                return i_as_f64.partial_cmp(f).unwrap_or(Ordering::Equal);
+            }
+            (Value::Float(f), Value::Integer(i)) => {
+                let i_as_f64 = *i as f64;
+                // Handle NaN: NaN is ordered last
+                if f.is_nan() {
+                    return Ordering::Greater; // NaN > any number
+                }
+                return f.partial_cmp(&i_as_f64).unwrap_or(Ordering::Equal);
+            }
+            _ => {} // Continue to same-type comparison
+        }
+
+        // Helper function to get type discriminant for ordering
+        fn type_discriminant(v: &Value) -> u8 {
+            match v {
+                Value::Null(_) => 0,
+                Value::Boolean(_) => 1,
+                // Integer and Float share the same discriminant for ordering purposes
+                // This ensures they sort together by numeric value
+                Value::Integer(_) | Value::Float(_) => 2,
+                Value::Text(_) => 3,
+                Value::Timestamp(_) => 4,
+                Value::Extension(_) => 5,
+            }
+        }
+
+        let self_disc = type_discriminant(self);
+        let other_disc = type_discriminant(other);
+
+        // Different types: order by type discriminant
+        if self_disc != other_disc {
+            return self_disc.cmp(&other_disc);
+        }
+
+        // Same type comparison
+        match (self, other) {
+            (Value::Integer(a), Value::Integer(b)) => a.cmp(b),
+            (Value::Float(a), Value::Float(b)) => {
+                // Handle NaN: NaN is ordered last
+                match (a.is_nan(), b.is_nan()) {
+                    (true, true) => Ordering::Equal,
+                    (true, false) => Ordering::Greater,
+                    (false, true) => Ordering::Less,
+                    (false, false) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
+                }
+            }
+            (Value::Text(a), Value::Text(b)) => a.cmp(b),
+            (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
+            (Value::Timestamp(a), Value::Timestamp(b)) => a.cmp(b),
+            (Value::Extension(a), Value::Extension(b)) => a.cmp(b),
+            _ => Ordering::Equal, // Should not reach here
+        }
+    }
+}
+
+// =========================================================================
+// From implementations for convenient construction
+// =========================================================================
+
+impl From<i64> for Value {
+    fn from(v: i64) -> Self {
+        Value::Integer(v)
+    }
+}
+
+impl From<i32> for Value {
+    fn from(v: i32) -> Self {
+        Value::Integer(v as i64)
+    }
+}
+
+impl From<i16> for Value {
+    fn from(v: i16) -> Self {
+        Value::Integer(v as i64)
+    }
+}
+
+impl From<i8> for Value {
+    fn from(v: i8) -> Self {
+        Value::Integer(v as i64)
+    }
+}
+
+impl From<u32> for Value {
+    fn from(v: u32) -> Self {
+        Value::Integer(v as i64)
+    }
+}
+
+impl From<u16> for Value {
+    fn from(v: u16) -> Self {
+        Value::Integer(v as i64)
+    }
+}
+
+impl From<u8> for Value {
+    fn from(v: u8) -> Self {
+        Value::Integer(v as i64)
+    }
+}
+
+impl From<f64> for Value {
+    fn from(v: f64) -> Self {
+        Value::Float(v)
+    }
+}
+
+impl From<f32> for Value {
+    fn from(v: f32) -> Self {
+        Value::Float(v as f64)
+    }
+}
+
+impl From<String> for Value {
+    fn from(v: String) -> Self {
+        Value::Text(SmartString::from_string(v))
+    }
+}
+
+impl From<&str> for Value {
+    fn from(v: &str) -> Self {
+        Value::Text(SmartString::from(v))
+    }
+}
+
+impl From<Arc<str>> for Value {
+    fn from(v: Arc<str>) -> Self {
+        Value::Text(SmartString::from(v.as_ref()))
+    }
+}
+
+impl From<bool> for Value {
+    fn from(v: bool) -> Self {
+        Value::Boolean(v)
+    }
+}
+
+impl From<DateTime<Utc>> for Value {
+    fn from(v: DateTime<Utc>) -> Self {
+        Value::Timestamp(v)
+    }
+}
+
+impl<T: Into<Value>> From<Option<T>> for Value {
+    fn from(v: Option<T>) -> Self {
+        match v {
+            Some(val) => val.into(),
+            None => Value::Null(DataType::Null),
+        }
+    }
+}
+
+// =========================================================================
+// Helper functions
+// =========================================================================
+
+/// Parse a timestamp string with multiple format support
+pub fn parse_timestamp(s: &str) -> Result<DateTime<Utc>> {
+    let s = s.trim();
+
+    // Try each timestamp format
+    for format in TIMESTAMP_FORMATS {
+        if let Ok(dt) = DateTime::parse_from_str(s, format) {
+            return Ok(dt.with_timezone(&Utc));
+        }
+        // Try parsing as naive datetime and assume UTC
+        if let Ok(ndt) = NaiveDateTime::parse_from_str(s, format) {
+            return Ok(Utc.from_utc_datetime(&ndt));
+        }
+    }
+
+    // Try date-only formats
+    if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        let datetime = date.and_hms_opt(0, 0, 0).unwrap();
+        return Ok(Utc.from_utc_datetime(&datetime));
+    }
+
+    // Try time-only formats (use today's date)
+    for format in TIME_FORMATS {
+        if let Ok(time) = NaiveTime::parse_from_str(s, format) {
+            let today = Utc::now().date_naive();
+            let datetime = today.and_time(time);
+            return Ok(Utc.from_utc_datetime(&datetime));
+        }
+    }
+
+    Err(Error::parse(format!("invalid timestamp format: {}", s)))
+}
+
+/// Format a float value consistently
+fn format_float(v: f64) -> String {
+    // Handle special cases
+    if v.is_nan() {
+        return "NaN".to_string();
+    }
+    if v.is_infinite() {
+        return if v.is_sign_positive() {
+            "Infinity"
+        } else {
+            "-Infinity"
+        }
+        .to_string();
+    }
+
+    let abs_v = v.abs();
+
+    // Use scientific notation for very large or very small numbers
+    if abs_v != 0.0 && !(1e-4..1e15).contains(&abs_v) {
+        // Use scientific notation with up to 15 significant digits
+        let s = format!("{:e}", v);
+        // Clean up trailing zeros in mantissa
+        if let Some(e_pos) = s.find('e') {
+            let (mantissa, exp) = s.split_at(e_pos);
+            let clean_mantissa = if mantissa.contains('.') {
+                mantissa
+                    .trim_end_matches('0')
+                    .trim_end_matches('.')
+                    .to_string()
+            } else {
+                mantissa.to_string()
+            };
+            return format!("{}{}", clean_mantissa, exp);
+        }
+        return s;
+    }
+
+    if v.fract() == 0.0 {
+        // Integer-like float, format without decimal
+        format!("{:.0}", v)
+    } else {
+        // Use standard representation for normal range
+        let s = format!("{:?}", v);
+        // Remove trailing zeros after decimal point
+        if s.contains('.') && !s.contains('e') && !s.contains('E') {
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            s
+        }
+    }
+}
+
+/// Format packed LE f32 bytes as "[1.0, 2.0, 3.0]" string
+pub fn format_vector_bytes(data: &[u8]) -> String {
+    let len = data.len() / 4;
+    let mut s = String::with_capacity(len * 8 + 2);
+    s.push('[');
+    for i in 0..len {
+        if i > 0 {
+            s.push_str(", ");
+        }
+        let f = f32::from_le_bytes([
+            data[i * 4],
+            data[i * 4 + 1],
+            data[i * 4 + 2],
+            data[i * 4 + 3],
+        ]);
+        use std::fmt::Write;
+        if f.fract() == 0.0 && f.is_finite() {
+            let _ = write!(s, "{:.1}", f);
+        } else {
+            let _ = write!(s, "{}", f);
+        }
+    }
+    s.push(']');
+    s
+}
+
+/// Convert Extension byte data to str (for JSON and other UTF-8 extension types)
+///
+/// Parse a vector string in [f32, f32, ...] format
+pub fn parse_vector_str(s: &str) -> Option<Vec<f32>> {
+    let s = s.trim();
+    let inner = s.strip_prefix('[')?.strip_suffix(']')?;
+    if inner.trim().is_empty() {
+        return Some(Vec::new());
+    }
+    let mut result = Vec::new();
+    for part in inner.split(',') {
+        let val: f32 = part.trim().parse().ok()?;
+        result.push(val);
+    }
+    Some(result)
+}
+
+/// Compare two floats with proper NaN handling
+fn compare_floats(a: f64, b: f64) -> Ordering {
+    // Handle NaN: treat as greater than all other values for consistency
+    match (a.is_nan(), b.is_nan()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => a.partial_cmp(&b).unwrap_or(Ordering::Equal),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Datelike, Timelike};
+
+    // =========================================================================
+    // Size verification tests
+    // =========================================================================
+
+    #[test]
+    fn test_value_size() {
+        use std::mem::size_of;
+
+        // Value must be exactly 16 bytes for memory efficiency
+        assert_eq!(
+            size_of::<Value>(),
+            16,
+            "Value should be 16 bytes, got {}",
+            size_of::<Value>()
+        );
+
+        // Option<Value> should also be 16 bytes due to niche optimization
+        assert_eq!(
+            size_of::<Option<Value>>(),
+            16,
+            "Option<Value> should be 16 bytes (niche optimization), got {}",
+            size_of::<Option<Value>>()
+        );
+    }
+
+    // =========================================================================
+    // Constructor tests
+    // =========================================================================
+
+    #[test]
+    fn test_constructors() {
+        assert!(Value::null(DataType::Integer).is_null());
+        assert_eq!(Value::integer(42).as_int64(), Some(42));
+        assert_eq!(Value::float(3.5).as_float64(), Some(3.5));
+        assert_eq!(Value::text("hello").as_str(), Some("hello"));
+        assert_eq!(Value::boolean(true).as_boolean(), Some(true));
+        assert!(Value::json(r#"{"key": "value"}"#).as_json().is_some());
+    }
+
+    #[test]
+    fn test_from_implementations() {
+        let v: Value = 42i64.into();
+        assert_eq!(v.as_int64(), Some(42));
+
+        let v: Value = 3.5f64.into();
+        assert_eq!(v.as_float64(), Some(3.5));
+
+        let v: Value = "hello".into();
+        assert_eq!(v.as_str(), Some("hello"));
+
+        let v: Value = true.into();
+        assert_eq!(v.as_boolean(), Some(true));
+
+        let v: Value = Option::<i64>::None.into();
+        assert!(v.is_null());
+
+        let v: Value = Some(42i64).into();
+        assert_eq!(v.as_int64(), Some(42));
+    }
+
+    // =========================================================================
+    // Type accessor tests
+    // =========================================================================
+
+    #[test]
+    fn test_data_type() {
+        assert_eq!(
+            Value::null(DataType::Integer).data_type(),
+            DataType::Integer
+        );
+        assert_eq!(Value::integer(42).data_type(), DataType::Integer);
+        assert_eq!(Value::float(3.5).data_type(), DataType::Float);
+        assert_eq!(Value::text("hello").data_type(), DataType::Text);
+        assert_eq!(Value::boolean(true).data_type(), DataType::Boolean);
+        assert_eq!(
+            Value::Timestamp(Utc::now()).data_type(),
+            DataType::Timestamp
+        );
+        assert_eq!(Value::json("{}").data_type(), DataType::Json);
+    }
+
+    // =========================================================================
+    // AsXxx conversion tests
+    // =========================================================================
+
+    #[test]
+    fn test_as_int64() {
+        // Direct integer
+        assert_eq!(Value::integer(42).as_int64(), Some(42));
+
+        // Float to integer (truncates)
+        assert_eq!(Value::float(3.7).as_int64(), Some(3));
+        assert_eq!(Value::float(-3.7).as_int64(), Some(-3));
+
+        // String to integer
+        assert_eq!(Value::text("42").as_int64(), Some(42));
+        assert_eq!(Value::text("-42").as_int64(), Some(-42));
+        assert_eq!(Value::text("3.7").as_int64(), Some(3)); // Parse as float, convert
+
+        // Boolean to integer
+        assert_eq!(Value::boolean(true).as_int64(), Some(1));
+        assert_eq!(Value::boolean(false).as_int64(), Some(0));
+
+        // NULL returns None
+        assert_eq!(Value::null(DataType::Integer).as_int64(), None);
+
+        // Invalid string
+        assert_eq!(Value::text("not a number").as_int64(), None);
+    }
+
+    #[test]
+    fn test_as_float64() {
+        // Direct float
+        assert_eq!(Value::float(3.5).as_float64(), Some(3.5));
+
+        // Integer to float
+        assert_eq!(Value::integer(42).as_float64(), Some(42.0));
+
+        // String to float
+        assert_eq!(Value::text("3.5").as_float64(), Some(3.5));
+
+        // Boolean to float
+        assert_eq!(Value::boolean(true).as_float64(), Some(1.0));
+        assert_eq!(Value::boolean(false).as_float64(), Some(0.0));
+
+        // NULL returns None
+        assert_eq!(Value::null(DataType::Float).as_float64(), None);
+    }
+
+    #[test]
+    fn test_as_boolean() {
+        // Direct boolean
+        assert_eq!(Value::boolean(true).as_boolean(), Some(true));
+        assert_eq!(Value::boolean(false).as_boolean(), Some(false));
+
+        // Integer to boolean
+        assert_eq!(Value::integer(1).as_boolean(), Some(true));
+        assert_eq!(Value::integer(0).as_boolean(), Some(false));
+        assert_eq!(Value::integer(-1).as_boolean(), Some(true));
+
+        // Float to boolean
+        assert_eq!(Value::float(1.0).as_boolean(), Some(true));
+        assert_eq!(Value::float(0.0).as_boolean(), Some(false));
+
+        // String to boolean (various string values)
+        assert_eq!(Value::text("true").as_boolean(), Some(true));
+        assert_eq!(Value::text("TRUE").as_boolean(), Some(true));
+        assert_eq!(Value::text("t").as_boolean(), Some(true));
+        assert_eq!(Value::text("yes").as_boolean(), Some(true));
+        assert_eq!(Value::text("y").as_boolean(), Some(true));
+        assert_eq!(Value::text("1").as_boolean(), Some(true));
+        assert_eq!(Value::text("false").as_boolean(), Some(false));
+        assert_eq!(Value::text("FALSE").as_boolean(), Some(false));
+        assert_eq!(Value::text("f").as_boolean(), Some(false));
+        assert_eq!(Value::text("no").as_boolean(), Some(false));
+        assert_eq!(Value::text("n").as_boolean(), Some(false));
+        assert_eq!(Value::text("0").as_boolean(), Some(false));
+        assert_eq!(Value::text("").as_boolean(), Some(false));
+
+        // Numeric strings
+        assert_eq!(Value::text("42").as_boolean(), Some(true));
+        assert_eq!(Value::text("0.0").as_boolean(), Some(false));
+    }
+
+    #[test]
+    fn test_as_string() {
+        // Direct string
+        assert_eq!(Value::text("hello").as_string(), Some("hello".to_string()));
+
+        // Integer to string
+        assert_eq!(Value::integer(42).as_string(), Some("42".to_string()));
+
+        // Float to string
+        assert_eq!(Value::float(3.5).as_string(), Some("3.5".to_string()));
+
+        // Boolean to string
+        assert_eq!(Value::boolean(true).as_string(), Some("true".to_string()));
+        assert_eq!(Value::boolean(false).as_string(), Some("false".to_string()));
+
+        // NULL returns None
+        assert_eq!(Value::null(DataType::Text).as_string(), None);
+    }
+
+    // =========================================================================
+    // Equality tests
+    // =========================================================================
+
+    #[test]
+    fn test_equality() {
+        // Same type equality
+        assert_eq!(Value::integer(42), Value::integer(42));
+        assert_ne!(Value::integer(42), Value::integer(43));
+
+        assert_eq!(Value::float(3.5), Value::float(3.5));
+        assert_ne!(Value::float(3.5), Value::float(3.15));
+
+        assert_eq!(Value::text("hello"), Value::text("hello"));
+        assert_ne!(Value::text("hello"), Value::text("world"));
+
+        assert_eq!(Value::boolean(true), Value::boolean(true));
+        assert_ne!(Value::boolean(true), Value::boolean(false));
+
+        // NULL equality
+        assert_eq!(Value::null(DataType::Integer), Value::null(DataType::Float));
+        assert_ne!(Value::null(DataType::Integer), Value::integer(0));
+
+        // Cross-type numeric comparison: Integer and Float with same value ARE equal
+        // This is important for queries like WHERE id = 5.0 or WHERE price = 100
+        assert_eq!(Value::integer(1), Value::float(1.0));
+        assert_eq!(Value::integer(5), Value::float(5.0));
+        assert_ne!(Value::integer(1), Value::float(1.5)); // Different values are not equal
+
+        // Different non-numeric types are not equal
+        assert_ne!(Value::text("1"), Value::integer(1));
+    }
+
+    #[test]
+    fn test_float_nan_equality() {
+        // NaN handling: NaN == NaN in our implementation (for consistency)
+        let nan = Value::float(f64::NAN);
+        assert_eq!(nan, nan.clone());
+    }
+
+    // =========================================================================
+    // Comparison tests
+    // =========================================================================
+
+    #[test]
+    fn test_compare_integers() {
+        assert_eq!(
+            Value::integer(1).compare(&Value::integer(2)).unwrap(),
+            Ordering::Less
+        );
+        assert_eq!(
+            Value::integer(2).compare(&Value::integer(2)).unwrap(),
+            Ordering::Equal
+        );
+        assert_eq!(
+            Value::integer(3).compare(&Value::integer(2)).unwrap(),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn test_compare_floats() {
+        assert_eq!(
+            Value::float(1.0).compare(&Value::float(2.0)).unwrap(),
+            Ordering::Less
+        );
+        assert_eq!(
+            Value::float(2.0).compare(&Value::float(2.0)).unwrap(),
+            Ordering::Equal
+        );
+        assert_eq!(
+            Value::float(3.0).compare(&Value::float(2.0)).unwrap(),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn test_compare_cross_type_numeric() {
+        // Integer vs Float comparison
+        assert_eq!(
+            Value::integer(1).compare(&Value::float(2.0)).unwrap(),
+            Ordering::Less
+        );
+        assert_eq!(
+            Value::integer(2).compare(&Value::float(2.0)).unwrap(),
+            Ordering::Equal
+        );
+        assert_eq!(
+            Value::float(3.0).compare(&Value::integer(2)).unwrap(),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn test_compare_strings() {
+        assert_eq!(
+            Value::text("a").compare(&Value::text("b")).unwrap(),
+            Ordering::Less
+        );
+        assert_eq!(
+            Value::text("b").compare(&Value::text("b")).unwrap(),
+            Ordering::Equal
+        );
+        assert_eq!(
+            Value::text("c").compare(&Value::text("b")).unwrap(),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn test_compare_null() {
+        // NULL comparisons
+        assert_eq!(
+            Value::null(DataType::Integer)
+                .compare(&Value::null(DataType::Float))
+                .unwrap(),
+            Ordering::Equal
+        );
+
+        // NULL vs non-NULL should error
+        assert!(Value::null(DataType::Integer)
+            .compare(&Value::integer(0))
+            .is_err());
+        assert!(Value::integer(0)
+            .compare(&Value::null(DataType::Integer))
+            .is_err());
+    }
+
+    #[test]
+    fn test_compare_json_error() {
+        // JSON comparison only allows equality
+        let j1 = Value::json(r#"{"a": 1}"#);
+        let j2 = Value::json(r#"{"b": 2}"#);
+        assert!(j1.compare(&j2).is_err());
+
+        // Same JSON values are equal
+        let j3 = Value::json(r#"{"a": 1}"#);
+        assert_eq!(j1.compare(&j3).unwrap(), Ordering::Equal);
+    }
+
+    // =========================================================================
+    // Timestamp parsing tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_timestamp() {
+        // RFC3339
+        let ts = parse_timestamp("2024-01-15T10:30:00Z").unwrap();
+        assert_eq!(ts.year(), 2024);
+        assert_eq!(ts.month(), 1);
+        assert_eq!(ts.day(), 15);
+        assert_eq!(ts.hour(), 10);
+        assert_eq!(ts.minute(), 30);
+
+        // SQL format
+        let ts = parse_timestamp("2024-01-15 10:30:00").unwrap();
+        assert_eq!(ts.year(), 2024);
+
+        // Date only
+        let ts = parse_timestamp("2024-01-15").unwrap();
+        assert_eq!(ts.year(), 2024);
+        assert_eq!(ts.hour(), 0);
+
+        // Invalid format
+        assert!(parse_timestamp("not a date").is_err());
+    }
+
+    // =========================================================================
+    // Display tests
+    // =========================================================================
+
+    #[test]
+    fn test_display() {
+        assert_eq!(Value::null(DataType::Integer).to_string(), "NULL");
+        assert_eq!(Value::integer(42).to_string(), "42");
+        assert_eq!(Value::float(3.5).to_string(), "3.5");
+        assert_eq!(Value::text("hello").to_string(), "hello");
+        assert_eq!(Value::boolean(true).to_string(), "true");
+        assert_eq!(Value::boolean(false).to_string(), "false");
+    }
+
+    // =========================================================================
+    // Hash tests
+    // =========================================================================
+
+    #[test]
+    fn test_hash() {
+        use rustc_hash::FxHashSet;
+
+        let mut set = FxHashSet::default();
+        set.insert(Value::integer(42));
+        set.insert(Value::integer(42)); // Duplicate
+        set.insert(Value::integer(43));
+
+        assert_eq!(set.len(), 2);
+        assert!(set.contains(&Value::integer(42)));
+        assert!(set.contains(&Value::integer(43)));
+    }
+
+    #[test]
+    fn test_hash_integer_float_consistency() {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+
+        fn hash_value(v: &Value) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            v.hash(&mut hasher);
+            hasher.finish()
+        }
+
+        // Basic case: Integer(5) and Float(5.0) must hash the same
+        assert_eq!(
+            hash_value(&Value::integer(5)),
+            hash_value(&Value::float(5.0))
+        );
+        assert_eq!(
+            hash_value(&Value::integer(-100)),
+            hash_value(&Value::float(-100.0))
+        );
+        assert_eq!(
+            hash_value(&Value::integer(0)),
+            hash_value(&Value::float(0.0))
+        );
+
+        // Fractional floats should NOT hash the same as any integer
+        assert_ne!(
+            hash_value(&Value::float(5.5)),
+            hash_value(&Value::integer(5))
+        );
+        assert_ne!(
+            hash_value(&Value::float(5.5)),
+            hash_value(&Value::integer(6))
+        );
+
+        // Large integers within safe range
+        let safe_max = (1_i64 << 53) - 1; // 9007199254740991
+        assert_eq!(
+            hash_value(&Value::integer(safe_max)),
+            hash_value(&Value::float(safe_max as f64))
+        );
+        assert_eq!(
+            hash_value(&Value::integer(-safe_max)),
+            hash_value(&Value::float(-safe_max as f64))
+        );
+
+        // Boundary case: 2^53 (outside safe range, uses f64.to_bits())
+        let boundary = 1_i64 << 53; // 9007199254740992
+        assert_eq!(
+            hash_value(&Value::integer(boundary)),
+            hash_value(&Value::float(boundary as f64))
+        );
+
+        // Large integers that round to same f64 should hash same as that f64
+        // 2^53 + 1 rounds to 2^53 in f64
+        let large = boundary + 1; // 9007199254740993
+        let large_as_f64 = large as f64; // rounds to 9007199254740992.0
+        assert_eq!(
+            hash_value(&Value::integer(large)),
+            hash_value(&Value::float(large_as_f64))
+        );
+    }
+
+    #[test]
+    fn test_hash_in_hashmap() {
+        use rustc_hash::FxHashMap;
+
+        // Test that Integer and Float can be used as equivalent keys
+        let mut map = FxHashMap::default();
+        map.insert(Value::integer(42), "int");
+
+        // Looking up with Float(42.0) should find the Integer(42) entry
+        assert_eq!(map.get(&Value::float(42.0)), Some(&"int"));
+
+        // Inserting Float(42.0) should overwrite Integer(42)
+        map.insert(Value::float(42.0), "float");
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get(&Value::integer(42)), Some(&"float"));
+    }
+
+    #[test]
+    fn test_hash_nan_consistency() {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+
+        fn hash_value(v: &Value) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            v.hash(&mut hasher);
+            hasher.finish()
+        }
+
+        // All NaN values must hash the same (they're equal in PartialEq)
+        let nan1 = Value::float(f64::NAN);
+        // Use a different NaN representation (quiet vs signaling doesn't matter for hash equality)
+        let nan2 = Value::float(f64::from_bits(0x7ff8000000000001)); // Another NaN bit pattern
+        let nan3 = Value::float(f64::INFINITY - f64::INFINITY);
+
+        assert_eq!(hash_value(&nan1), hash_value(&nan2));
+        assert_eq!(hash_value(&nan2), hash_value(&nan3));
+
+        // Verify they're equal in PartialEq
+        assert_eq!(nan1, nan2);
+        assert_eq!(nan2, nan3);
+    }
+}

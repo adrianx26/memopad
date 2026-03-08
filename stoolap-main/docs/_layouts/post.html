@@ -1,0 +1,47 @@
+---
+layout: default
+---
+
+<article class="blog-post">
+  <header class="post-header">
+    <div class="post-header-bg"></div>
+    <div class="post-header-grid" aria-hidden="true"></div>
+    <div class="container">
+      <div class="post-meta">
+        <time datetime="{{ page.date | date_to_xmlschema }}">{{ page.date | date: "%B %d, %Y" }}</time>
+        <span class="post-author">by {{ page.author }}</span>
+      </div>
+      <h1 class="post-title">{{ page.title }}</h1>
+    </div>
+  </header>
+
+  <div class="post-content">
+    <div class="container">
+      <div class="content-wrapper">
+        {{ content }}
+      </div>
+    </div>
+  </div>
+
+  <footer class="post-footer">
+    <div class="container">
+      <div class="post-navigation">
+        {% if page.previous %}
+        <a href="{{ page.previous.url | relative_url }}" class="prev-post">
+          ← {{ page.previous.title }}
+        </a>
+        {% endif %}
+
+        {% if page.next %}
+        <a href="{{ page.next.url | relative_url }}" class="next-post">
+          {{ page.next.title }} →
+        </a>
+        {% endif %}
+      </div>
+
+      <div class="back-to-blog">
+        <a href="{{ '/blog/' | relative_url }}">← Back to Blog</a>
+      </div>
+    </div>
+  </footer>
+</article>

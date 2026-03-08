@@ -9,10 +9,11 @@ This module provides repository dependencies:
 Each repository is scoped to a project ID from the request.
 """
 
-from typing import Annotated
+from typing import Annotated, Union
 
 from fastapi import Depends
 
+from memopad.config import ConfigManager, DatabaseBackend
 from memopad.deps.db import SessionMakerDep
 from memopad.deps.projects import (
     ProjectIdDep,
@@ -25,6 +26,22 @@ from memopad.repository.relation_repository import RelationRepository
 from memopad.repository.search_repository import SearchRepository, create_search_repository
 
 
+def _is_stoolap() -> bool:
+    """Return True when the configured backend is Stoolap."""
+    return ConfigManager().config.database_backend == DatabaseBackend.STOOLAP
+
+
+def _get_stoolap_db_sync():
+    """Return the cached Stoolap AsyncDatabase (must already be initialised)."""
+    from memopad.db import _stoolap_db  # noqa: PLC0415
+    if _stoolap_db is None:  # pragma: no cover
+        raise RuntimeError(
+            "Stoolap database is not initialised. "
+            "Ensure get_stoolap_db() is awaited at server startup."
+        )
+    return _stoolap_db
+
+
 # --- Entity Repository ---
 
 
@@ -32,7 +49,10 @@ async def get_entity_repository(
     session_maker: SessionMakerDep,
     project_id: ProjectIdDep,
 ) -> EntityRepository:
-    """Create an EntityRepository instance for the current project."""
+    """Create an EntityRepository (or Stoolap equivalent) for the current project."""
+    if _is_stoolap():  # pragma: no cover
+        from memopad.repository.stoolap_entity_repository import StoolapEntityRepository  # noqa: PLC0415
+        return StoolapEntityRepository(_get_stoolap_db_sync(), project_id=project_id)  # type: ignore[return-value]
     return EntityRepository(session_maker, project_id=project_id)
 
 

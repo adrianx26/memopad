@@ -1,0 +1,27 @@
+[package]
+name = "stoolap-python"
+version = "0.3.3"
+edition = "2021"
+authors = ["Stoolap Contributors"]
+license = "Apache-2.0"
+description = "High-performance Python driver for Stoolap embedded SQL database"
+repository = "https://github.com/stoolap/stoolap-python"
+homepage = "https://stoolap.io"
+readme = "README.md"
+keywords = ["database", "sql", "embedded", "python", "pyo3"]
+categories = ["database", "api-bindings"]
+
+[lib]
+name = "_stoolap"
+crate-type = ["cdylib"]
+
+[dependencies]
+stoolap = { version = "0.3.3", path = "../stoolap-main", default-features = false, features = ["parallel"] }
+pyo3 = { version = "0.23", features = ["extension-module"] }
+chrono = "0.4"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = "symbols"

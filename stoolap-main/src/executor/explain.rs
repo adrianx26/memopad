@@ -1,0 +1,1168 @@
+// Copyright 2025 Stoolap Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! EXPLAIN statement execution
+//!
+//! This module handles EXPLAIN and EXPLAIN ANALYZE query plan output,
+//! showing the execution strategy and cost estimates for SQL statements.
+
+use crate::common::SmartString;
+use crate::core::{Result, Row, RowVec, Value};
+use crate::optimizer::feedback::{fingerprint_predicate, global_feedback_cache};
+use crate::parser::ast::*;
+use crate::storage::traits::{Engine, QueryResult, ScanPlan};
+
+use super::context::ExecutionContext;
+use super::operators::index_nested_loop::IndexLookupStrategy;
+use super::parallel;
+use super::planner::RuntimeJoinAlgorithm;
+use super::pushdown;
+use super::result::ExecutorResult;
+use super::Executor;
+
+impl Executor {
+    /// Execute EXPLAIN statement - shows query plan
+    pub(crate) fn execute_explain(
+        &self,
+        stmt: &ExplainStatement,
+        ctx: &ExecutionContext,
+    ) -> Result<Box<dyn QueryResult>> {
+        let mut plan_lines: Vec<String> = Vec::new();
+
+        // For SELECT statements with CTEs, try to get the inlined version for accurate EXPLAIN
+        let inlined_statement: Option<Box<Statement>> =
+            if let Statement::Select(select) = &*stmt.statement {
+                if let Some(ref with_clause) = select.with {
+                    self.try_inline_ctes(select, with_clause)
+                        .map(|inlined| Box::new(Statement::Select(inlined)))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+        // Use inlined statement if available, otherwise original
+        let explain_stmt = inlined_statement.as_ref().unwrap_or(&stmt.statement);
+
+        if stmt.analyze {
+            // EXPLAIN ANALYZE: Execute the query and collect statistics
+            let start = crate::common::time_compat::Instant::now();
+            let mut result = self.execute_statement(&stmt.statement, ctx)?;
+
+            // Count rows by iterating through the result
+            let mut row_count = 0usize;
+            while result.next() {
+                row_count += 1;
+            }
+            let duration = start.elapsed();
+
+            // Format duration nicely
+            let time_str = if duration.as_secs() > 0 {
+                format!("{:.2}s", duration.as_secs_f64())
+            } else if duration.as_millis() > 0 {
+                format!(
+                    "{:.2}ms",
+                    duration.as_millis() as f64 + (duration.as_micros() % 1000) as f64 / 1000.0
+                )
+            } else {
+                format!("{:.2}µs", duration.as_micros() as f64)
+            };
+
+            // Record cardinality feedback for SELECT statements with WHERE
+            if let Statement::Select(select) = &*stmt.statement {
+                if let Some(ref where_clause) = select.where_clause {
+                    // Try to get the table name and record feedback
+                    if let Some(ref table_expr) = select.table_expr {
+                        if let Some(table_name) = extract_table_name(table_expr) {
+                            // Compute predicate fingerprint
+                            let predicate_hash = fingerprint_predicate(&table_name, where_clause);
+
+                            // Get estimated row count from planner
+                            let tx = self.engine.begin_transaction().ok();
+                            let estimated_rows = tx
+                                .as_ref()
+                                .and_then(|tx| tx.get_table(&table_name).ok())
+                                .map(|table| {
+                                    let stats = self
+                                        .get_query_planner()
+                                        .get_table_stats_with_fallback(&*table);
+                                    stats.row_count as usize
+                                })
+                                .unwrap_or(row_count);
+
+                            // Record feedback to global cache
+                            global_feedback_cache().record_feedback(
+                                &table_name,
+                                predicate_hash,
+                                None, // column_name for more granular tracking
+                                estimated_rows as u64,
+                                row_count as u64,
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Generate plan with actual statistics (using inlined version if available)
+            self.explain_statement_with_stats(
+                explain_stmt,
+                &mut plan_lines,
+                0,
+                row_count,
+                &time_str,
+            );
+
+            // Return the plan as a result
+            let columns = vec!["plan".to_string()];
+            let rows: RowVec = plan_lines
+                .into_iter()
+                .enumerate()
+                .map(|(i, line)| {
+                    (
+                        i as i64,
+                        Row::from_values(vec![Value::Text(SmartString::from_string(line))]),
+                    )
+                })
+                .collect();
+
+            Ok(Box::new(ExecutorResult::new(columns, rows)))
+        } else {
+            // Regular EXPLAIN: Just show the plan without executing (using inlined version if available)
+            self.explain_statement(explain_stmt, &mut plan_lines, 0);
+
+            // Return as a single-column result
+            let columns = vec!["plan".to_string()];
+            let rows: RowVec = plan_lines
+                .into_iter()
+                .enumerate()
+                .map(|(i, line)| {
+                    (
+                        i as i64,
+                        Row::from_values(vec![Value::Text(SmartString::from_string(line))]),
+                    )
+                })
+                .collect();
+
+            Ok(Box::new(ExecutorResult::new(columns, rows)))
+        }
+    }
+
+    /// Generate EXPLAIN output with actual execution statistics
+    fn explain_statement_with_stats(
+        &self,
+        stmt: &Statement,
+        lines: &mut Vec<String>,
+        indent: usize,
+        row_count: usize,
+        time_str: &str,
+    ) {
+        let prefix = "  ".repeat(indent);
+
+        match stmt {
+            Statement::Select(select) => {
+                let distinct_str = if select.distinct { " DISTINCT" } else { "" };
+                lines.push(format!(
+                    "{}SELECT{} (actual time={}, rows={})",
+                    prefix, distinct_str, time_str, row_count
+                ));
+                self.explain_select_columns(select, lines, indent);
+
+                // FROM clause with access plan
+                // Check for vector search fast path first
+                let vector_plan = if let Some(ref table_expr) = select.table_expr {
+                    if let Some(table_name) = extract_table_name(table_expr) {
+                        self.detect_vector_search_plan(select, &table_name)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                if let Some(ref vplan) = vector_plan {
+                    let plan_str = format!("{}", vplan);
+                    let inner_prefix = "  ".repeat(indent + 1);
+                    for (i, line) in plan_str.lines().enumerate() {
+                        if i == 0 {
+                            lines.push(format!(
+                                "{}-> {} (actual rows={})",
+                                inner_prefix, line, row_count
+                            ));
+                        } else {
+                            lines.push(format!("{}   {}", inner_prefix, line));
+                        }
+                    }
+                } else if let Some(ref table_expr) = select.table_expr {
+                    self.explain_table_expr_with_where_and_stats(
+                        table_expr,
+                        select.where_clause.as_deref(),
+                        lines,
+                        indent + 1,
+                        row_count,
+                    );
+                }
+
+                // GROUP BY
+                if !select.group_by.columns.is_empty() {
+                    let groups: Vec<String> = select
+                        .group_by
+                        .columns
+                        .iter()
+                        .map(|g| format!("{}", g))
+                        .collect();
+                    lines.push(format!("{}  Group By: {}", prefix, groups.join(", ")));
+                }
+
+                // HAVING
+                if let Some(ref having) = select.having {
+                    lines.push(format!("{}  Having: {}", prefix, having));
+                }
+
+                // ORDER BY
+                if !select.order_by.is_empty() {
+                    let orders: Vec<String> =
+                        select.order_by.iter().map(|o| format!("{}", o)).collect();
+                    lines.push(format!("{}  Order By: {}", prefix, orders.join(", ")));
+                }
+
+                // LIMIT/OFFSET
+                if let Some(ref limit) = select.limit {
+                    lines.push(format!("{}  Limit: {}", prefix, limit));
+                }
+                if let Some(ref offset) = select.offset {
+                    lines.push(format!("{}  Offset: {}", prefix, offset));
+                }
+            }
+            Statement::Insert(insert) => {
+                lines.push(format!(
+                    "{}INSERT INTO {} (actual time={}, rows={})",
+                    prefix, insert.table_name, time_str, row_count
+                ));
+                if let Some(ref select) = insert.select {
+                    lines.push(format!("{}  Source:", prefix));
+                    self.explain_select(select, lines, indent + 2);
+                } else {
+                    lines.push(format!(
+                        "{}  Values: {} row(s)",
+                        prefix,
+                        insert.values.len()
+                    ));
+                }
+            }
+            Statement::Update(update) => {
+                lines.push(format!(
+                    "{}UPDATE {} (actual time={}, rows={})",
+                    prefix, update.table_name, time_str, row_count
+                ));
+                lines.push(format!(
+                    "{}  Set: {} column(s)",
+                    prefix,
+                    update.updates.len()
+                ));
+                if let Some(ref where_clause) = update.where_clause {
+                    lines.push(format!("{}  Filter: {}", prefix, where_clause));
+                }
+            }
+            Statement::Delete(delete) => {
+                lines.push(format!(
+                    "{}DELETE FROM {} (actual time={}, rows={})",
+                    prefix, delete.table_name, time_str, row_count
+                ));
+                if let Some(ref where_clause) = delete.where_clause {
+                    lines.push(format!("{}  Filter: {}", prefix, where_clause));
+                }
+            }
+            _ => {
+                lines.push(format!(
+                    "{}Statement: {} (actual time={}, rows={})",
+                    prefix, stmt, time_str, row_count
+                ));
+            }
+        }
+    }
+
+    /// Helper to show just the SELECT columns
+    fn explain_select_columns(
+        &self,
+        select: &SelectStatement,
+        lines: &mut Vec<String>,
+        indent: usize,
+    ) {
+        let prefix = "  ".repeat(indent);
+
+        // Show columns
+        let col_count = select.columns.len();
+        if col_count <= 5 {
+            let cols: Vec<String> = select.columns.iter().map(|c| format!("{}", c)).collect();
+            lines.push(format!("{}  Columns: {}", prefix, cols.join(", ")));
+        } else {
+            lines.push(format!("{}  Columns: {} column(s)", prefix, col_count));
+        }
+    }
+
+    /// Generate EXPLAIN output for a table expression with WHERE clause analysis and stats
+    fn explain_table_expr_with_where_and_stats(
+        &self,
+        expr: &Expression,
+        where_clause: Option<&Expression>,
+        lines: &mut Vec<String>,
+        indent: usize,
+        row_count: usize,
+    ) {
+        let prefix = "  ".repeat(indent);
+
+        match expr {
+            Expression::TableSource(simple) => {
+                // Try to get the table and analyze access plan
+                if let Ok(tx) = self.engine.begin_transaction() {
+                    if let Ok(table) = tx.get_table(&simple.name.value) {
+                        // Build storage expression from WHERE clause for analysis
+                        let storage_expr = if let Some(where_expr) = where_clause {
+                            let schema = table.schema();
+                            let (expr, _) = pushdown::try_pushdown(where_expr, schema, None);
+                            expr
+                        } else {
+                            None
+                        };
+
+                        // Get the scan plan
+                        let scan_plan = table.explain_scan(storage_expr.as_deref());
+
+                        // For SeqScan, use the AST expression's Display format instead of storage expr Debug
+                        // Check if parallel execution would be used based on TABLE's row count (not output rows)
+                        // Parallel decision is based on input size, not filtered output
+                        let parallel_config = parallel::ParallelConfig::default();
+                        let table_row_count = table.row_count_hint();
+                        let would_use_parallel = where_clause.is_some()
+                            && parallel_config.should_parallel_filter(table_row_count);
+
+                        let scan_plan = match scan_plan {
+                            ScanPlan::SeqScan {
+                                table: tbl,
+                                filter: _,
+                            } if where_clause.is_some() => {
+                                let filter_str = Some(format!("{}", where_clause.unwrap()));
+                                if would_use_parallel {
+                                    ScanPlan::ParallelSeqScan {
+                                        table: tbl,
+                                        filter: filter_str,
+                                        workers: {
+                                            #[cfg(feature = "parallel")]
+                                            {
+                                                rayon::current_num_threads()
+                                            }
+                                            #[cfg(not(feature = "parallel"))]
+                                            {
+                                                1
+                                            }
+                                        },
+                                    }
+                                } else {
+                                    ScanPlan::SeqScan {
+                                        table: tbl,
+                                        filter: filter_str,
+                                    }
+                                }
+                            }
+                            other => other,
+                        };
+
+                        // Format the scan plan with actual stats
+                        let plan_str = format!("{}", scan_plan);
+                        for (i, line) in plan_str.lines().enumerate() {
+                            if i == 0 {
+                                lines.push(format!(
+                                    "{}-> {} (actual rows={})",
+                                    prefix, line, row_count
+                                ));
+                            } else {
+                                lines.push(format!("{}   {}", prefix, line));
+                            }
+                        }
+
+                        // Add alias if present
+                        if let Some(ref alias) = simple.alias {
+                            lines.push(format!("{}   Alias: {}", prefix, alias));
+                        }
+
+                        return;
+                    }
+                }
+
+                // Fallback if table not found
+                let mut table_info = format!(
+                    "{}-> Seq Scan on {} (actual rows={})",
+                    prefix, simple.name, row_count
+                );
+                if let Some(ref alias) = simple.alias {
+                    table_info.push_str(&format!(" AS {}", alias));
+                }
+                lines.push(table_info);
+                if let Some(ref where_expr) = where_clause {
+                    lines.push(format!("{}   Filter: {}", prefix, where_expr));
+                }
+            }
+            Expression::SubquerySource(subquery) => {
+                let mut sub_info =
+                    format!("{}-> Subquery Scan (actual rows={})", prefix, row_count);
+                if let Some(ref alias) = subquery.alias {
+                    sub_info.push_str(&format!(" AS {}", alias));
+                }
+                lines.push(sub_info);
+                self.explain_select(&subquery.subquery, lines, indent + 1);
+            }
+            Expression::JoinSource(join) => {
+                // Determine join algorithm including INLJ check
+                let (join_algorithm, _) = self.determine_join_algorithm_for_explain(
+                    &join.left,
+                    &join.right,
+                    join.condition.as_deref(),
+                    join.join_type.as_ref(),
+                    &join.using_columns,
+                );
+
+                lines.push(format!(
+                    "{}-> {} ({} Join) (actual rows={})",
+                    prefix, join_algorithm, join.join_type, row_count
+                ));
+                if let Some(ref condition) = join.condition {
+                    lines.push(format!("{}   Join Cond: {}", prefix, condition));
+                }
+                if !join.using_columns.is_empty() {
+                    let cols: Vec<String> =
+                        join.using_columns.iter().map(|c| c.to_string()).collect();
+                    lines.push(format!("{}   Using: ({})", prefix, cols.join(", ")));
+                }
+                // Child nodes: show plan structure without cost estimates
+                // (we don't have per-node actual rows in EXPLAIN ANALYZE)
+                self.explain_table_expr_plan_only(&join.left, where_clause, lines, indent + 1);
+                self.explain_table_expr_plan_only(&join.right, None, lines, indent + 1);
+            }
+            Expression::CteReference(cte_ref) => {
+                let mut cte_info = format!(
+                    "{}-> CTE Scan on {} (actual rows={})",
+                    prefix, cte_ref.name, row_count
+                );
+                if let Some(ref alias) = cte_ref.alias {
+                    cte_info.push_str(&format!(" AS {}", alias));
+                }
+                lines.push(cte_info);
+            }
+            _ => {
+                lines.push(format!(
+                    "{}-> Scan: {} (actual rows={})",
+                    prefix, expr, row_count
+                ));
+            }
+        }
+    }
+
+    /// Generate EXPLAIN output for a statement
+    fn explain_statement(&self, stmt: &Statement, lines: &mut Vec<String>, indent: usize) {
+        let prefix = "  ".repeat(indent);
+
+        match stmt {
+            Statement::Select(select) => {
+                self.explain_select(select, lines, indent);
+            }
+            Statement::Insert(insert) => {
+                lines.push(format!("{}INSERT INTO {}", prefix, insert.table_name));
+                if let Some(ref select) = insert.select {
+                    lines.push(format!("{}  Source:", prefix));
+                    self.explain_select(select, lines, indent + 2);
+                } else {
+                    lines.push(format!(
+                        "{}  Values: {} row(s)",
+                        prefix,
+                        insert.values.len()
+                    ));
+                }
+            }
+            Statement::Update(update) => {
+                lines.push(format!("{}UPDATE {}", prefix, update.table_name));
+                lines.push(format!(
+                    "{}  Set: {} column(s)",
+                    prefix,
+                    update.updates.len()
+                ));
+                if let Some(ref where_clause) = update.where_clause {
+                    lines.push(format!("{}  Filter: {}", prefix, where_clause));
+                }
+            }
+            Statement::Delete(delete) => {
+                lines.push(format!("{}DELETE FROM {}", prefix, delete.table_name));
+                if let Some(ref where_clause) = delete.where_clause {
+                    lines.push(format!("{}  Filter: {}", prefix, where_clause));
+                }
+            }
+            _ => {
+                lines.push(format!("{}Statement: {}", prefix, stmt));
+            }
+        }
+    }
+
+    /// Generate EXPLAIN output for a SELECT statement
+    fn explain_select(&self, select: &SelectStatement, lines: &mut Vec<String>, indent: usize) {
+        let prefix = "  ".repeat(indent);
+
+        // CTE info
+        if let Some(ref with) = select.with {
+            lines.push(format!("{}WITH (CTEs: {})", prefix, with.ctes.len()));
+            for cte in &with.ctes {
+                lines.push(format!(
+                    "{}  {} = ({})",
+                    prefix,
+                    cte.name,
+                    if cte.is_recursive {
+                        "RECURSIVE"
+                    } else {
+                        "non-recursive"
+                    }
+                ));
+            }
+        }
+
+        // Main operation
+        if select.distinct {
+            lines.push(format!("{}SELECT DISTINCT", prefix));
+        } else {
+            lines.push(format!("{}SELECT", prefix));
+        }
+
+        // Columns - use same threshold as EXPLAIN ANALYZE (5 columns)
+        let col_count = select.columns.len();
+        if col_count <= 5 {
+            let cols: Vec<String> = select.columns.iter().map(|c| format!("{}", c)).collect();
+            lines.push(format!("{}  Columns: {}", prefix, cols.join(", ")));
+        } else {
+            lines.push(format!("{}  Columns: {} column(s)", prefix, col_count));
+        }
+
+        // FROM clause with access plan
+        // Check for vector search fast path first
+        let vector_plan = if let Some(ref table_expr) = select.table_expr {
+            if let Some(table_name) = extract_table_name(table_expr) {
+                self.detect_vector_search_plan(select, &table_name)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(ref vplan) = vector_plan {
+            // Vector search detected: show vector-specific scan plan
+            let plan_str = format!("{}", vplan);
+            let inner_prefix = "  ".repeat(indent + 1);
+            for (i, line) in plan_str.lines().enumerate() {
+                if i == 0 {
+                    lines.push(format!("{}-> {}", inner_prefix, line));
+                } else {
+                    lines.push(format!("{}   {}", inner_prefix, line));
+                }
+            }
+        } else if let Some(ref table_expr) = select.table_expr {
+            self.explain_table_expr_with_where(
+                table_expr,
+                select.where_clause.as_deref(),
+                lines,
+                indent + 1,
+            );
+        }
+
+        // GROUP BY
+        if !select.group_by.columns.is_empty() {
+            let groups: Vec<String> = select
+                .group_by
+                .columns
+                .iter()
+                .map(|g| format!("{}", g))
+                .collect();
+            lines.push(format!("{}  Group By: {}", prefix, groups.join(", ")));
+        }
+
+        // HAVING
+        if let Some(ref having) = select.having {
+            lines.push(format!("{}  Having: {}", prefix, having));
+        }
+
+        // ORDER BY
+        if !select.order_by.is_empty() {
+            let orders: Vec<String> = select.order_by.iter().map(|o| format!("{}", o)).collect();
+            lines.push(format!("{}  Order By: {}", prefix, orders.join(", ")));
+        }
+
+        // LIMIT/OFFSET
+        if let Some(ref limit) = select.limit {
+            lines.push(format!("{}  Limit: {}", prefix, limit));
+        }
+        if let Some(ref offset) = select.offset {
+            lines.push(format!("{}  Offset: {}", prefix, offset));
+        }
+
+        // Set operations
+        if !select.set_operations.is_empty() {
+            for set_op in &select.set_operations {
+                lines.push(format!("{}  {}", prefix, set_op.operation));
+                self.explain_select(&set_op.right, lines, indent + 2);
+            }
+        }
+    }
+
+    /// Generate EXPLAIN output for a table expression with WHERE clause analysis
+    /// Show plan structure without join cost estimates (for EXPLAIN ANALYZE child nodes)
+    fn explain_table_expr_plan_only(
+        &self,
+        expr: &Expression,
+        where_clause: Option<&Expression>,
+        lines: &mut Vec<String>,
+        indent: usize,
+    ) {
+        self.explain_table_expr_inner(expr, where_clause, lines, indent, false)
+    }
+
+    fn explain_table_expr_with_where(
+        &self,
+        expr: &Expression,
+        where_clause: Option<&Expression>,
+        lines: &mut Vec<String>,
+        indent: usize,
+    ) {
+        self.explain_table_expr_inner(expr, where_clause, lines, indent, true)
+    }
+
+    fn explain_table_expr_inner(
+        &self,
+        expr: &Expression,
+        where_clause: Option<&Expression>,
+        lines: &mut Vec<String>,
+        indent: usize,
+        show_join_cost: bool,
+    ) {
+        let prefix = "  ".repeat(indent);
+
+        match expr {
+            Expression::TableSource(simple) => {
+                // Try to get the table and analyze access plan
+                if let Ok(tx) = self.engine.begin_transaction() {
+                    if let Ok(table) = tx.get_table(&simple.name.value) {
+                        // Build storage expression from WHERE clause for analysis
+                        let storage_expr = if let Some(where_expr) = where_clause {
+                            let schema = table.schema();
+                            let (expr, _) = pushdown::try_pushdown(where_expr, schema, None);
+                            expr
+                        } else {
+                            None
+                        };
+
+                        // Get the scan plan
+                        let scan_plan = table.explain_scan(storage_expr.as_deref());
+
+                        // For SeqScan, use the AST expression's Display format instead of storage expr Debug
+                        let scan_plan = match scan_plan {
+                            ScanPlan::SeqScan { table, filter: _ } if where_clause.is_some() => {
+                                ScanPlan::SeqScan {
+                                    table,
+                                    filter: Some(format!("{}", where_clause.unwrap())),
+                                }
+                            }
+                            other => other,
+                        };
+
+                        // Format the scan plan with indentation
+                        let plan_str = format!("{}", scan_plan);
+                        for (i, line) in plan_str.lines().enumerate() {
+                            if i == 0 {
+                                lines.push(format!("{}-> {}", prefix, line));
+                            } else {
+                                lines.push(format!("{}   {}", prefix, line));
+                            }
+                        }
+
+                        // Add alias if present
+                        if let Some(ref alias) = simple.alias {
+                            lines.push(format!("{}   Alias: {}", prefix, alias));
+                        }
+
+                        return;
+                    }
+                }
+
+                // Fallback if table not found
+                let mut table_info = format!("{}-> Seq Scan on {}", prefix, simple.name);
+                if let Some(ref alias) = simple.alias {
+                    table_info.push_str(&format!(" AS {}", alias));
+                }
+                lines.push(table_info);
+                if let Some(ref where_expr) = where_clause {
+                    lines.push(format!("{}   Filter: {}", prefix, where_expr));
+                }
+            }
+            Expression::SubquerySource(subquery) => {
+                let mut sub_info = format!("{}-> Subquery Scan", prefix);
+                if let Some(ref alias) = subquery.alias {
+                    sub_info.push_str(&format!(" AS {}", alias));
+                }
+                lines.push(sub_info);
+                self.explain_select(&subquery.subquery, lines, indent + 1);
+            }
+            Expression::JoinSource(join) => {
+                // Determine join algorithm including INLJ check
+                let (join_algorithm, _) = self.determine_join_algorithm_for_explain(
+                    &join.left,
+                    &join.right,
+                    join.condition.as_deref(),
+                    join.join_type.as_ref(),
+                    &join.using_columns,
+                );
+
+                if show_join_cost {
+                    // Get cost estimate from query planner
+                    let planner = self.get_query_planner();
+                    let left_table_name = extract_table_name(&join.left);
+                    let right_table_name = extract_table_name(&join.right);
+
+                    // Get table statistics for cost estimation
+                    let left_stats = left_table_name
+                        .as_ref()
+                        .and_then(|name| planner.get_table_stats(name));
+                    let right_stats = right_table_name
+                        .as_ref()
+                        .and_then(|name| planner.get_table_stats(name));
+
+                    // Calculate estimated rows and cost
+                    let (estimated_rows, estimated_cost) = match (left_stats, right_stats) {
+                        (Some(ls), Some(rs)) => {
+                            // Hash join cost estimation
+                            let left_rows = ls.row_count.max(1);
+                            let right_rows = rs.row_count.max(1);
+                            // Simplified join cardinality estimate
+                            let rows =
+                                if join_algorithm == "Nested Loop" && join.condition.is_none() {
+                                    // Cross join: left * right
+                                    left_rows * right_rows
+                                } else {
+                                    // Equality join: estimate as smaller side (pessimistic)
+                                    left_rows.min(right_rows)
+                                };
+                            // Cost = build cost + probe cost
+                            let cost = if join_algorithm == "Hash Join" {
+                                (left_rows.min(right_rows) as f64)
+                                    + (left_rows.max(right_rows) as f64 * 0.1)
+                            } else {
+                                // Nested loop: O(n*m) but with early termination
+                                (left_rows as f64) * (right_rows as f64).sqrt()
+                            };
+                            (rows, cost)
+                        }
+                        (Some(ls), None) => {
+                            // Only left stats available
+                            (ls.row_count, ls.row_count as f64 * 10.0)
+                        }
+                        (None, Some(rs)) => {
+                            // Only right stats available
+                            (rs.row_count, rs.row_count as f64 * 10.0)
+                        }
+                        (None, None) => {
+                            // No stats - use default estimate
+                            (1000, 10000.0)
+                        }
+                    };
+
+                    // Show join algorithm, type, cost and rows
+                    lines.push(format!(
+                        "{}-> {} ({} Join) (cost={:.2} rows={})",
+                        prefix, join_algorithm, join.join_type, estimated_cost, estimated_rows
+                    ));
+                } else {
+                    // Plan-only mode (EXPLAIN ANALYZE child nodes): no cost estimates
+                    lines.push(format!(
+                        "{}-> {} ({} Join)",
+                        prefix, join_algorithm, join.join_type
+                    ));
+                }
+                if let Some(ref condition) = join.condition {
+                    lines.push(format!("{}   Join Cond: {}", prefix, condition));
+                }
+                if !join.using_columns.is_empty() {
+                    let cols: Vec<String> =
+                        join.using_columns.iter().map(|c| c.to_string()).collect();
+                    lines.push(format!("{}   Using: ({})", prefix, cols.join(", ")));
+                }
+                // Left side gets the WHERE clause for potential pushdown
+                self.explain_table_expr_inner(
+                    &join.left,
+                    where_clause,
+                    lines,
+                    indent + 1,
+                    show_join_cost,
+                );
+                // Right side typically doesn't get the outer WHERE
+                self.explain_table_expr_inner(&join.right, None, lines, indent + 1, show_join_cost);
+            }
+            Expression::CteReference(cte_ref) => {
+                let mut cte_info = format!("{}-> CTE Scan on {}", prefix, cte_ref.name);
+                if let Some(ref alias) = cte_ref.alias {
+                    cte_info.push_str(&format!(" AS {}", alias));
+                }
+                lines.push(cte_info);
+            }
+            _ => {
+                lines.push(format!("{}-> Scan: {}", prefix, expr));
+            }
+        }
+    }
+
+    /// Determine the join algorithm for EXPLAIN output
+    /// This uses the same QueryPlanner logic as actual execution for consistency
+    fn determine_join_algorithm_for_explain(
+        &self,
+        join_left: &Expression,
+        join_right: &Expression,
+        join_condition: Option<&Expression>,
+        join_type: &str,
+        using_columns: &[Identifier],
+    ) -> (String, Option<IndexLookupStrategy>) {
+        // Check for INLJ opportunity on right side (default check)
+        if let Some(cond) = join_condition {
+            // Get aliases for the check
+            let left_alias = extract_table_alias(join_left);
+            let right_alias = extract_table_alias(join_right);
+            let join_type_upper = join_type.to_uppercase();
+
+            // Check if INLJ is possible (right side has index/PK for join column)
+            let inlj_info = self.check_index_nested_loop_opportunity(
+                join_right,
+                Some(cond),
+                &join_type_upper,
+                left_alias.as_deref(),
+                right_alias.as_deref(),
+            );
+
+            if let Some((_, strategy, _, _)) = inlj_info {
+                let algo_name = match &strategy {
+                    IndexLookupStrategy::PrimaryKey => "Index Nested Loop (PK)".to_string(),
+                    IndexLookupStrategy::SecondaryIndex(_) => "Index Nested Loop".to_string(),
+                };
+                return (algo_name, Some(strategy));
+            }
+
+            // Check swapped direction for INLJ (left side has index/PK)
+            let swapped_info = self.check_index_nested_loop_opportunity(
+                join_left,
+                Some(cond),
+                &join_type_upper,
+                right_alias.as_deref(),
+                left_alias.as_deref(),
+            );
+
+            if let Some((_, strategy, _, _)) = swapped_info {
+                let algo_name = match &strategy {
+                    IndexLookupStrategy::PrimaryKey => "Index Nested Loop (PK)".to_string(),
+                    IndexLookupStrategy::SecondaryIndex(_) => "Index Nested Loop".to_string(),
+                };
+                return (algo_name, Some(strategy));
+            }
+        }
+
+        // Use QueryPlanner for algorithm selection (same as execution path)
+        let planner = self.get_query_planner();
+        let left_table_name = extract_table_name(join_left);
+        let right_table_name = extract_table_name(join_right);
+
+        // Get row counts from statistics (or use defaults)
+        let left_rows = left_table_name
+            .as_ref()
+            .and_then(|name| planner.get_table_stats(name))
+            .map(|s| s.row_count as usize)
+            .unwrap_or(1000);
+        let right_rows = right_table_name
+            .as_ref()
+            .and_then(|name| planner.get_table_stats(name))
+            .map(|s| s.row_count as usize)
+            .unwrap_or(1000);
+
+        // Determine if we have equality keys
+        let has_equality_keys = if let Some(cond) = join_condition {
+            is_equality_condition(cond)
+        } else {
+            !using_columns.is_empty()
+        };
+
+        // Get the runtime join decision from QueryPlanner
+        let decision = planner.plan_runtime_join_with_sort_info(
+            left_rows,
+            right_rows,
+            has_equality_keys,
+            false, // Can't determine sort status from AST alone
+            false,
+        );
+
+        // Format the algorithm name with details
+        let algo_name = match decision.algorithm {
+            RuntimeJoinAlgorithm::HashJoin => {
+                if decision.swap_sides {
+                    "Hash Join (build: right)".to_string()
+                } else {
+                    "Hash Join (build: left)".to_string()
+                }
+            }
+            RuntimeJoinAlgorithm::MergeJoin => "Merge Join".to_string(),
+            RuntimeJoinAlgorithm::NestedLoop => "Nested Loop".to_string(),
+        };
+
+        (algo_name, None)
+    }
+
+    /// Detect if a SELECT statement would use the vector search fast path.
+    /// Returns the appropriate ScanPlan (VectorSearch or VectorBruteForce) if detected.
+    fn detect_vector_search_plan(
+        &self,
+        select: &SelectStatement,
+        table_name: &str,
+    ) -> Option<ScanPlan> {
+        // Same conditions as the execution fast path in query.rs
+        if select.limit.is_none()
+            || select.order_by.len() != 1
+            || !select.group_by.columns.is_empty()
+            || select.having.is_some()
+            || select.distinct
+        {
+            return None;
+        }
+
+        let order_by = &select.order_by[0];
+        if !order_by.ascending {
+            return None;
+        }
+
+        // Find VEC_DISTANCE function: direct call, alias, or <=> operator
+        let (fn_name_upper, vec_col_name) = match &order_by.expression {
+            Expression::FunctionCall(fc) => {
+                let name = fc.function.to_uppercase();
+                if !matches!(
+                    name.as_str(),
+                    "VEC_DISTANCE_L2" | "VEC_DISTANCE_COSINE" | "VEC_DISTANCE_IP"
+                ) {
+                    return None;
+                }
+                if fc.arguments.len() != 2 {
+                    return None;
+                }
+                let col = Self::extract_vec_col_name(&fc.arguments[0])?;
+                (name.to_string(), col)
+            }
+            Expression::Identifier(id) => {
+                // Alias lookup in SELECT columns
+                if let Some(fc) =
+                    Self::find_vec_distance_alias_for_explain(&id.value_lower, &select.columns)
+                {
+                    let name = fc.function.to_uppercase();
+                    let col = Self::extract_vec_col_name(&fc.arguments[0])?;
+                    (name.to_string(), col)
+                } else if let Some(infix) = Self::find_vec_distance_infix_alias_for_explain(
+                    &id.value_lower,
+                    &select.columns,
+                ) {
+                    // <=> operator is equivalent to VEC_DISTANCE_L2
+                    let col = Self::extract_vec_col_name(&infix.left)?;
+                    ("VEC_DISTANCE_L2".to_string(), col)
+                } else {
+                    return None;
+                }
+            }
+            Expression::Infix(infix) if infix.op_type == InfixOperator::VectorDistance => {
+                let col = Self::extract_vec_col_name(&infix.left)?;
+                ("VEC_DISTANCE_L2".to_string(), col)
+            }
+            _ => return None,
+        };
+
+        // Map function name to metric string and numeric code
+        let (metric, expected_metric): (&str, u8) = match fn_name_upper.as_str() {
+            "VEC_DISTANCE_L2" => ("L2", 0),
+            "VEC_DISTANCE_COSINE" => ("Cosine", 1),
+            "VEC_DISTANCE_IP" => ("InnerProduct", 2),
+            _ => return None,
+        };
+
+        // Extract k from LIMIT
+        let k = Self::extract_limit_value(select)?;
+
+        // Check for WHERE clause filter text
+        let filter = select.where_clause.as_ref().map(|w| format!("{}", w));
+
+        if let Ok(tx) = self.engine.begin_transaction() {
+            if let Ok(table) = tx.get_table(table_name) {
+                let hnsw_index = table.get_index_on_column(&vec_col_name).filter(|idx| {
+                    idx.index_type() == crate::core::IndexType::Hnsw
+                        && idx.hnsw_distance_metric() == Some(expected_metric)
+                });
+
+                if let Some(idx) = hnsw_index {
+                    let ef_search = idx.default_ef_search().unwrap_or(64);
+                    return Some(ScanPlan::VectorSearch {
+                        table: table_name.to_string(),
+                        index_name: idx.name().to_string(),
+                        vector_column: vec_col_name,
+                        metric: metric.to_string(),
+                        k,
+                        ef_search,
+                        filter,
+                    });
+                }
+
+                return Some(ScanPlan::VectorBruteForce {
+                    table: table_name.to_string(),
+                    vector_column: vec_col_name,
+                    metric: metric.to_string(),
+                    k,
+                    filter,
+                });
+            }
+        }
+
+        None
+    }
+
+    /// Extract vector column name from a function argument expression
+    fn extract_vec_col_name(expr: &Expression) -> Option<String> {
+        match expr {
+            Expression::Identifier(id) => Some(id.value.to_string()),
+            Expression::QualifiedIdentifier(qid) => Some(qid.name.value.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Find a VEC_DISTANCE function call aliased in SELECT columns (for EXPLAIN)
+    fn find_vec_distance_alias_for_explain<'a>(
+        alias_lower: &str,
+        columns: &'a [Expression],
+    ) -> Option<&'a FunctionCall> {
+        for col_expr in columns {
+            if let Expression::Aliased(aliased) = col_expr {
+                if aliased.alias.value_lower == alias_lower {
+                    if let Expression::FunctionCall(fc) = &*aliased.expression {
+                        let fn_upper = fc.function.to_uppercase();
+                        if matches!(
+                            fn_upper.as_str(),
+                            "VEC_DISTANCE_L2" | "VEC_DISTANCE_COSINE" | "VEC_DISTANCE_IP"
+                        ) && fc.arguments.len() == 2
+                        {
+                            return Some(fc.as_ref());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Find a <=> infix operator aliased in SELECT columns (for EXPLAIN)
+    fn find_vec_distance_infix_alias_for_explain<'a>(
+        alias_lower: &str,
+        columns: &'a [Expression],
+    ) -> Option<&'a InfixExpression> {
+        for col_expr in columns {
+            if let Expression::Aliased(aliased) = col_expr {
+                if aliased.alias.value_lower == alias_lower {
+                    if let Expression::Infix(infix) = &*aliased.expression {
+                        if infix.op_type == InfixOperator::VectorDistance {
+                            return Some(infix);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Extract integer limit value from a SELECT statement (simple cases only)
+    fn extract_limit_value(select: &SelectStatement) -> Option<usize> {
+        let limit_expr = select.limit.as_deref()?;
+        match limit_expr {
+            Expression::IntegerLiteral(lit) => {
+                if lit.value >= 0 {
+                    let k = lit.value as usize;
+                    if let Some(ref offset_expr) = select.offset {
+                        if let Expression::IntegerLiteral(off) = &**offset_expr {
+                            if off.value >= 0 {
+                                return Some(k.saturating_add(off.value as usize));
+                            }
+                        }
+                    }
+                    Some(k)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Extract table alias from a table expression
+fn extract_table_alias(expr: &Expression) -> Option<String> {
+    match expr {
+        Expression::TableSource(simple) => simple
+            .alias
+            .as_ref()
+            .map(|a| a.value.to_string())
+            .or_else(|| Some(simple.name.value.to_string())),
+        Expression::Aliased(aliased) => Some(aliased.alias.value.to_string()),
+        _ => None,
+    }
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Check if an expression is an equality condition (for EXPLAIN join algorithm display)
+pub(crate) fn is_equality_condition(expr: &Expression) -> bool {
+    match expr {
+        Expression::Infix(infix) => {
+            // Check for equality operator
+            if infix.operator == "=" {
+                // Check that both sides are column references (not literals)
+                let left_is_col = matches!(
+                    infix.left.as_ref(),
+                    Expression::Identifier(_) | Expression::QualifiedIdentifier(_)
+                );
+                let right_is_col = matches!(
+                    infix.right.as_ref(),
+                    Expression::Identifier(_) | Expression::QualifiedIdentifier(_)
+                );
+                left_is_col && right_is_col
+            } else if infix.operator.eq_ignore_ascii_case("AND") {
+                // AND condition - check if any part is an equality join
+                is_equality_condition(&infix.left) || is_equality_condition(&infix.right)
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Extract table name from a table expression (for statistics lookup)
+pub(crate) fn extract_table_name(expr: &Expression) -> Option<String> {
+    match expr {
+        Expression::TableSource(simple) => Some(simple.name.value.to_string()),
+        Expression::JoinSource(join) => extract_table_name(&join.left),
+        Expression::SubquerySource(_) => None, // Can't get stats for subquery
+        _ => None,
+    }
+}

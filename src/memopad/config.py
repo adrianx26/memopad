@@ -21,7 +21,8 @@ DEFAULT_PERMALINK_CACHE_SIZE = 1000
 
 DATABASE_NAME = "memory.db"
 APP_DATABASE_NAME = "memory.db"  # Using the same name but in the app directory
-DATA_DIR_NAME = ".memopad"
+DATA_DIR_NAME = "memopad"          # Changed from ".memopad" (hidden) to "memopad" (visible)
+LEGACY_DATA_DIR_NAME = ".memopad"  # Old hidden directory — used only for migration
 CONFIG_FILE_NAME = "config.json"
 WATCH_STATUS_JSON = "watch-status.json"
 
@@ -33,6 +34,7 @@ class DatabaseBackend(str, Enum):
 
     SQLITE = "sqlite"
     POSTGRES = "postgres"
+    STOOLAP = "stoolap"  # Embedded Rust SQL database (no separate server required)
 
 
 @dataclass
@@ -58,7 +60,7 @@ class MemoPadConfig(BaseSettings):
 
     projects: Dict[str, str] = Field(
         default_factory=lambda: {
-            "main": str(Path(os.getenv("MEMOPAD_HOME", Path.home() / ".memopad")))
+            "main": str(Path(os.getenv("MEMOPAD_HOME", Path.home() / DATA_DIR_NAME)))
         }
         if os.getenv("MEMOPAD_HOME")
         else {},
@@ -79,12 +81,21 @@ class MemoPadConfig(BaseSettings):
     # Database configuration
     database_backend: DatabaseBackend = Field(
         default=DatabaseBackend.SQLITE,
-        description="Database backend to use (sqlite or postgres)",
+        description="Database backend to use: sqlite, postgres, or stoolap",
     )
 
     database_url: Optional[str] = Field(
         default=None,
         description="Database connection URL. For Postgres, use postgresql+asyncpg://user:pass@host:port/db. If not set, SQLite will use default path.",
+    )
+
+    stoolap_path: Optional[str] = Field(
+        default=None,
+        description=(
+            "Path for Stoolap file-based database (e.g. ~/memopad/stoolap.db). "
+            "Use ':memory:' for ephemeral in-memory mode. "
+            "Only used when database_backend=stoolap."
+        ),
     )
 
     # Database connection pool configuration (Postgres only)
@@ -223,7 +234,7 @@ class MemoPadConfig(BaseSettings):
         # Ensure at least one project exists; if none exist then create main
         if not self.projects:  # pragma: no cover
             self.projects["main"] = str(
-                Path(os.getenv("MEMOPAD_HOME", Path.home() / ".memopad"))
+                Path(os.getenv("MEMOPAD_HOME", Path.home() / DATA_DIR_NAME))
             )
 
         # Ensure default project is valid (i.e. points to an existing project)

@@ -1,0 +1,41 @@
+---
+layout: doc
+title: Stoolap Documentation
+---
+
+<div class="docs-content">
+  <h1>Stoolap Documentation</h1>
+
+  <p>Welcome to the Stoolap Documentation! This is your comprehensive guide to using and understanding Stoolap, a high-performance embedded SQL database written in pure Rust.</p>
+
+  <h2>What is Stoolap?</h2>
+
+  <p>Stoolap is a modern embedded SQL database that provides full ACID transactions with MVCC, a sophisticated cost-based query optimizer, and features that rival established databases like PostgreSQL and DuckDB. Built entirely in Rust with minimal unsafe code (only for FFI and performance-critical hot paths), Stoolap features multiple index types (B-tree, Hash, Bitmap, HNSW), native vector search with semantic search support, parallel query execution, and comprehensive SQL support including window functions, CTEs, and temporal queries.</p>
+
+  <h2>Documentation Sections</h2>
+
+  {% comment %} Dynamic documentation index generated from docs collection {% endcomment %}
+  {% for category in site.data.doc_categories %}
+    {% assign category_docs = site.docs | where: "category", category.name | sort: "order" %}
+    {% if category_docs.size > 0 %}
+  <h3>{{ category.name }}</h3>
+  <ul>
+      {% for doc in category_docs %}
+    <li><a href="{{ doc.url | relative_url }}">{{ doc.title }}</a></li>
+      {% endfor %}
+  </ul>
+    {% endif %}
+  {% endfor %}
+
+  <h2>Need Help?</h2>
+
+  <p>If you can't find what you're looking for in the documentation, you can:</p>
+  <ul>
+    <li><a href="https://github.com/stoolap/stoolap/issues">Open an issue</a> on GitHub</li>
+    <li><a href="https://github.com/stoolap/stoolap/discussions">Join the discussions</a> to ask questions</li>
+  </ul>
+
+  <hr>
+
+  <p>This documentation is under active development. Contributions are welcome!</p>
+</div>

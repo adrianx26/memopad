@@ -61,9 +61,10 @@ def get_bmignore_path() -> Path:
     """Get path to .bmignore file.
 
     Returns:
-        Path to ~/.memopad/.bmignore
+        Path to ~/{data_dir_name}/.bmignore
     """
-    return Path.home() / ".memopad" / ".bmignore"
+    from memopad.config import DATA_DIR_NAME
+    return Path.home() / DATA_DIR_NAME / ".bmignore"
 
 
 def create_default_bmignore() -> None:
@@ -176,7 +177,7 @@ def load_gitignore_patterns(base_path: Path, use_gitignore: bool = True) -> Set[
     """Load gitignore patterns from .gitignore file and .bmignore.
 
     Combines patterns from:
-    1. ~/.memopad/.bmignore (user's global ignore patterns)
+    1. ~/{data_dir_name}/.bmignore (user's global ignore patterns)
     2. {base_path}/.gitignore (project-specific patterns, if use_gitignore=True)
 
     Args:

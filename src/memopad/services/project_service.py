@@ -20,7 +20,7 @@ from memopad.schemas import (
     ProjectStatistics,
     SystemStatus,
 )
-from memopad.config import WATCH_STATUS_JSON, ConfigManager, get_project_config, ProjectConfig
+from memopad.config import WATCH_STATUS_JSON, ConfigManager, get_project_config, ProjectConfig, DATA_DIR_NAME
 from memopad.utils import generate_permalink
 
 
@@ -876,7 +876,7 @@ class ProjectService:
 
         # Get watch service status if available
         watch_status = None
-        watch_status_path = Path.home() / ".memopad" / WATCH_STATUS_JSON
+        watch_status_path = Path.home() / DATA_DIR_NAME / WATCH_STATUS_JSON
         if watch_status_path.exists():
             try:  # pragma: no cover
                 watch_status = json.loads(  # pragma: no cover

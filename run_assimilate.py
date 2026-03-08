@@ -23,7 +23,7 @@ async def run():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Assimilate a URL into memopad')
     parser.add_argument('url', help='URL to assimilate')
-    parser.add_argument('--project', default='imported', help='Target project name')
+    parser.add_argument('--project', default='main', help='Target project name (default: main -> C:\\Users\\shobymik\\memopad)')
     parser.add_argument('--max-depth', type=int, default=3, help='Maximum crawl depth')
     parser.add_argument('--max-pages', type=int, default=50, help='Maximum pages to fetch')
     args = parser.parse_args()

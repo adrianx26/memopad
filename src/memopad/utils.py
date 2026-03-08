@@ -252,7 +252,7 @@ def setup_logging(
 
     Args:
         log_level: DEBUG, INFO, WARNING, ERROR
-        log_to_file: Write to ~/.memopad/memopad.log with rotation
+        log_to_file: Write to ~/{DATA_DIR_NAME}/memopad.log with rotation
         log_to_stdout: Write to stderr (for Docker/cloud deployments)
         structured_context: Bind tenant_id, fly_region, etc. for cloud observability
     """
@@ -267,7 +267,8 @@ def setup_logging(
 
     # Add file handler with rotation
     if log_to_file:
-        log_path = Path.home() / ".memopad" / "memopad.log"
+        from memopad.config import DATA_DIR_NAME
+        log_path = Path.home() / DATA_DIR_NAME / "memopad.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         # Keep logging synchronous (enqueue=False) to avoid background logging threads.
         # Background threads are a common source of "hang on exit" issues in CLI/test runs.

@@ -68,12 +68,13 @@ class AssimilateLogger:
         """Initialize the logger.
         
         Args:
-            log_dir: Directory to store log files. Defaults to ~/.memopad/logs/
+            log_dir: Directory to store log files. Defaults to ~/{data_dir_name}/logs/
         """
         if log_dir is None:
-            # Default to ~/.memopad/logs/
+            # Default to ~/{data_dir_name}/logs/
+            from memopad.config import DATA_DIR_NAME
             home = Path.home()
-            log_dir = home / ".memopad" / "logs"
+            log_dir = home / DATA_DIR_NAME / "logs"
         
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)

@@ -43,8 +43,15 @@ async def lifespan(app: FastMCP):
     # multiple Client connections are made in the same test
     engine_was_none = db._engine is None
 
+    from memopad.config import DatabaseBackend
+
     # Initialize app (runs migrations, reconciles projects)
     await initialize_app(container.config)
+
+    # If Stoolap backend is configured, initialise the DB now (runs DDL schema)
+    if container.config.database_backend == DatabaseBackend.STOOLAP:  # pragma: no cover
+        logger.info("Initialising Stoolap database backend")
+        await db.get_stoolap_db(container.config)
 
     # Create and start sync coordinator (lifecycle centralized in coordinator)
     sync_coordinator = container.create_sync_coordinator()
@@ -63,6 +70,9 @@ async def lifespan(app: FastMCP):
             logger.debug("Database connections closed")
         else:  # pragma: no cover
             logger.debug("Skipping DB shutdown - engine provided externally")
+
+        # Always shut down Stoolap if it was opened (no test fixture caching)
+        await db.shutdown_stoolap_db()
 
 
 mcp = FastMCP(

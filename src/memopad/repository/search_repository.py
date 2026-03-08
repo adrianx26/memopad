@@ -76,7 +76,7 @@ def create_search_repository(
     """Factory function to create the appropriate search repository based on database backend.
 
     Args:
-        session_maker: SQLAlchemy async session maker
+        session_maker: SQLAlchemy async session maker (unused for Stoolap)
         project_id: Project ID for the repository
         database_backend: Optional explicit backend. If not provided, reads from ConfigManager.
             Prefer passing explicitly from composition roots.
@@ -91,6 +91,18 @@ def create_search_repository(
 
     if database_backend == DatabaseBackend.POSTGRES:  # pragma: no cover
         return PostgresSearchRepository(session_maker, project_id=project_id)  # pragma: no cover
+    elif database_backend == DatabaseBackend.STOOLAP:  # pragma: no cover
+        # Stoolap: retrieve the global AsyncDatabase singleton synchronously.
+        # The db module caches the instance after the first await so this is safe
+        # from synchronous callers (the singleton is set during startup).
+        from memopad.db import _stoolap_db  # noqa: PLC0415
+        from memopad.repository.stoolap_search_repository import StoolapSearchRepository
+        if _stoolap_db is None:  # pragma: no cover
+            raise RuntimeError(
+                "Stoolap database is not initialised. "
+                "Ensure get_stoolap_db() is awaited during server startup."
+            )
+        return StoolapSearchRepository(_stoolap_db, project_id=project_id)  # pragma: no cover
     else:
         return SQLiteSearchRepository(session_maker, project_id=project_id)
 

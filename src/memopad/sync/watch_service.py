@@ -10,7 +10,7 @@ from typing import List, Optional, Set, Sequence, Callable, Awaitable, TYPE_CHEC
 if TYPE_CHECKING:
     from memopad.sync.sync_service import SyncService
 
-from memopad.config import MemoPadConfig, WATCH_STATUS_JSON
+from memopad.config import MemoPadConfig, WATCH_STATUS_JSON, DATA_DIR_NAME
 from memopad.ignore_utils import load_gitignore_patterns, should_ignore_path
 from memopad.models import Project
 from memopad.repository import ProjectRepository
@@ -89,7 +89,7 @@ class WatchService:
         self.app_config = app_config
         self.project_repository = project_repository
         self.state = WatchServiceState()
-        self.status_path = Path.home() / ".memopad" / WATCH_STATUS_JSON
+        self.status_path = Path.home() / DATA_DIR_NAME / WATCH_STATUS_JSON
         self.status_path.parent.mkdir(parents=True, exist_ok=True)
         self._ignore_patterns_cache: dict[Path, Set[str]] = {}
         self._sync_service_factory = sync_service_factory

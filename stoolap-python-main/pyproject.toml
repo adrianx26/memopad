@@ -1,0 +1,42 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "stoolap-python"
+version = "0.3.3"
+description = "High-performance Python driver for Stoolap embedded SQL database"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.9"
+authors = [{ name = "Stoolap Contributors" }]
+keywords = ["database", "sql", "embedded", "stoolap"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Topic :: Database",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio"]
+
+[project.urls]
+Homepage = "https://stoolap.io"
+Repository = "https://github.com/stoolap/stoolap-python"
+Documentation = "https://stoolap.io/docs/drivers/python/"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+python-source = "python"
+module-name = "stoolap._stoolap"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
