@@ -3,14 +3,13 @@
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, Literal, Optional, List, Tuple
 from enum import Enum
 
 from loguru import logger
-from pydantic import BaseModel, Field, model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from memopad.utils import setup_logging, generate_permalink

@@ -2,7 +2,6 @@
 
 import tempfile
 import pytest
-from datetime import datetime
 
 from memopad.config import MemoPadConfig, ConfigManager
 from pathlib import Path

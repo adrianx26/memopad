@@ -5,11 +5,11 @@ This test verifies issue #452 - Imported conversations not indexed correctly.
 
 import pytest
 
-from memopad.config import ProjectConfig, ConfigManager
+from memopad.config import ProjectConfig
 from memopad.importers.claude_conversations_importer import ClaudeConversationsImporter
 from memopad.markdown import EntityParser
 from memopad.markdown.markdown_processor import MarkdownProcessor
-from memopad.repository import EntityRepository, ProjectRepository, RelationRepository
+from memopad.repository import EntityRepository
 from memopad.services import EntityService
 from memopad.services.file_service import FileService
 from memopad.services.search_service import SearchService

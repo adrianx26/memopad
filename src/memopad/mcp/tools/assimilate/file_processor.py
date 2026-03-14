@@ -1,7 +1,6 @@
 """File content extraction utilities for various formats."""
 
 import io
-from typing import Optional
 
 from loguru import logger
 
