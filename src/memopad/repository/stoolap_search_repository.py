@@ -16,9 +16,9 @@ replace LIKE-based search with actual vector-ANN retrieval.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field as dc_field
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, List, Optional, Sequence
 
 from loguru import logger
 

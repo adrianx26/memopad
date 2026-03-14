@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from memopad import db
 from memopad.config import MemoPadConfig, ConfigManager
 from memopad.file_utils import has_frontmatter
-from memopad.ignore_utils import load_bmignore_patterns, should_ignore_path
+from memopad.ignore_utils import load_bmignore_patterns, should_ignore_path, IgnoreMatcher
 from memopad.markdown import EntityParser, MarkdownProcessor
 from memopad.models import Entity, Project
 from memopad.repository import (
@@ -143,6 +143,7 @@ class SyncService:
         self.file_service = file_service
         # Load ignore patterns once at initialization for performance
         self._ignore_patterns = load_bmignore_patterns()
+        self._ignore_matcher = IgnoreMatcher(self._ignore_patterns)
         # Circuit breaker: track file failures to prevent infinite retry loops
         # Use OrderedDict for LRU behavior with bounded size to prevent unbounded memory growth
         self._file_failures: OrderedDict[str, FileFailureInfo] = OrderedDict()
@@ -1216,7 +1217,7 @@ class SyncService:
                     rel_path = abs_path.relative_to(directory).as_posix()
 
                     # Apply ignore patterns (same as scan_directory)
-                    if should_ignore_path(abs_path, directory, self._ignore_patterns):
+                    if self._ignore_matcher.match_path_parts(Path(rel_path)):
                         logger.trace(f"Ignoring path per .bmignore: {rel_path}")
                         continue
 
@@ -1271,8 +1272,9 @@ class SyncService:
             entry_path = Path(entry.path)
 
             # Check ignore patterns
-            if should_ignore_path(entry_path, directory, self._ignore_patterns):
-                logger.trace(f"Ignoring path per .bmignore: {entry_path.relative_to(directory)}")
+            rel_path = entry_path.relative_to(directory)
+            if self._ignore_matcher.match_path_parts(rel_path):
+                logger.trace(f"Ignoring path per .bmignore: {rel_path}")
                 continue
 
             if entry.is_dir(follow_symlinks=False):

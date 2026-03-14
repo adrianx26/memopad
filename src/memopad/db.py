@@ -1,6 +1,5 @@
 ﻿import asyncio
 import os
-import sys
 from contextlib import asynccontextmanager
 from enum import Enum, auto
 from pathlib import Path

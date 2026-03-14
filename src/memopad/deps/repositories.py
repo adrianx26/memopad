@@ -9,7 +9,7 @@ This module provides repository dependencies:
 Each repository is scoped to a project ID from the request.
 """
 
-from typing import Annotated, Union
+from typing import Annotated
 
 from fastapi import Depends
 
