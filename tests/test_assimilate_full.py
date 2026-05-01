@@ -7,10 +7,9 @@ import os
 # Ensure src is in path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
 
-# Patch mcp.tool to return original function
-with patch('memopad.mcp.server.mcp.tool') as mock_tool_decorator:
-    mock_tool_decorator.side_effect = lambda *args, **kwargs: lambda func: func
-    from memopad.mcp.tools.assimilate import assimilate
+# The public `assimilate` symbol is wrapped by @mcp.tool() and isn't directly callable.
+# Tests target the underscore-prefixed implementation function — see tofix.md issue 3.
+from memopad.mcp.tools.assimilate import _assimilate_impl as assimilate
 
 class TestAssimilateFiles(unittest.IsolatedAsyncioTestCase):
     

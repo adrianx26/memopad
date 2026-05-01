@@ -21,6 +21,7 @@ from memopad.deps import (
     AppConfigDep,
     EntityRepositoryV2ExternalDep,
     ProjectExternalIdPathDep,
+    RelationRepositoryV2ExternalDep,
     TaskSchedulerDep,
     FileServiceV2ExternalDep,
 )
@@ -582,3 +583,67 @@ async def delete_directory(
     except Exception as e:
         logger.error(f"Error deleting directory: {e}")
         raise HTTPException(status_code=400, detail=str(e))
+
+
+## Backlinks endpoint
+
+
+@router.get("/entities/{entity_id}/backlinks")
+async def get_backlinks(
+    project_id: ProjectExternalIdPathDep,
+    entity_repository: EntityRepositoryV2ExternalDep,
+    relation_repository: RelationRepositoryV2ExternalDep,
+    entity_id: str = Path(..., description="Target entity external ID (UUID)"),
+) -> dict:
+    """Return all relations pointing TO the given entity.
+
+    Includes both resolved backlinks (relations whose to_id matches the target)
+    and unresolved ones (wikilinks like [[target]] that haven't been resolved yet
+    but match the target's permalink/title slug).
+
+    Args:
+        entity_id: External ID of the target entity.
+
+    Returns:
+        Dict with `backlinks`: list of {from_external_id, from_title, from_permalink,
+        relation_type, context, resolved}.
+    """
+    logger.info(f"API v2 request: get_backlinks entity_id={entity_id}")
+
+    target = await entity_repository.get_by_external_id(entity_id)
+    if not target:
+        raise HTTPException(
+            status_code=404, detail=f"Entity with external_id '{entity_id}' not found"
+        )
+
+    aliases: list[str] = []
+    if target.permalink:
+        aliases.append(target.permalink)
+    if target.title and target.title not in aliases:
+        aliases.append(target.title)
+
+    relations = await relation_repository.find_backlinks(target.id, aliases)
+
+    items: list[dict] = []
+    for rel in relations:
+        from_entity = rel.from_entity
+        # from_entity is None only for unresolved relations whose source was
+        # also deleted — extremely rare but possible during half-completed
+        # sync. Skip those rows rather than emitting null-everything entries.
+        if from_entity is None:
+            continue
+        items.append(
+            {
+                "from_external_id": from_entity.external_id,
+                "from_title": from_entity.title,
+                "from_permalink": from_entity.permalink,
+                "relation_type": rel.relation_type,
+                "context": rel.context,
+                "resolved": rel.to_id is not None,
+            }
+        )
+
+    logger.info(
+        f"API v2 response: get_backlinks entity_id={entity_id} count={len(items)}"
+    )
+    return {"target_external_id": entity_id, "target_title": target.title, "backlinks": items}

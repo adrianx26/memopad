@@ -1,104 +1,68 @@
 """Storage optimization tool for Memopad MCP server.
 
-Provides storage optimization and cleanup operations for Memopad knowledge bases.
+Detects duplicate notes and (with dry_run=False) replaces each duplicate's body
+with a redirect wikilink to the canonical copy. Default is dry-run so the user
+can review the report before any files are touched.
 """
 
 from typing import Optional
-from loguru import logger
+
 from fastmcp import Context
+from loguru import logger
 
 from memopad.mcp.async_client import get_client
-from memopad.mcp.project_context import get_active_project
+from memopad.mcp.project_context import add_project_metadata, get_active_project
 from memopad.mcp.server import mcp
 
 
 @mcp.tool(
-    description="Optimize Memopad storage by removing duplicates and optimizing file sizes.",
+    description=(
+        "Detect duplicate notes in a project and (with dry_run=False) merge them "
+        "by replacing each duplicate's body with a wikilink redirect to the canonical copy."
+    ),
 )
 async def optimize_storage(
     project: Optional[str] = None,
+    dry_run: bool = True,
     context: Context | None = None,
 ) -> str:
-    """Optimize Memopad storage by checking for duplicates and optimizing file sizes.
+    """Find and optionally merge duplicate notes.
 
-    This tool analyzes the knowledge base and provides storage optimization suggestions.
-    Currently, it checks for duplicate files and provides statistics about storage usage.
+    Two notes are considered duplicates when their content (after frontmatter is
+    stripped and whitespace canonicalized) hashes to the same value. README.md,
+    index.md, and .gitignore are excluded — those are commonly duplicated across
+    directories on purpose.
 
     Args:
-        project: Project name to optimize storage for. Optional - server will use default.
-        context: Optional FastMCP context for performance caching.
+        project: Project name. Optional — server resolves the default.
+        dry_run: When True (default) only reports what would change. Set to False
+                 to actually rewrite duplicate files.
+        context: Optional FastMCP context.
 
     Returns:
-        Formatted optimization report with statistics and results
+        Markdown report listing duplicate groups, sizes, and (when applied) the
+        number of files rewritten and bytes reclaimed.
 
     Examples:
-        # Optimize storage in default project
+        # See what duplicates exist (safe)
         optimize_storage()
 
-        # Optimize storage in specific project
-        optimize_storage(project="work-docs")
-
-    Raises:
-        ToolError: If project doesn't exist or optimization fails
+        # Actually merge duplicates
+        optimize_storage(dry_run=False)
     """
     async with get_client() as client:
         active_project = await get_active_project(client, project, context)
+        logger.info(
+            f"optimize_storage: project={active_project.name} dry_run={dry_run}"
+        )
 
-        logger.debug(f"Optimizing storage for project: {active_project.name}")
-
-        # Import here to avoid circular import
-        from memopad.services.optimization_service import StorageOptimizer
+        # Imported here to avoid pulling the heavy walk logic into modules that
+        # only register tools at startup.
+        from memopad.services.optimization_service import StorageOptimizer, format_report
 
         optimizer = StorageOptimizer(active_project)
-        
-        # Get storage statistics
         usage = await optimizer.get_storage_usage()
-        
-        # Run optimization
-        result = await optimizer.optimize()
+        result = await optimizer.optimize(dry_run=dry_run)
 
-        # Build report
-        lines = []
-        lines.append(f"# Storage Optimization Report for {active_project.name}")
-        lines.append("")
-        lines.append("## Current Storage Usage")
-        lines.append(f"- Total files: {usage.total_files}")
-        lines.append(f"- Total size: {usage.total_size / (1024 * 1024):.2f} MB")
-        lines.append(f"- Average file size: {usage.avg_file_size:.2f} KB")
-        lines.append(f"- Largest file: {usage.largest_file_size / 1024:.2f} KB")
-        lines.append("")
-        
-        lines.append("## Optimization Results")
-        lines.append(f"- Files processed: {result.processed_count}")
-        lines.append(f"- Files optimized: {result.optimized_count}")
-        lines.append(f"- Storage saved: {result.storage_saved / (1024 * 1024):.2f} MB")
-        lines.append(f"- Storage reduction: {result.reduction_percentage:.1f}%")
-        lines.append("")
-        
-        if result.optimized_files:
-            lines.append("## Optimized Files")
-            for file_info in result.optimized_files:
-                original_size = file_info['original_size'] / 1024
-                new_size = file_info['new_size'] / 1024
-                saved = file_info['saved'] / 1024
-                percentage = file_info['reduction_percentage']
-                
-                lines.append(f"- **{file_info['filename']}**")
-                lines.append(f"  Original: {original_size:.1f} KB")
-                lines.append(f"  Optimized: {new_size:.1f} KB")
-                lines.append(f"  Saved: {saved:.1f} KB ({percentage:.1f}%)")
-                lines.append("")
-        
-        if result.skipped_files:
-            lines.append("## Skipped Files")
-            for filename in result.skipped_files:
-                lines.append(f"- {filename}")
-            lines.append("")
-        
-        if result.errors:
-            lines.append("## Errors")
-            for error in result.errors:
-                lines.append(f"- {error}")
-            lines.append("")
-        
-        return "\n".join(lines)
+        report = format_report(usage, result, active_project.name)
+        return add_project_metadata(report, active_project.name)

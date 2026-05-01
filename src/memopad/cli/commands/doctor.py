@@ -1,4 +1,10 @@
-﻿"""Doctor command for local consistency checks."""
+﻿"""Doctor command for local consistency checks.
+
+Two modes:
+  - default: roundtrip test against a throwaway temp project (proves the
+    file ↔ DB pipeline works in isolation).
+  - --project NAME: run drift checks on a real project (--fix to repair).
+"""
 
 from __future__ import annotations
 
@@ -13,13 +19,12 @@ import typer
 
 from memopad.cli.app import app
 from memopad.cli.commands.command_utils import run_with_cleanup
-from memopad.cli.commands.command_utils import run_with_cleanup
 from memopad.markdown.entity_parser import EntityParser
 from memopad.markdown.markdown_processor import MarkdownProcessor
 from memopad.markdown.schemas import EntityFrontmatter, EntityMarkdown
 from memopad.mcp.async_client import get_client
 from memopad.mcp.clients import KnowledgeClient, ProjectClient, SearchClient
-from memopad.mcp.tools.utils import call_post
+from memopad.mcp.tools.utils import call_get, call_post
 from memopad.schemas.base import Entity
 from memopad.schemas.project_info import ProjectInfoRequest
 from memopad.schemas.search import SearchQuery
@@ -132,14 +137,125 @@ async def run_doctor() -> None:
     console.print("[green]Doctor checks passed.[/green]")
 
 
+async def run_drift_check(project_name: str, fix: bool) -> int:
+    """Inspect a real project for file ↔ DB drift, optionally repairing.
+
+    What it checks:
+      1. Files on disk that the DB doesn't know about → counted as "new" by sync.
+      2. DB entities whose files are gone → counted as "deleted" by sync.
+      3. Unresolved relations (broken [[wikilinks]]).
+
+    With --fix: triggers a force_full sync, which is the canonical way to
+    reconcile (1) and (2). Unresolved relations are *reported* but not
+    auto-rewritten — fuzzy fixing user content is risky and best left to a
+    human review step.
+
+    Returns the count of remaining issues after the run.
+    """
+    async with get_client() as client:
+        project_client = ProjectClient(client)
+        projects = await project_client.list_projects()
+        target = next((p for p in projects.projects if p.name == project_name), None)
+        if not target:
+            console.print(f"[red]Project '{project_name}' not found.[/red]")
+            return 1
+
+        project_id = target.external_id
+        console.print(f"[blue]Inspecting project '{project_name}'...[/blue]")
+
+        # --- Step 1: drift report (always runs, fix or no fix) ---
+        status_response = await call_post(client, f"/v2/projects/{project_id}/status")
+        status_report = SyncReportResponse.model_validate(status_response.json())
+
+        # SyncReportResponse fields are guaranteed by the schema — use direct
+        # attribute access instead of getattr.
+        new_files = status_report.new
+        modified = status_report.modified
+        deleted = status_report.deleted
+        moves = status_report.moves
+
+        console.print(f"  new files (on disk, not in DB): {len(new_files)}")
+        console.print(f"  modified (disk newer than DB):  {len(modified)}")
+        console.print(f"  deleted (in DB, file gone):     {len(deleted)}")
+        console.print(f"  moved:                          {len(moves)}")
+
+        # --- Step 2: optional repair ---
+        if fix and (new_files or modified or deleted or moves):
+            console.print("[yellow]--fix: running force_full sync to reconcile...[/yellow]")
+            sync_response = await call_post(
+                client,
+                f"/v2/projects/{project_id}/sync?force_full=true&run_in_background=false",
+            )
+            sync_report = SyncReportResponse.model_validate(sync_response.json())
+            console.print(
+                f"[green]OK[/green] sync reconciled: total={sync_report.total}"
+            )
+
+        # --- Step 3: surface unresolved relations as warnings ---
+        # Trigger: sync resolves [[wikilinks]] when target entities exist.
+        # Why: any remaining unresolved relation is a broken link the user
+        #      needs to either fix in the source file or by creating the target.
+        # Outcome: report-only — we do NOT rewrite user files automatically.
+        try:
+            unresolved_resp = await call_get(
+                client, f"/v2/projects/{project_id}/sync/unresolved"
+            )
+            unresolved = unresolved_resp.json().get("relations", [])
+        except Exception:
+            unresolved = []
+
+        if unresolved:
+            console.print(
+                f"[yellow]{len(unresolved)} unresolved relations[/yellow] "
+                "(broken [[wikilinks]] — fix manually or create the target notes)"
+            )
+            for r in unresolved[:10]:
+                from_p = r.get("from_permalink") or "(unknown)"
+                console.print(f"    {from_p} -[{r.get('relation_type')}]-> {r.get('to_name')}")
+            if len(unresolved) > 10:
+                console.print(f"    ... and {len(unresolved) - 10} more")
+        else:
+            console.print("[green]OK[/green] no unresolved relations")
+
+        remaining = (
+            len(new_files) + len(modified) + len(deleted) + len(moves)
+            if not fix
+            else 0
+        ) + len(unresolved)
+        return remaining
+
+
 @app.command()
-def doctor() -> None:
+def doctor(
+    project: str | None = typer.Option(
+        None,
+        "--project",
+        help="Run drift checks against the named project instead of the temp roundtrip.",
+    ),
+    fix: bool = typer.Option(
+        False,
+        "--fix",
+        help="With --project: run a force_full sync to reconcile file ↔ DB drift.",
+    ),
+) -> None:
     """Run local consistency checks to verify file/database sync."""
     try:
-        run_with_cleanup(run_doctor())
+        if project:
+            remaining = run_with_cleanup(run_drift_check(project, fix))
+            if remaining:
+                console.print(
+                    f"[yellow]{remaining} issues remaining "
+                    f"(re-run with --fix or address manually).[/yellow]"
+                )
+                raise typer.Exit(code=1)
+            console.print("[green]Project is clean.[/green]")
+        else:
+            run_with_cleanup(run_doctor())
     except (ToolError, ValueError) as e:
         console.print(f"[red]Doctor failed: {e}[/red]")
         raise typer.Exit(code=1)
+    except typer.Exit:
+        raise
     except Exception as e:
         logger.error(f"Doctor failed: {e}")
         typer.echo(f"Doctor failed: {e}", err=True)

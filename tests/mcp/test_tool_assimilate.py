@@ -2,28 +2,44 @@
 
 import pytest
 
-from memopad.mcp.tools.assimilate import (
-    LinkExtractor,
+from memopad.mcp.tools.assimilate.config import DEFAULT_CONFIG
+from memopad.mcp.tools.assimilate.content_detector import detect_content_type
+from memopad.mcp.tools.assimilate.html_utils import (
     HTMLToText,
+    LinkExtractor,
+    categorize_links,
     extract_links,
     html_to_text,
-    categorize_links,
-    detect_content_type,
-    _build_overview_note,
-    _build_github_links_note,
-    _build_agent_profiles_note,
-    _build_skills_rules_note,
-    _build_concepts_note,
-    _build_soul_files_note,
-    _build_tools_functions_note,
-    _build_algorithms_note,
-    _build_decision_structure_note,
-    _build_functional_diagram_note,
-    _safe_truncate,
-    MAX_FILE_READ_SIZE,
-    DEFAULT_MAX_FILES,
-    MAX_NOTE_CONTENT,
 )
+from memopad.mcp.tools.assimilate.note_builders import (
+    NOTE_BUILDERS,
+    build_functional_diagram_note as _build_functional_diagram_note,
+    build_github_links_note as _build_github_links_note,
+    build_note,
+    build_overview_note as _build_overview_note,
+    truncate_content as _safe_truncate,
+)
+
+
+# Tests target named builder configs through the registry. Wrapping each
+# config here keeps the call sites in the test body short without re-introducing
+# legacy underscore-prefixed shims in the production package.
+def _builder_for(content_type: str):
+    config = next(c for c in NOTE_BUILDERS if c.content_type == content_type)
+    return lambda data: build_note(data, config)
+
+
+_build_agent_profiles_note = _builder_for("agent_profile")
+_build_skills_rules_note = _builder_for("skills_rules")
+_build_concepts_note = _builder_for("concepts")
+_build_soul_files_note = _builder_for("soul_file")
+_build_tools_functions_note = _builder_for("tools_functions")
+_build_algorithms_note = _builder_for("algorithms")
+_build_decision_structure_note = _builder_for("decision_structure")
+
+MAX_FILE_READ_SIZE = DEFAULT_CONFIG.max_file_read_size
+DEFAULT_MAX_FILES = DEFAULT_CONFIG.default_max_files
+MAX_NOTE_CONTENT = DEFAULT_CONFIG.max_note_content
 
 
 # ---------------------------------------------------------------------------

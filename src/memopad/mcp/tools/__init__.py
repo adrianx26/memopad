@@ -25,15 +25,20 @@ from memopad.mcp.tools.project_management import (
     delete_project,
 )
 from memopad.mcp.tools.optimize_storage import optimize_storage
+from memopad.mcp.tools.daily_note import daily_note
+from memopad.mcp.tools.backlinks import backlinks
+from memopad.mcp.tools.semantic_search import semantic_search
 
 # ChatGPT-compatible tools
 from memopad.mcp.tools.chatgpt_tools import search, fetch
 
 __all__ = [
     "assimilate",
+    "backlinks",
     "build_context",
     "canvas",
     "create_memory_project",
+    "daily_note",
     "delete_note",
     "delete_project",
     "edit_note",
@@ -48,6 +53,7 @@ __all__ = [
     "search",
     "search_by_metadata",
     "search_notes",
+    "semantic_search",
     "view_note",
     "write_note",
 ]
