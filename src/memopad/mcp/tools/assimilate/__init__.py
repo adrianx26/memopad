@@ -23,81 +23,8 @@ from .crawler import crawl, get_http_client
 from .file_processor import FileProcessor
 from .github import clone_github_repo, is_github_repo
 from .logger import get_logger as get_assimilate_logger
-from .note_builders import build_all_notes, build_overview_note, build_github_links_note, build_note, build_functional_diagram_note, truncate_content
+from .note_builders import build_all_notes
 from .types import CrawlResult
-
-# HTML utilities (for backward compatibility with tests)
-from .html_utils import (
-    LinkExtractor,
-    HTMLToText,
-    extract_links,
-    html_to_text,
-    categorize_links,
-)
-
-# Content detection (for backward compatibility with tests)
-from .content_detector import detect_content_type
-
-# Aliases for test compatibility (old naming with underscore prefix)
-_build_overview_note = build_overview_note
-_build_github_links_note = build_github_links_note
-_build_functional_diagram_note = build_functional_diagram_note
-_safe_truncate = truncate_content
-
-# Note builder aliases with underscore prefix for test compatibility
-def _build_agent_profiles_note(data):
-    from .note_builders import NOTE_BUILDERS
-    config = next((c for c in NOTE_BUILDERS if c.content_type == "agent_profile"), None)
-    if config:
-        return build_note(data, config)
-    return None
-
-def _build_skills_rules_note(data):
-    from .note_builders import NOTE_BUILDERS
-    config = next((c for c in NOTE_BUILDERS if c.content_type == "skills_rules"), None)
-    if config:
-        return build_note(data, config)
-    return None
-
-def _build_concepts_note(data):
-    from .note_builders import NOTE_BUILDERS
-    config = next((c for c in NOTE_BUILDERS if c.content_type == "concepts"), None)
-    if config:
-        return build_note(data, config)
-    return None
-
-def _build_soul_files_note(data):
-    from .note_builders import NOTE_BUILDERS
-    config = next((c for c in NOTE_BUILDERS if c.content_type == "soul_file"), None)
-    if config:
-        return build_note(data, config)
-    return None
-
-def _build_tools_functions_note(data):
-    from .note_builders import NOTE_BUILDERS
-    config = next((c for c in NOTE_BUILDERS if c.content_type == "tools_functions"), None)
-    if config:
-        return build_note(data, config)
-    return None
-
-def _build_algorithms_note(data):
-    from .note_builders import NOTE_BUILDERS
-    config = next((c for c in NOTE_BUILDERS if c.content_type == "algorithms"), None)
-    if config:
-        return build_note(data, config)
-    return None
-
-def _build_decision_structure_note(data):
-    from .note_builders import NOTE_BUILDERS
-    config = next((c for c in NOTE_BUILDERS if c.content_type == "decision_structure"), None)
-    if config:
-        return build_note(data, config)
-    return None
-
-# Constant aliases for test compatibility
-MAX_FILE_READ_SIZE = DEFAULT_CONFIG.max_file_read_size
-DEFAULT_MAX_FILES = DEFAULT_CONFIG.default_max_files
-MAX_NOTE_CONTENT = DEFAULT_CONFIG.max_note_content
 
 
 @mcp.tool(
@@ -273,7 +200,7 @@ async def _assimilate_impl(
             log_entry = assimilate_logger.start_operation(
                 url=url,
                 project=active_project.name,
-                project_path=getattr(active_project, 'path', 'unknown'),
+                project_path=active_project.path,
                 strategy=strategy,
                 max_depth=max_depth,
                 max_pages=max_pages,
@@ -300,11 +227,20 @@ async def _assimilate_impl(
                             entity.model_dump(), fast=True
                         )
                     except Exception as e:
-                        if (
-                            "409" in str(e)
-                            or "conflict" in str(e).lower()
-                            or "already exists" in str(e).lower()
-                        ):
+                        # Trigger: KnowledgeClient may raise either an httpx.HTTPStatusError
+                        #          (HTTP 409) or a domain-level "already exists" error.
+                        # Why: prefer typed status check; fall back to message match only when
+                        #      the typed path doesn't apply (e.g. service-layer exception).
+                        is_conflict = False
+                        status = getattr(getattr(e, "response", None), "status_code", None)
+                        if status == 409:
+                            is_conflict = True
+                        else:
+                            msg_lower = str(e).lower()
+                            if "conflict" in msg_lower or "already exists" in msg_lower:
+                                is_conflict = True
+
+                        if is_conflict:
                             if entity.permalink:
                                 try:
                                     entity_id = await knowledge_client.resolve_entity(
@@ -382,7 +318,7 @@ async def _assimilate_impl(
         summary_lines.extend(stored)
 
         if data["all_github_links"]:
-            summary_lines.append(f"\n## GitHub Links ({len(data['all_github_links'])}\n")
+            summary_lines.append(f"\n## GitHub Links ({len(data['all_github_links'])})\n")
             for gh in data["all_github_links"][:20]:
                 summary_lines.append(f"- {gh}")
             if len(data["all_github_links"]) > 20:

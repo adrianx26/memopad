@@ -75,6 +75,44 @@ class RelationRepository(Repository[Relation]):
         result = await self.execute_query(query)
         return result.scalars().all()
 
+    async def find_backlinks(
+        self,
+        target_entity_id: int,
+        target_permalinks: Sequence[str] = (),
+    ) -> Sequence[Relation]:
+        """Find all relations pointing TO the target entity.
+
+        Returns both resolved backlinks (to_id == target_entity_id) and unresolved
+        backlinks (to_id IS NULL AND to_name matches one of target_permalinks).
+
+        Including unresolved is important: when a note references [[Coffee Brewing]]
+        before that note exists, the relation is created with to_id=NULL and
+        to_name="coffee-brewing". If we only checked to_id we'd miss those.
+
+        Args:
+            target_entity_id: The id of the entity being linked to.
+            target_permalinks: Aliases (permalink, title slug) that may appear
+                               in unresolved relations' to_name field.
+
+        Returns:
+            Sequence of Relation objects with from_entity eagerly loaded.
+        """
+        conditions: list[Any] = [Relation.to_id == target_entity_id]
+        if target_permalinks:
+            conditions.append(
+                and_(Relation.to_id.is_(None), Relation.to_name.in_(list(target_permalinks)))
+            )
+
+        from sqlalchemy import or_
+
+        query = (
+            select(Relation)
+            .options(selectinload(Relation.from_entity))
+            .where(or_(*conditions))
+        )
+        result = await self.execute_query(query)
+        return result.scalars().all()
+
     async def find_unresolved_relations_for_entity(self, entity_id: int) -> Sequence[Relation]:
         """Find unresolved relations for a specific entity.
 

@@ -388,6 +388,8 @@ list_directory(dir_name, depth) - Browse directory contents with filtering
 search(query, page, page_size) - Search across your knowledge base
 search_notes(query, page, page_size, search_type, types, entity_types, after_date, metadata_filters, tags, status, project) - Search with filters
 search_by_metadata(filters, limit, offset, project) - Structured frontmatter search
+semantic_search(query, mode, limit, project) - Embedding / hybrid search (opt-in, see below)
+backlinks(identifier, project) - Find all notes linking TO an entity
 ```
 
 **Project Management:**
@@ -396,6 +398,20 @@ list_memory_projects() - List all available projects
 create_memory_project(project_name, project_path) - Create new projects
 get_current_project() - Show current project stats
 sync_status() - Check synchronization status
+```
+
+**Daily journal:**
+```
+daily_note(date_str, project, template) - Create or open daily/YYYY-MM-DD.md
+                                          with prev/next wikilinks. Accepts
+                                          ISO dates or "today"/"yesterday"/"tomorrow".
+```
+
+**Storage maintenance:**
+```
+optimize_storage(project, dry_run=True) - Find duplicate notes; with dry_run=False,
+                                          replace each duplicate's body with a
+                                          wikilink redirect to the canonical copy.
 ```
 
 **Visualization:**
@@ -518,8 +534,40 @@ just migration "msg"  # Create database migration
 
 **Local Consistency Check:**
 ```bash
-memopad doctor   # Verifies file <-> database sync in a temp project
+# Roundtrip test against a throwaway temp project
+memopad doctor
+
+# Drift check on a real project (read-only by default)
+memopad doctor --project my-research
+
+# Drift check + auto-reconcile via force_full sync
+memopad doctor --project my-research --fix
 ```
+
+The `--project` mode reports new files on disk, modified/deleted entries, and
+unresolved `[[wikilinks]]`. With `--fix`, file ↔ DB drift is reconciled
+automatically. Unresolved wikilinks are reported only — fixing them is left
+to the user since fuzzy-rewriting markdown is risky.
+
+## Optional: hybrid semantic search
+
+MemoPad supports semantic and hybrid (BM25 + embeddings) search alongside
+keyword FTS5. It's **opt-in** so existing installs see no behavior change.
+
+```bash
+# Install the optional dependency (CPU-only ONNX runtime, ~30MB model)
+pip install 'memopad[embeddings]'
+
+# Enable for the current session
+export MEMOPAD_EMBEDDINGS_ENABLED=true
+```
+
+The `semantic_search` MCP tool then accepts `mode="semantic" | "hybrid" | "fts"`.
+Hybrid mode fuses keyword and embedding rankings via Reciprocal Rank Fusion
+(RRF) — robust across precise term lookups and conceptual queries without
+weight tuning.
+
+See [plans/PLAN.md](plans/PLAN.md) §2.4 for the full integration roadmap.
 
 See the [justfile](justfile) for the complete list of development commands.
 

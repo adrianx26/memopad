@@ -53,6 +53,9 @@ dependencies = [
 stoolap = [
     "stoolap-python>=0.3.0",  # Embedded Rust SQL DB — Stoolap backend
 ]
+embeddings = [
+    "fastembed>=0.4.0",  # CPU-only ONNX inference for semantic/hybrid search
+]
 
 
 [project.urls]

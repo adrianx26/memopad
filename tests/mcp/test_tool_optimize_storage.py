@@ -25,17 +25,21 @@ async def test_optimize_storage_basic_functionality(app, test_project):
     
     # Verify the report contains expected sections
     assert "Storage Optimization Report" in result
-    assert "Current Storage Usage" in result
-    assert "Optimization Results" in result
-    
+    assert "Storage Usage" in result
+    assert "Duplicates" in result
+
     # Check that it mentions the test project name
     assert test_project.name in result
-    
+
     # Verify statistics are present (test project contains default files)
     assert "Total files:" in result
     assert "Total size:" in result
-    assert "Files processed:" in result
-    assert "Files optimized:" in result
+    assert "Duplicate groups:" in result
+    assert "Duplicate files:" in result
+
+    # Default is dry-run — must say so explicitly so users don't think
+    # they just deleted data.
+    assert "DRY RUN" in result
 
 
 @pytest.mark.asyncio

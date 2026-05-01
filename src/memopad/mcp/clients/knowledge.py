@@ -222,6 +222,23 @@ class KnowledgeClient:
         )
         return DirectoryDeleteResult.model_validate(response.json())
 
+    # --- Backlinks ---
+
+    async def get_backlinks(self, entity_id: str) -> dict:
+        """Get all relations pointing TO the given entity.
+
+        Args:
+            entity_id: Target entity external_id (UUID).
+
+        Returns:
+            Dict with target_external_id, target_title, and backlinks list.
+        """
+        response = await call_get(
+            self.http_client,
+            f"{self._base_path}/entities/{entity_id}/backlinks",
+        )
+        return response.json()
+
     # --- Resolution ---
 
     async def resolve_entity(self, identifier: str) -> str:
