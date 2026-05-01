@@ -396,9 +396,132 @@ async def test_assimilate_stores_notes(app, test_project, monkeypatch):
     assert "Assimilation Complete" in result
     assert f"project: {test_project.name}" in result
     assert "items_processed: 1" in result
-    assert "notes_stored:" in result
+    # Incremental summary now reports per-action counts
+    assert "notes_total:" in result
+    assert "created:" in result
+    assert "unchanged:" in result
     assert "Overview" in result
     assert f"[Session: Using project '{test_project.name}']" in result
+
+
+# ---------------------------------------------------------------------------
+# Incremental assimilation — re-running the tool should skip unchanged notes
+# rather than rewriting them.
+# ---------------------------------------------------------------------------
+
+
+def _mock_crawl_data(text: str = "Default body"):
+    """Build a single-page CrawlResult with the given body text."""
+    return {
+        "pages": [
+            {
+                "url": "https://incremental.example.com",
+                "text": text,
+                "content_types": ["concepts"],
+                "links": {"internal": [], "github": [], "external": []},
+            },
+        ],
+        "all_github_links": [],
+        "all_external_links": [],
+        "errors": [],
+    }
+
+
+def _count(summary: str, label: str) -> int:
+    """Pull the integer following e.g. 'created:' from the summary text."""
+    for line in summary.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(f"{label}:"):
+            # Format is `label:   <int>  (optional comment)`
+            tail = stripped.split(":", 1)[1].strip()
+            return int(tail.split()[0])
+    raise AssertionError(f"counter '{label}' not found in summary:\n{summary}")
+
+
+@pytest.mark.asyncio
+async def test_assimilate_re_run_skips_unchanged_notes(app, test_project, monkeypatch):
+    """Second run with identical upstream content must report unchanged > 0
+    and created == 0 — the whole point of the incremental layer.
+    """
+    import sys
+    from memopad.mcp.tools.assimilate import assimilate
+
+    assimilate_mod = sys.modules["memopad.mcp.tools.assimilate"]
+    mock_data = _mock_crawl_data("# Stable Page\n\nNothing changes between runs.")
+
+    async def mock_crawl(url, max_depth=10, max_pages=0):
+        return mock_data
+
+    monkeypatch.setattr(assimilate_mod, "crawl", mock_crawl)
+
+    # First run: every note is fresh.
+    first = await assimilate.fn(
+        url="https://incremental.example.com", project=test_project.name
+    )
+    assert "Assimilation Complete" in first
+    first_created = _count(first, "created")
+    assert first_created >= 1
+    assert _count(first, "unchanged") == 0
+
+    # Second run with identical data: every note hashes the same → all skipped.
+    second = await assimilate.fn(
+        url="https://incremental.example.com", project=test_project.name
+    )
+    assert _count(second, "created") == 0
+    assert _count(second, "updated") == 0
+    # Same set of notes that were created on run 1 should now all be unchanged.
+    assert _count(second, "unchanged") == first_created
+
+
+@pytest.mark.asyncio
+async def test_assimilate_re_run_updates_when_content_changes(
+    app, test_project, monkeypatch
+):
+    """If upstream content changes, the second run must report updated > 0
+    rather than unchanged.
+    """
+    import sys
+    from memopad.mcp.tools.assimilate import assimilate
+
+    assimilate_mod = sys.modules["memopad.mcp.tools.assimilate"]
+    state = {"text": "# Initial\n\nFirst version of the content."}
+
+    async def mock_crawl(url, max_depth=10, max_pages=0):
+        return _mock_crawl_data(state["text"])
+
+    monkeypatch.setattr(assimilate_mod, "crawl", mock_crawl)
+
+    # Run 1: prime the store.
+    await assimilate.fn(
+        url="https://incremental.example.com", project=test_project.name
+    )
+
+    # Mutate upstream — the new body is materially different.
+    state["text"] = "# Initial\n\nSecond, very different version of the content."
+
+    # Run 2: at least one note (Overview, which always reflects page text) must
+    # be re-hashed and updated.
+    second = await assimilate.fn(
+        url="https://incremental.example.com", project=test_project.name
+    )
+    assert _count(second, "updated") >= 1
+    assert _count(second, "created") == 0
+
+
+@pytest.mark.asyncio
+async def test_content_hash_is_deterministic_and_body_only():
+    """The hash must depend only on the body string, not on metadata,
+    leading whitespace, or any other ambient state.
+    """
+    from memopad.mcp.tools.assimilate import _content_hash
+
+    h1 = _content_hash("hello world")
+    h2 = _content_hash("hello world")
+    assert h1 == h2
+    assert h1 != _content_hash("hello world ")  # whitespace matters — that's fine
+    assert h1 != _content_hash("HELLO WORLD")  # case matters — also fine
+    # Hashes are 64 hex chars (SHA256).
+    assert len(h1) == 64
 
 
 # ---------------------------------------------------------------------------

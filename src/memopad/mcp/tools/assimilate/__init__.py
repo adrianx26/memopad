@@ -2,9 +2,25 @@
 
 Crawls a URL, extracts knowledge (content, links, agent profiles, skills, rules),
 and stores everything as structured notes in memopad.
+
+Incremental assimilation
+------------------------
+Re-assimilating the same source is cheap. For every note we generate, we
+compute a SHA256 of the content body and stash it in
+`entity_metadata._assimilate_content_hash` along with the source URL. On
+re-run, before issuing an update we fetch the existing entity and compare
+hashes — when they match we skip the write entirely. The result:
+
+  - first run:   N created, 0 updated, 0 unchanged
+  - re-run, no upstream changes: 0 created, 0 updated, N unchanged (skipped)
+  - re-run, only X notes changed: 0 created, X updated, N-X unchanged
+
+This avoids unnecessary file rewrites, sync reindex passes, and (when
+embeddings are enabled) embedding regeneration.
 """
 
 import asyncio
+import hashlib
 import webbrowser
 from typing import Optional
 from urllib.parse import urlparse
@@ -25,6 +41,20 @@ from .github import clone_github_repo, is_github_repo
 from .logger import get_logger as get_assimilate_logger
 from .note_builders import build_all_notes
 from .types import CrawlResult
+
+
+# Metadata keys we set on every assimilated entity. The leading underscore
+# marks them as "assimilate-internal" so the rest of MemoPad can ignore them.
+ASSIMILATE_HASH_KEY = "_assimilate_content_hash"
+ASSIMILATE_SOURCE_KEY = "_assimilate_source"
+
+
+def _content_hash(content: str) -> str:
+    """SHA256 of the note body, used to detect whether the content has changed
+    since the last assimilation. Body-only — frontmatter is excluded so
+    metadata-only differences don't count as content changes.
+    """
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 @mcp.tool(
@@ -212,7 +242,19 @@ async def _assimilate_impl(
             knowledge_client = KnowledgeClient(client, active_project.external_id)
 
             stored: list[str] = []
+            counts = {"created": 0, "updated": 0, "unchanged": 0, "failed": 0}
+
             for title, content in notes_to_write:
+                # Compute the body hash up front so we can write it on create
+                # and compare it on conflict. Body-only — frontmatter is added
+                # by the entity service downstream and isn't part of our hash.
+                new_hash = _content_hash(content)
+                metadata = {
+                    "tags": ["assimilated", domain],
+                    ASSIMILATE_HASH_KEY: new_hash,
+                    ASSIMILATE_SOURCE_KEY: url,
+                }
+
                 try:
                     entity = Entity(
                         title=title,
@@ -220,12 +262,16 @@ async def _assimilate_impl(
                         entity_type="note",
                         content_type="text/markdown",
                         content=content,
-                        entity_metadata={"tags": ["assimilated", domain]},
+                        entity_metadata=metadata,
                     )
+
+                    # --- Optimistic create ---
                     try:
                         result = await knowledge_client.create_entity(
                             entity.model_dump(), fast=True
                         )
+                        operation = "created"
+                        counts["created"] += 1
                     except Exception as e:
                         # Trigger: KnowledgeClient may raise either an httpx.HTTPStatusError
                         #          (HTTP 409) or a domain-level "already exists" error.
@@ -236,59 +282,92 @@ async def _assimilate_impl(
                         if status == 409:
                             is_conflict = True
                         else:
+                            # Conflicts can surface as:
+                            #   - a wrapped HTTP 409 (handled above)
+                            #   - the API's own "already exists" / "conflict" wording
+                            #   - a raw SQLAlchemy IntegrityError when fast=True
+                            #     skips the service-layer translation (the message
+                            #     reads "UNIQUE constraint failed: entity.permalink…")
                             msg_lower = str(e).lower()
-                            if "conflict" in msg_lower or "already exists" in msg_lower:
+                            if (
+                                "conflict" in msg_lower
+                                or "already exists" in msg_lower
+                                or "unique constraint failed" in msg_lower
+                                or "integrityerror" in type(e).__name__.lower()
+                            ):
                                 is_conflict = True
 
-                        if is_conflict:
-                            if entity.permalink:
-                                try:
-                                    entity_id = await knowledge_client.resolve_entity(
-                                        entity.permalink
-                                    )
-                                    result = await knowledge_client.update_entity(
-                                        entity_id, entity.model_dump(), fast=False
-                                    )
-                                    global_logger.info(
-                                        f"assimilate: updated existing note "
-                                        f"'{title}' at {result.permalink}"
-                                    )
-
-                                    # Log file update to assimilate logger
-                                    file_path = f"{directory}/{title}.md"
-                                    assimilate_logger.log_file_saved(
-                                        title=title,
-                                        file_path=file_path,
-                                        permalink=result.permalink,
-                                        directory=directory,
-                                        operation="updated",
-                                        content_length=len(content),
-                                    )
-                                except Exception as update_err:
-                                    global_logger.error(
-                                        f"assimilate: update failed for '{title}': {update_err}"
-                                    )
-                                    raise update_err
-                            else:
-                                raise
-                        else:
+                        if not is_conflict or not entity.permalink:
                             raise
-                    stored.append(f"- {title}: {result.permalink}")
-                    global_logger.info(
-                        f"assimilate: stored note '{title}' at {result.permalink}"
-                    )
 
-                    # Log file save to assimilate logger
+                        # --- Conflict path: incremental skip / update ---
+                        # Resolve the existing entity and compare its stored hash
+                        # to the one we just computed. Match → no-op (skip the
+                        # update entirely, including the file rewrite + reindex
+                        # it would trigger). Mismatch → update with the new hash.
+                        try:
+                            entity_id = await knowledge_client.resolve_entity(
+                                entity.permalink
+                            )
+                            existing = await knowledge_client.get_entity(entity_id)
+                            existing_meta = existing.entity_metadata or {}
+                            existing_hash = existing_meta.get(ASSIMILATE_HASH_KEY)
+
+                            if existing_hash == new_hash:
+                                # Content unchanged since last assimilation —
+                                # short-circuit. Note: we don't re-resolve from
+                                # the file, so a manual edit by the user that
+                                # happens to match this hash is treated as
+                                # unchanged. That's the right behavior: hash
+                                # match ⇒ no semantically meaningful diff.
+                                counts["unchanged"] += 1
+                                stored.append(
+                                    f"- {title}: unchanged ({existing.permalink})"
+                                )
+                                global_logger.info(
+                                    f"assimilate: '{title}' unchanged — skipped"
+                                )
+                                file_path = f"{directory}/{title}.md"
+                                assimilate_logger.log_file_saved(
+                                    title=title,
+                                    file_path=file_path,
+                                    permalink=existing.permalink,
+                                    directory=directory,
+                                    operation="unchanged",
+                                    content_length=len(content),
+                                )
+                                continue
+
+                            # Hash changed (or no prior hash recorded) — update.
+                            result = await knowledge_client.update_entity(
+                                entity_id, entity.model_dump(), fast=False
+                            )
+                            operation = "updated"
+                            counts["updated"] += 1
+                            global_logger.info(
+                                f"assimilate: updated existing note "
+                                f"'{title}' at {result.permalink}"
+                            )
+                        except Exception as update_err:
+                            global_logger.error(
+                                f"assimilate: update failed for '{title}': {update_err}"
+                            )
+                            raise update_err
+
+                    # --- Successful create or update ---
+                    stored.append(f"- {title}: {operation} ({result.permalink})")
                     file_path = f"{directory}/{title}.md"
                     assimilate_logger.log_file_saved(
                         title=title,
                         file_path=file_path,
                         permalink=result.permalink,
                         directory=directory,
-                        operation="created",
+                        operation=operation,
                         content_length=len(content),
                     )
+
                 except Exception as e:
+                    counts["failed"] += 1
                     stored.append(f"- {title}: FAILED ({e})")
                     global_logger.error(f"assimilate: failed to store note '{title}': {e}")
                     assimilate_logger.log_error(
@@ -304,16 +383,21 @@ async def _assimilate_impl(
             github_links_found=len(data["all_github_links"]),
         )
 
-        # Build summary
+        # Build summary. Reports created/updated/unchanged/failed so the user
+        # can immediately see how much of a re-run was cached.
         summary_lines = [
             "# Assimilation Complete\n",
             f"source: {url}",
             f"project: {active_project.name}",
             f"items_processed: {len(data['pages'])}",
             f"github_links_found: {len(data['all_github_links'])}",
-            f"notes_stored: {len(notes_to_write)}",
+            f"notes_total: {len(notes_to_write)}",
+            f"  created:   {counts['created']}",
+            f"  updated:   {counts['updated']}",
+            f"  unchanged: {counts['unchanged']}  (skipped via content-hash match)",
+            f"  failed:    {counts['failed']}",
             f"directory: {directory}",
-            "\n## Notes Created\n",
+            "\n## Notes\n",
         ]
         summary_lines.extend(stored)
 

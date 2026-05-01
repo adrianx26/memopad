@@ -556,11 +556,24 @@ unresolved `[[wikilinks]]`. With `--fix`, file ↔ DB drift is reconciled
 automatically. Unresolved wikilinks are reported only — fixing them is left
 to the user since fuzzy-rewriting markdown is risky.
 
+## Incremental processing
+
+MemoPad never re-processes content that hasn't changed:
+
+- **`memopad sync`** uses per-file checksums — only changed files are re-read,
+  re-parsed, and re-indexed.
+- **`assimilate`** stores a SHA256 hash of each note's body in entity metadata.
+  Re-running it against the same URL/repo skips notes whose content hash matches
+  the prior run — no DB write, no file rewrite, no reindex. The summary reports
+  `created / updated / unchanged / failed` counts so you can see at a glance how
+  much of the re-run was cached.
+
 ## Workflow diagrams
 
 [`docs/WORKFLOWS.md`](docs/WORKFLOWS.md) has Mermaid diagrams covering:
-write flow, search/read flow (incl. hybrid semantic), sync, assimilate,
-knowledge-graph traversal, storage optimization, and doctor `--fix` mode.
+write flow, search/read flow (incl. hybrid semantic), sync, assimilate
+(plus incremental re-runs), knowledge-graph traversal, storage optimization,
+and doctor `--fix` mode.
 
 ## Optional: hybrid semantic search
 

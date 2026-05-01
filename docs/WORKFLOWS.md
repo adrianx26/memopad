@@ -213,6 +213,46 @@ flowchart TD
 Errors (network, decode, file-read) are now captured with their reason and
 surfaced in the final summary, not silently swallowed.
 
+### 5a. Incremental re-runs (content-hash skip)
+
+Re-assimilating an already-ingested source is cheap. For each generated note
+we compute `SHA256(body)` and stash it on the entity's metadata. On the
+next run, a hash match short-circuits the write entirely.
+
+```mermaid
+flowchart TD
+    Build["build_all_notes(url, data)"]
+    Loop[/"for title, content in notes_to_write"/]
+    Hash["new_hash = sha256(content)"]
+    Create["create_entity(fast=True)<br/>metadata._assimilate_content_hash = new_hash"]
+
+    Conflict{"conflict?<br/>(409 / IntegrityError /<br/>UNIQUE constraint)"}
+    Resolve["resolve_entity(permalink)<br/>get_entity(id)"]
+    Compare{"existing._assimilate_content_hash<br/>== new_hash?"}
+
+    Skip[/"unchanged++<br/>NO write, NO file rewrite,<br/>NO reindex"/]
+    Update["update_entity(fast=False)<br/>(writes new content + new hash)"]
+    Created[/"created++"/]
+    Updated[/"updated++"/]
+
+    Build --> Loop --> Hash --> Create
+    Create -- success --> Created
+    Create -- raises --> Conflict
+    Conflict -- yes --> Resolve --> Compare
+    Compare -- match --> Skip
+    Compare -- differ --> Update --> Updated
+    Conflict -- no --> Failed[/"failed++<br/>(re-raise)"/]
+```
+
+**Net effect on a no-op re-run:** N optimistic creates fail with conflict,
+N hash comparisons match, zero file writes, zero index updates. The summary
+reports `created: 0, updated: 0, unchanged: N, failed: 0` so the user sees
+the cache-hit rate at a glance.
+
+**File-level sync remains the source of truth.** This skip operates at the
+*assimilate write* boundary — sync still owns file ↔ DB consistency via its
+own per-file checksum diff.
+
 ---
 
 ## 6. Knowledge graph traversal

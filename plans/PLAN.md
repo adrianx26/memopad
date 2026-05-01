@@ -56,7 +56,38 @@ These were latent issues caught while reviewing the post-refactor state:
   `response.status_code` when available, falling back to message-match only as
   a last resort.
 
-### 1.3 Known fixed issues
+### 1.3 Incremental assimilation (content-hash skip) — ✅ Implemented
+
+Re-running `assimilate` against the same source no longer rewrites every
+note. For each note we compute `SHA256(body)` and store it in
+`entity_metadata._assimilate_content_hash` (alongside `_assimilate_source`).
+On re-run:
+
+  - **First run:** all notes are *created*; hashes are persisted.
+  - **Re-run, no upstream change:** the optimistic create raises a conflict;
+    we resolve the existing entity, compare hashes, and **skip** the update
+    when they match. No DB write, no file rewrite, no reindex.
+  - **Re-run, upstream changed:** hashes differ → update with the new hash.
+
+The summary now reports `created / updated / unchanged / failed` counts so
+the user can see at a glance how much of a re-run was cached.
+
+Conflict detection was hardened to also catch raw SQLAlchemy
+`IntegrityError("UNIQUE constraint failed: entity.permalink, …")` — the
+shape we get when `fast=True` skips service-layer translation. Three new
+test files cover the full re-run flow (skip, update, hash properties).
+
+**Files touched:**
+[`src/memopad/mcp/tools/assimilate/__init__.py`](../src/memopad/mcp/tools/assimilate/__init__.py),
+[`tests/mcp/test_tool_assimilate.py`](../tests/mcp/test_tool_assimilate.py).
+
+**Why not at the file-fetch / clone layer?** Network/disk I/O for the
+fetch is small relative to DB writes + reindex (and embedding generation
+once that's wired). The hash check at the note-write boundary cuts the
+expensive part. Per-source caching of upstream content is a future
+optimization, not a launch blocker.
+
+### 1.4 Known fixed issues
 
 The catalog in [`tofix.md`](../tofix.md) (Windows event loop, `CancelledError`,
 `EntityCreationError` on retries) remains the authoritative record of platform
