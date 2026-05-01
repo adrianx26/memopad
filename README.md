@@ -392,6 +392,13 @@ semantic_search(query, mode, limit, project) - Embedding / hybrid search (opt-in
 backlinks(identifier, project) - Find all notes linking TO an entity
 ```
 
+**Graph analytics:**
+```
+cluster_notes(min_size, project) - Detect topic clusters via Louvain community detection
+hub_notes(top, project) - Top-N most-connected notes (degree centrality)
+find_path(from_identifier, to_identifier, max_length, project) - Shortest path between two notes
+```
+
 **Project Management:**
 ```
 list_memory_projects() - List all available projects

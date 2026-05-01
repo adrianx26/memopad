@@ -8,6 +8,7 @@ from memopad.api.v2.routers.resource_router import router as resource_router
 from memopad.api.v2.routers.directory_router import router as directory_router
 from memopad.api.v2.routers.prompt_router import router as prompt_router
 from memopad.api.v2.routers.importer_router import router as importer_router
+from memopad.api.v2.routers.graph_analytics_router import router as graph_analytics_router
 
 __all__ = [
     "knowledge_router",
@@ -18,4 +19,5 @@ __all__ = [
     "directory_router",
     "prompt_router",
     "importer_router",
+    "graph_analytics_router",
 ]

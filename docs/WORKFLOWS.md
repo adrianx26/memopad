@@ -293,7 +293,51 @@ copies become redirect stubs.
 
 ---
 
-## 8. Doctor (`--fix` mode)
+## 8. Graph analytics (`cluster_notes`, `hub_notes`, `find_path`)
+
+Three read-only operations over the relation graph, inspired by graphify but
+running on MemoPad's existing wikilink-derived relations. NetworkX-backed,
+no LLM calls, no embedding model required.
+
+```mermaid
+flowchart TD
+    Tool["MCP tool<br/>cluster_notes / hub_notes / find_path"]
+    Client["GraphAnalyticsClient<br/>GET /graph/{clusters,hubs,path}"]
+    API["graph_analytics_router"]
+    Svc["GraphAnalyticsService<br/>(session_maker, project_id)"]
+    Load["_load_graph()<br/>SELECT entities + resolved relations"]
+    NX["NetworkX MultiGraph"]
+
+    Tool --> Client --> API --> Svc --> Load --> NX
+
+    NX --> Louvain["nx.community.louvain_communities<br/>(seed=42, deterministic)"]
+    NX --> Degree["in_degree / out_degree<br/>(directional via raw SQL)"]
+    NX --> SP["nx.shortest_path<br/>(undirected, preserves<br/>relation_type per hop)"]
+
+    Louvain -- "filter < min_size,<br/>label by max-degree member" --> CRes[/"Cluster list<br/>(label, members, internal_edges)"/]
+    Degree -- "sort desc by total" --> HRes[/"Top-N hubs<br/>(in_degree, out_degree)"/]
+    SP -- "bound by max_length" --> PRes[/"PathStep chain<br/>(or found=False)"/]
+
+    CRes --> Out[/"Markdown to LLM"/]
+    HRes --> Out
+    PRes --> Out
+```
+
+**Why undirected for clustering:** `depends_on` is not symmetric with
+`enables`, but for "what topics are connected" questions users expect
+either direction to count as a link.
+
+**Why directional for hubs:** in/out split tells you whether a note is a
+*reference* (high in_degree, things link to it) vs. an *index* (high
+out_degree, it links out to many things).
+
+**Determinism:** Louvain has a stable seed so the same vault produces the
+same clusters across runs. Tied degrees in `find_hubs` break by title
+ascending, also stable.
+
+---
+
+## 9. Doctor (`--fix` mode)
 
 ```mermaid
 sequenceDiagram

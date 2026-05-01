@@ -47,6 +47,7 @@ dependencies = [
     "pypdf>=3.17.0",
     "python-docx>=1.0.0",
     "openpyxl>=3.1.2",
+    "networkx>=3.2",  # Graph analytics: clusters (Louvain), centrality, shortest paths
 ]
 
 [project.optional-dependencies]

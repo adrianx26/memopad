@@ -193,6 +193,33 @@ new repository method
 + client method `KnowledgeClient.get_backlinks`. Returns both resolved
 backlinks and unresolved `[[wikilinks]]` matching the target's permalink/title.
 
+### 5.3 Graph analytics: `cluster_notes`, `hub_notes`, `find_path` — ✅ Implemented
+
+Inspired by the [graphify](https://github.com/safishamsi/graphify) project,
+ported as graph algorithms over MemoPad's existing relation graph (no
+codebase scanning, no embedding-based clustering — pure topology).
+
+- [`services/graph_analytics_service.py`](../src/memopad/services/graph_analytics_service.py) —
+  loads entities + resolved relations into NetworkX, runs:
+    - **Louvain community detection** (`find_clusters`) — deterministic via
+      `seed=42`, falls back to connected components if Louvain raises.
+    - **Degree centrality** (`find_hubs`) — separate in/out counts.
+    - **Shortest path** (`find_path`) — undirected traversal with directional
+      relation_type preserved per step.
+- [`api/v2/routers/graph_analytics_router.py`](../src/memopad/api/v2/routers/graph_analytics_router.py)
+  exposes `GET /graph/clusters`, `GET /graph/hubs`, `GET /graph/path`.
+- [`mcp/clients/graph_analytics.py`](../src/memopad/mcp/clients/graph_analytics.py) —
+  typed client.
+- [`mcp/tools/graph_analytics.py`](../src/memopad/mcp/tools/graph_analytics.py) —
+  three MCP tools.
+- 30 service tests in
+  [`tests/services/test_graph_analytics_service.py`](../tests/services/test_graph_analytics_service.py).
+
+Adds a single new dependency: `networkx>=3.2` (~5 MB, pure Python, MIT).
+Self-loops are skipped during graph construction, and unresolved relations
+(to_id IS NULL) are excluded from analytics — they're surfaced separately by
+`backlinks`.
+
 ---
 
 ## 6. Repo hygiene

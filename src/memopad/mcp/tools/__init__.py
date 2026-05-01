@@ -28,6 +28,7 @@ from memopad.mcp.tools.optimize_storage import optimize_storage
 from memopad.mcp.tools.daily_note import daily_note
 from memopad.mcp.tools.backlinks import backlinks
 from memopad.mcp.tools.semantic_search import semantic_search
+from memopad.mcp.tools.graph_analytics import cluster_notes, hub_notes, find_path
 
 # ChatGPT-compatible tools
 from memopad.mcp.tools.chatgpt_tools import search, fetch
@@ -37,12 +38,15 @@ __all__ = [
     "backlinks",
     "build_context",
     "canvas",
+    "cluster_notes",
     "create_memory_project",
     "daily_note",
     "delete_note",
     "delete_project",
     "edit_note",
     "fetch",
+    "find_path",
+    "hub_notes",
     "list_directory",
     "list_memory_projects",
     "move_note",

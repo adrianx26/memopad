@@ -18,6 +18,7 @@ from memopad.api.v2.routers import (
     directory_router as v2_directory,
     prompt_router as v2_prompt,
     importer_router as v2_importer,
+    graph_analytics_router as v2_graph,
 )
 from memopad.api.v2.routers.project_router import list_projects
 from memopad.config import init_api_logging
@@ -79,6 +80,7 @@ app.include_router(v2_resource, prefix="/v2/projects/{project_id}")
 app.include_router(v2_directory, prefix="/v2/projects/{project_id}")
 app.include_router(v2_prompt, prefix="/v2/projects/{project_id}")
 app.include_router(v2_importer, prefix="/v2/projects/{project_id}")
+app.include_router(v2_graph, prefix="/v2/projects/{project_id}")
 app.include_router(v2_project, prefix="/v2")
 
 # Legacy web app proxy paths (compat with /proxy/projects/projects)

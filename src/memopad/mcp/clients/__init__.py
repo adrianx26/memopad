@@ -17,6 +17,7 @@ from memopad.mcp.clients.memory import MemoryClient
 from memopad.mcp.clients.directory import DirectoryClient
 from memopad.mcp.clients.resource import ResourceClient
 from memopad.mcp.clients.project import ProjectClient
+from memopad.mcp.clients.graph_analytics import GraphAnalyticsClient
 
 __all__ = [
     "KnowledgeClient",
@@ -25,4 +26,5 @@ __all__ = [
     "DirectoryClient",
     "ResourceClient",
     "ProjectClient",
+    "GraphAnalyticsClient",
 ]
