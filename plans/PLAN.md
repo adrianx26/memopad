@@ -1,8 +1,12 @@
 # MemoPad — Engineering Plan & State of the Codebase
 
 This is the consolidated engineering plan for MemoPad. It replaces the per-topic
-plan documents that previously lived under `plans/`. Each section is tagged
-with its current status against the codebase as of this writing:
+plan documents that previously lived under `plans/`. Forward-looking work that
+has been analyzed but not started (deferred Tier 2 + skipped Tier 3 from the
+graphify analysis) lives in [`../futureplan.md`](../futureplan.md).
+
+Each section is tagged with its current status against the codebase as of this
+writing:
 
 - ✅ **Implemented** — described work has landed; references point to the live code.
 - 🚧 **In progress** — partial implementation; the gap is described.
