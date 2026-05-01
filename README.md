@@ -549,6 +549,12 @@ unresolved `[[wikilinks]]`. With `--fix`, file ↔ DB drift is reconciled
 automatically. Unresolved wikilinks are reported only — fixing them is left
 to the user since fuzzy-rewriting markdown is risky.
 
+## Workflow diagrams
+
+[`docs/WORKFLOWS.md`](docs/WORKFLOWS.md) has Mermaid diagrams covering:
+write flow, search/read flow (incl. hybrid semantic), sync, assimilate,
+knowledge-graph traversal, storage optimization, and doctor `--fix` mode.
+
 ## Optional: hybrid semantic search
 
 MemoPad supports semantic and hybrid (BM25 + embeddings) search alongside
