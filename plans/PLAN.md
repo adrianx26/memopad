@@ -255,6 +255,43 @@ Self-loops are skipped during graph construction, and unresolved relations
 (to_id IS NULL) are excluded from analytics — they're surfaced separately by
 `backlinks`.
 
+### 5.4 Relation confidence + source_method — ✅ Implemented
+
+Every `Relation` row now carries two provenance columns:
+
+| Column | Type | Default | Meaning |
+|---|---|---|---|
+| `confidence` | `Float` (0.0–1.0) | `1.0` | Certainty of the relation |
+| `source_method` | `String` | `"user_wikilink"` | How the relation was created |
+
+**Why now?** The graphify analysis and the planned tree-sitter code extraction
+(see [`futureplan.md §2.1`](../futureplan.md)) both produce relations with
+varying certainty (AST-extracted vs. LLM-inferred vs. user-authored). Adding
+the columns now — while every row has the same value — is trivially cheap and
+avoids a later breaking migration.
+
+**Current values in production:**
+
+- `confidence = 1.0` — all current relations are user-authored `[[wikilinks]]`,
+  which are ground truth.
+- `source_method = "user_wikilink"` — parsed from markdown by `EntityParser`.
+
+Future source methods: `"ai_extracted"` (future LLM pass),
+`"ast_extracted"` (future tree-sitter code extraction),
+`"manual_api"` (created via API without a wikilink).
+
+**Files touched:**
+[`src/memopad/models/knowledge.py`](../src/memopad/models/knowledge.py) —
+`Relation` model columns;
+[`src/memopad/schemas/base.py`](../src/memopad/schemas/base.py) —
+`Relation` schema with `ge=0, le=1` validation;
+[`src/memopad/schemas/response.py`](../src/memopad/schemas/response.py) —
+`RelationResponse` model validator copy-list extended;
+[`src/memopad/alembic/versions/h1b2c3d4e5f6_add_confidence_and_source_method_to_relation.py`](../src/memopad/alembic/versions/h1b2c3d4e5f6_add_confidence_and_source_method_to_relation.py) —
+migration (idempotent, backfills existing rows);
+[`tests/schemas/test_relation_confidence.py`](../tests/schemas/test_relation_confidence.py) —
+11 tests covering defaults, range validation, dict + ORM paths.
+
 ---
 
 ## 6. Repo hygiene

@@ -205,6 +205,19 @@ class Relation(Base):
     relation_type: Mapped[str] = mapped_column(String)
     context: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # Provenance / confidence metadata.
+    # confidence: 0.0–1.0 where 1.0 = certain (user-authored wikilink).
+    #   Reserved for future use when AI-extracted relations land; every
+    #   user-authored relation defaults to 1.0.
+    # source_method: how the relation was created:
+    #   "user_wikilink" — parsed from [[wikilink]] in markdown (current default)
+    #   "ai_extracted"  — future: LLM or AST extraction pass
+    #   "manual_api"    — future: created directly via the API without a wikilink
+    confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=1.0)
+    source_method: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True, default="user_wikilink"
+    )
+
     # Relationships
     from_entity = relationship(
         "Entity", foreign_keys=[from_id], back_populates="outgoing_relations"

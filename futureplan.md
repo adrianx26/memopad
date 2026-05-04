@@ -140,35 +140,104 @@ ongoing pain.
 
 ---
 
+### 2.2 Richer image + PDF ingestion via Claude vision
+
+#### Status: 💭 Proposed — not started
+
+#### What graphify does that we don't
+
+Graphify routes PDF files through two layers: `pypdf` for plain text (which we
+already do) and then the Claude vision API for semantic extraction — letting
+it identify figures, tables, diagrams, and multilingual text in scanned
+documents. Images are sent directly to Claude vision, which extracts
+structured knowledge (not just PIL metadata like `Format/Size/Mode`).
+
+#### What MemoPad currently does
+
+| Format | Current handling |
+|---|---|
+| PDF | `pypdf` text extraction only — garbled or empty on scanned / form PDFs |
+| JPG / PNG / WEBP / GIF / BMP | PIL metadata only (`Format`, `Size`, `Mode`) |
+| DOCX | `python-docx` paragraph text — good for prose, misses embedded images |
+| XLSX | `openpyxl` cell values — no chart extraction |
+
+#### What the upgrade would look like
+
+For PDFs and images passed to `assimilate`:
+1. Run existing extractor first (cheap, local).
+2. If the result is short / empty / binary-looking, fall back to Claude vision
+   (one API call per page/image, governed by a `vision=True` flag defaulting to
+   `False` to avoid surprise charges).
+3. Merge text and store as a richer note (still markdown, extra heading for the
+   vision-extracted section).
+
+**Packages needed:** `anthropic` (already available in the Claude environment;
+not a new dependency for the MemoPad install, but users running the MCP server
+outside Claude would need it). Alternatively use `httpx` to call the API
+directly with no new dependency.
+
+**Opt-in flag:** `assimilate(url=..., vision=False)` — off by default.
+
+#### Effort estimate
+
+- **Small–Medium (1–2 days):** the routing logic already exists; this is adding
+  a vision-fallback branch inside `FileProcessor.extract_text_content()` and
+  wiring `vision` through the call stack.
+
+#### When to do this
+
+When a user says "assimilate returned empty content from a PDF" or "the image
+notes are just metadata." One failing assimilation is the trigger.
+
+---
+
+### 2.3 Audio / video transcription (Whisper)
+
+#### Status: 💭 Proposed — not started (see §3.3 for why it was originally skipped)
+
+The original analysis (§3.3 below) noted that no user had asked for this.
+Graphify uses `faster-whisper` (local model, no API cost) + `yt-dlp` for
+YouTube URLs. The integration pattern is:
+
+1. Detect audio/video URL or file extension (`.mp3`, `.mp4`, `.wav`, `.m4a`,
+   `.webm`, `.mov`).
+2. Download to temp dir (or receive as bytes for a direct-download file).
+3. Run `WhisperModel.transcribe()` — returns timestamped segments.
+4. Store as a note with a transcript section.
+
+**Install surface:** `faster-whisper` is ~200 MB (model + deps). Gate behind
+`pip install 'memopad[transcription]'` extra (same opt-in shape as
+`[embeddings]`).
+
+**New `DIRECT_DOWNLOAD_EXTENSIONS`:** `.mp3`, `.mp4`, `.wav`, `.m4a`,
+`.webm`, `.mov` — already the only change needed in `config.py`.
+
+**Effort:** 1–2 days once the demand exists.
+
+#### When to do this
+
+When a user explicitly asks for voice-memo or video-lecture ingestion.
+
+---
+
 ## Tier 3 — Skip (duplicative or out of scope)
 
 These were considered and intentionally rejected during the graphify
 analysis. Recorded here so the rationale doesn't get re-litigated next time
 someone discovers graphify and asks "shouldn't we steal X?"
 
-### 3.1 Confidence tagging on relations (`EXTRACTED` / `INFERRED` / `AMBIGUOUS`)
+### 3.1 Confidence tagging on relations
 
-#### Why graphify has it
+#### Status: ✅ Implemented — see [plans/PLAN.md §5.4](plans/PLAN.md)
 
-graphify *generates* relations using LLMs — so it needs to mark which ones
-are AST-derived (high confidence) vs. inferred from comments (lower
-confidence) vs. ambiguous matches.
+The `relation` table now has `confidence` (Float, 0–1, default 1.0) and
+`source_method` (String, default `"user_wikilink"`). Every existing row has
+been backfilled via migration `h1b2c3d4e5f6`. The schema validates the
+0–1 range. `RelationResponse` exposes both fields in API responses.
 
-#### Why MemoPad doesn't need it
-
-MemoPad's relations come from user-written `[[wikilinks]]`. They are
-ground truth — there's no inferred-vs-extracted distinction to record. A
-confidence column would be dead weight: every row would have the same
-value.
-
-#### When this could change
-
-If we ever add an LLM-relation-extraction pass (e.g. "scan the corpus and
-suggest relations the user didn't write explicitly"), then this becomes
-necessary. Schema migration would add a `confidence` column to the
-`relation` table with a default of 1.0 for existing user-authored rows.
-
-#### Status: 💭 Revisit only if AI-generated relations land
+This was added proactively because the planned tree-sitter code extraction
+(§2.1) will produce relations with varying confidence, and adding the columns
+now is cheaper than a later breaking migration.
 
 ---
 
@@ -307,9 +376,11 @@ significant.
 | Item | Effort | Risk | User value | Decision |
 |---|---|---|---|---|
 | 2.1 Tree-sitter code extraction | L (3–5 days) | Medium (native deps, install size) | High (for codebase users) | **Defer until demand** |
-| 3.1 Confidence on relations | M (schema migration) | Low | Zero today (no AI extraction) | Skip |
+| 2.2 PDF / image vision (Claude API) | S–M (1–2 days) | Low (opt-in flag) | High (fixes blank PDFs) | **Defer until user reports blank PDF** |
+| 2.3 Audio/video transcription (Whisper) | M (heavy deps) | Medium (200 MB install) | Low until demand | **Defer until explicit request** |
+| 3.1 Confidence on relations | M (schema migration) | Low | Low today → needed for §2.1 | ✅ Done (migration h1b2c3d4e5f6) |
 | 3.2 vis.js viewer | M | Low | Low (duplicative) | Skip |
-| 3.3 Whisper | L (heavy deps) | Medium (bloat) | Zero (no use case) | Skip |
+| 3.3 Whisper | — | — | — | Moved to §2.3 above |
 | 3.4 Git hooks | S | Low | Low (duplicative) | Skip |
 | 3.5 SHA cache | — | — | — | Already done differently |
 | 3.6 Cross-platform installer | M | Low | Low | Skip — docs cover it |

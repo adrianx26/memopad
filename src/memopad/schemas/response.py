@@ -117,8 +117,8 @@ class RelationResponse(Relation, SQLAlchemyModel):
         # Build a dict from the model's attributes
         result = {}
 
-        # Copy base fields
-        for field in ["permalink", "relation_type", "context", "to_name"]:
+        # Copy base fields (include provenance columns added for confidence tagging)
+        for field in ["permalink", "relation_type", "context", "to_name", "confidence", "source_method"]:
             if hasattr(data, field):
                 result[field] = getattr(data, field)
 

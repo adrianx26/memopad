@@ -214,6 +214,11 @@ class Relation(BaseModel):
     to_id: Permalink
     relation_type: RelationType
     context: Optional[str] = None
+    # Provenance / confidence (see Relation model for value semantics).
+    # Both default to the "user-authored wikilink" baseline so existing callers
+    # that don't supply these fields still get sensible values.
+    confidence: Optional[float] = Field(default=1.0, ge=0.0, le=1.0)
+    source_method: Optional[str] = Field(default="user_wikilink")
 
 
 class Entity(BaseModel):
