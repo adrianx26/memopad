@@ -1,4 +1,4 @@
-﻿"""Service for search operations."""
+"""Service for search operations."""
 
 import ast
 import re
@@ -441,3 +441,74 @@ class SearchService:
                 await self.delete_by_permalink(permalink)
             else:
                 await self.delete_by_entity_id(entity.id)
+
+    async def hybrid_search(
+        self,
+        query_text: str,
+        mode: str,
+        limit: int,
+        session_maker,
+        project_id: int,
+    ) -> List[SearchIndexRow]:
+        """Perform semantic or hybrid search."""
+        if mode == "fts":
+            return await self.search(SearchQuery(text=query_text), limit=limit)
+
+        from memopad.services.embedding_service import EmbeddingService
+        embedding_service = EmbeddingService.maybe_create(session_maker, project_id)
+        if not embedding_service:
+            raise ValueError(
+                "Embeddings are disabled or not installed. "
+                "Set MEMOPAD_EMBEDDINGS_ENABLED=true and install memopad[embeddings]."
+            )
+
+        # 1. Get semantic hits
+        semantic_hits = await embedding_service.similar(query_text, limit=limit * 2)
+        semantic_ranking = [hit.entity_id for hit in semantic_hits]
+
+        # 2. Get FTS hits if mode is hybrid
+        fts_ranking = []
+        if mode == "hybrid":
+            fts_results = await self.search(SearchQuery(text=query_text), limit=limit * 2)
+            # Filter to just ENTITY results since embeddings currently only apply to entities
+            seen_entities = set()
+            for r in fts_results:
+                eid = r.entity_id or r.id  # Fallback to id if entity_id is not set
+                if eid and eid not in seen_entities:
+                    seen_entities.add(eid)
+                    fts_ranking.append(eid)
+
+        # 3. Fuse rankings
+        if mode == "hybrid":
+            # embedding_service.reciprocal_rank_fusion returns list of (entity_id, score) sorted desc
+            fused = EmbeddingService.reciprocal_rank_fusion([semantic_ranking, fts_ranking])
+        else:
+            fused = [(hit.entity_id, hit.score) for hit in semantic_hits]
+
+        top_fused = fused[:limit]
+        if not top_fused:
+            return []
+
+        # 4. Reconstruct SearchIndexRows
+        entity_ids = [eid for eid, _ in top_fused]
+        entities = await self.entity_repository.find_by_ids(entity_ids)
+        entity_map = {e.id: e for e in entities}
+
+        results = []
+        for eid, score in top_fused:
+            entity = entity_map.get(eid)
+            if entity:
+                row = SearchIndexRow(
+                    id=entity.id,
+                    type=SearchItemType.ENTITY.value,
+                    title=entity.title,
+                    permalink=entity.permalink,
+                    file_path=entity.file_path,
+                    entity_id=entity.id,
+                    project_id=entity.project_id,
+                    created_at=entity.created_at,
+                    updated_at=_mtime_to_datetime(entity),
+                )
+                row.score = score
+                results.append(row)
+        return results

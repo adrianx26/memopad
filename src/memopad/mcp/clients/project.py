@@ -1,4 +1,4 @@
-﻿"""Typed client for project API operations.
+"""Typed client for project API operations.
 
 Encapsulates project-level endpoints.
 """
@@ -9,6 +9,7 @@ from httpx import AsyncClient
 
 from memopad.mcp.tools.utils import call_get, call_post, call_delete
 from memopad.schemas.project_info import ProjectList, ProjectStatusResponse
+from memopad.schemas import SyncReportResponse
 
 
 class ProjectClient:
@@ -87,3 +88,23 @@ class ProjectClient:
             f"/v2/projects/{project_external_id}",
         )
         return ProjectStatusResponse.model_validate(response.json())
+
+    async def sync_project(self, project_external_id: str, force_full: bool = False) -> SyncReportResponse:
+        """Synchronize the project's filesystem to the database.
+
+        Args:
+            project_external_id: Project external ID (UUID)
+            force_full: Whether to force a full sync (ignoring timestamps)
+
+        Returns:
+            SyncReportResponse with synchronization statistics
+
+        Raises:
+            ToolError: If the request fails
+        """
+        response = await call_post(
+            self.http_client,
+            f"/v2/projects/{project_external_id}/sync",
+            params={"force_full": force_full},
+        )
+        return SyncReportResponse.model_validate(response.json())

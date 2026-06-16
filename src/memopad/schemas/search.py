@@ -1,4 +1,4 @@
-﻿"""Search schemas for Basic Memory.
+"""Search schemas for Basic Memory.
 
 The search system supports three primary modes:
 1. Exact permalink lookup
@@ -98,6 +98,14 @@ class SearchQuery(BaseModel):
         boolean_patterns = [" AND ", " OR ", " NOT ", "(", ")"]
         text = f" {self.text} "  # Add spaces to ensure we match word boundaries
         return any(pattern in text for pattern in boolean_patterns)
+
+
+class SemanticSearchQuery(BaseModel):
+    """Query parameters for semantic and hybrid search."""
+    
+    query: str
+    mode: str = "hybrid"  # "semantic", "hybrid", "fts"
+    limit: int = 10
 
 
 class SearchResult(BaseModel):

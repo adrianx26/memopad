@@ -86,23 +86,20 @@ async def semantic_search(
         search_client = SearchClient(client, active_project.external_id)
 
         if mode == "fts":
-            results = await search_client.search(query=query, limit=limit)
+            results_data = await search_client.search(query={"query": query}, page_size=limit)
             return add_project_metadata(
-                _format_results(query, mode, results), active_project.name
+                _format_results(query, mode, results_data.results), active_project.name
             )
 
-        # For semantic / hybrid we need to call back into the API layer for the
-        # vector lookup. Until that endpoint lands, surface a clear "wired but
-        # not yet end-to-end" message so the tool ships in a known state and
-        # callers know what's missing.
-        return (
-            "# Hybrid search foundation ready\n\n"
-            "The embedding service and MCP tool are wired in, but the API endpoint "
-            "for vector retrieval is not yet implemented. Track progress in the "
-            "merged plan document.\n\n"
-            "**Available now:** `mode=\"fts\"` works as a normal keyword search.\n"
-            "**Next step:** add `/v2/projects/{id}/search/semantic` and call it here."
-        )
+        # For semantic / hybrid we call the newly implemented semantic endpoint
+        try:
+            results_data = await search_client.semantic_search(query=query, mode=mode, limit=limit)
+            return add_project_metadata(
+                _format_results(query, mode, results_data.results), active_project.name
+            )
+        except Exception as e:
+            logger.error(f"Semantic search failed: {e}")
+            return f"# Error\n\nSemantic search failed: {e}"
 
 
 def _format_results(query: str, mode: str, results) -> str:

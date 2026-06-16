@@ -1,4 +1,4 @@
-﻿"""Typed client for search API operations.
+"""Typed client for search API operations.
 
 Encapsulates all /v2/projects/{project_id}/search/* endpoints.
 """
@@ -61,5 +61,31 @@ class SearchClient:
             f"{self._base_path}/",
             json=query,
             params={"page": page, "page_size": page_size},
+        )
+        return SearchResponse.model_validate(response.json())
+
+    async def semantic_search(
+        self,
+        query: str,
+        mode: str,
+        limit: int = 10,
+    ) -> SearchResponse:
+        """Search using semantic similarity or hybrid search.
+
+        Args:
+            query: Natural-language query string.
+            mode: Search mode ('semantic', 'hybrid', 'fts').
+            limit: Maximum results to return.
+
+        Returns:
+            SearchResponse with ranked results.
+
+        Raises:
+            ToolError: If the request fails (e.g. embeddings disabled).
+        """
+        response = await call_post(
+            self.http_client,
+            f"{self._base_path}/semantic",
+            json={"query": query, "mode": mode, "limit": limit},
         )
         return SearchResponse.model_validate(response.json())

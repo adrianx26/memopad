@@ -1,4 +1,4 @@
-﻿"""MCP tools for Memopad.
+"""MCP tools for Memopad.
 
 This package provides the complete set of tools for interacting with
 Basic Memory through the MCP protocol. Importing this module registers
@@ -28,13 +28,20 @@ from memopad.mcp.tools.optimize_storage import optimize_storage
 from memopad.mcp.tools.daily_note import daily_note
 from memopad.mcp.tools.backlinks import backlinks
 from memopad.mcp.tools.semantic_search import semantic_search
+from memopad.mcp.tools.batch_import import batch_import_directory
+from memopad.mcp.tools.auto_tag import auto_tag_note
+from memopad.mcp.tools.relation_extractor import extract_relations
+from memopad.mcp.tools.memory_summarizer import get_relevant_context
+from memopad.mcp.tools.sync import sync_project_files
 
 # ChatGPT-compatible tools
 from memopad.mcp.tools.chatgpt_tools import search, fetch
 
 __all__ = [
     "assimilate",
+    "auto_tag_note",
     "backlinks",
+    "batch_import_directory",
     "build_context",
     "canvas",
     "create_memory_project",
@@ -42,7 +49,9 @@ __all__ = [
     "delete_note",
     "delete_project",
     "edit_note",
+    "extract_relations",
     "fetch",
+    "get_relevant_context",
     "list_directory",
     "list_memory_projects",
     "move_note",
@@ -54,6 +63,7 @@ __all__ = [
     "search_by_metadata",
     "search_notes",
     "semantic_search",
+    "sync_project_files",
     "view_note",
     "write_note",
 ]
