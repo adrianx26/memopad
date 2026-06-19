@@ -14,7 +14,7 @@
 
 """Transaction tests."""
 
-from stoolap import Database, StoolapError
+from stoolap import Database
 import pytest
 
 

@@ -1,4 +1,4 @@
-﻿"""Knowledge graph models."""
+"""Knowledge graph models."""
 
 import uuid
 from datetime import datetime
@@ -6,6 +6,7 @@ from memopad.utils import ensure_timezone_aware
 from typing import Optional
 
 from sqlalchemy import (
+    Boolean,
     Integer,
     String,
     Text,
@@ -20,6 +21,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from memopad.models.base import Base
+from memopad.models.entity_alias import EntityAlias
 from memopad.utils import generate_permalink
 
 
@@ -111,6 +113,11 @@ class Entity(Base):
         foreign_keys="[Relation.to_id]",
         cascade="all, delete-orphan",
     )
+    aliases = relationship(
+        "EntityAlias",
+        back_populates="entity",
+        cascade="all, delete-orphan",
+    )
 
     @property
     def relations(self):
@@ -139,7 +146,13 @@ class Entity(Base):
 class Observation(Base):
     """An observation about an entity.
 
-    Observations are atomic facts or notes about an entity.
+    Observations are atomic facts or notes extracted from markdown. They are the
+    MemoPad equivalent of MemGraphRAG's Factual Layer, while the original markdown
+    file remains the source of truth.
+
+    The conflict/provenance fields are derived quality metadata. They help MCP
+    context tools surface possible contradictions and source grounding without
+    modifying the user's markdown files.
     """
 
     __tablename__ = "observation"
@@ -158,8 +171,29 @@ class Observation(Base):
         JSON, nullable=True, default=list, server_default="[]"
     )
 
+    # --- Conflict Detection (MemGraphRAG-inspired quality metadata) ---
+    # MemoPad stores conflict state in the derived index, not in markdown.
+    # conflict_score: 0.0–1.0; higher means more divergent from conflicting_observation
+    conflict_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # conflicting_obs_id: FK to the paired conflicting Observation (SET NULL on delete).
+    # This first-pass model supports one partner per observation; a join table is safer later.
+    conflicting_obs_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("observation.id", ondelete="SET NULL"), nullable=True
+    )
+    # conflict_resolved: True once a human or LLM has explicitly settled the conflict
+    conflict_resolved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # provenance_path: originating file_path for MemGraphRAG-style Passage Layer grounding
+    provenance_path: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
     # Relationships
     entity = relationship("Entity", back_populates="observations")
+    # Self-referential: points to the observation this one conflicts with
+    conflicting_observation = relationship(
+        "Observation",
+        foreign_keys=[conflicting_obs_id],
+        remote_side="Observation.id",
+        uselist=False,
+    )
 
     @property
     def permalink(self) -> str:

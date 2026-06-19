@@ -13,7 +13,6 @@ stoolap = pytest.importorskip("stoolap", reason="stoolap-python not installed")
 from memopad.repository.stoolap_schema import STOOLAP_DDL
 from memopad.repository.stoolap_entity_repository import (
     StoolapEntityRepository,
-    StoolapEntity,
 )
 
 

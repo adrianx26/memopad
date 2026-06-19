@@ -1,4 +1,4 @@
-﻿"""Schemas for memory context."""
+"""Schemas for memory context."""
 
 from datetime import datetime
 from typing import List, Optional, Annotated, Sequence, Literal, Union, Dict
@@ -180,9 +180,42 @@ class ObservationSummary(BaseModel):
         datetime, Field(json_schema_extra={"type": "string", "format": "date-time"})
     ]
 
+    # --- Conflict detection fields (MemGraphRAG-inspired quality metadata) ---
+    # These fields surface derived conflict state to MCP/API consumers.
+    # They do not modify markdown source files.
+    conflict_score: Optional[float] = None       # 0.0-1.0; present when conflict detected
+    conflicting_obs_id: Optional[int] = None     # partner observation ID
+    conflict_resolved: bool = False              # True when LLM/user has settled the conflict
+    provenance_path: Optional[str] = None        # originating markdown path for review
+
     @field_serializer("created_at")
     def serialize_created_at(self, dt: datetime) -> str:
         return dt.isoformat()
+
+
+class ObservationSchemaSummary(BaseModel):
+    """Canonical observation category schema."""
+
+    schema_id: int
+    project_id: int
+    name: str
+    aliases: list[str] = Field(default_factory=list)
+    frequency: int
+    status: str
+
+    @property
+    def is_rare(self) -> bool:
+        return self.status == "rare"
+
+
+class ConsolidationSuggestionSummary(BaseModel):
+    """Rare category consolidation suggestion for LLM review."""
+
+    schema_id: int
+    name: str
+    frequency: int
+    possible_duplicate_of: Optional[str] = None
+    confidence: str
 
 
 class MemoryMetadata(BaseModel):

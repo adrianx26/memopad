@@ -7,7 +7,7 @@ from fastmcp import Context
 
 from memopad.mcp.server import mcp
 from memopad.mcp.async_client import get_client
-from memopad.mcp.project_context import get_active_project, add_project_metadata
+from memopad.mcp.project_context import get_active_project
 
 
 @mcp.tool(

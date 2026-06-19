@@ -1,4 +1,4 @@
-﻿"""Service for managing entities in the database."""
+"""Service for managing entities in the database."""
 
 from datetime import datetime
 from pathlib import Path
@@ -22,8 +22,7 @@ from memopad.markdown.entity_parser import EntityParser, normalize_frontmatter_m
 from memopad.markdown.utils import entity_model_from_markdown, schema_to_markdown
 from memopad.models import Entity as EntityModel
 from memopad.models import Observation, Relation
-from memopad.models.knowledge import Entity
-from memopad.repository import ObservationRepository, RelationRepository
+from memopad.repository import EntityAliasRepository, ObservationRepository, RelationRepository
 from memopad.repository.entity_repository import EntityRepository
 from memopad.schemas import Entity as EntitySchema
 from memopad.schemas.base import Permalink
@@ -34,8 +33,10 @@ from memopad.schemas.response import (
     DirectoryDeleteError,
 )
 from memopad.services import BaseService, FileService
+from memopad.services.conflict_service import ConflictService
 from memopad.services.exceptions import EntityCreationError, EntityNotFoundError
 from memopad.services.link_resolver import LinkResolver
+from memopad.services.schema_service import SchemaService
 from memopad.services.search_service import SearchService
 from memopad.utils import generate_permalink
 
@@ -58,7 +59,15 @@ class CacheProtocol(Protocol[K, V]):
 
 
 class EntityService(BaseService[EntityModel]):
-    """Service for managing entities in the database."""
+    """Service for managing entities in the database.
+
+    EntityService is the main MemoPad indexing path from markdown files into the
+    derived knowledge graph. MemGraphRAG-inspired quality features are applied here
+    as derived metadata only:
+    - schema normalization affects indexed observations, not source markdown
+    - conflict flags are surfaced for review, not auto-resolved
+    - frontmatter aliases improve link resolution without entity merging
+    """
 
     def __init__(
         self,
@@ -71,6 +80,9 @@ class EntityService(BaseService[EntityModel]):
         search_service: Optional[SearchService] = None,
         app_config: Optional[MemoPadConfig] = None,
         permalink_cache: Optional[CacheProtocol[str, str]] = None,
+        conflict_service: Optional[ConflictService] = None,
+        schema_service: Optional[SchemaService] = None,
+        alias_repository: Optional[EntityAliasRepository] = None,
     ):
         super().__init__(entity_repository)
         self.observation_repository = observation_repository
@@ -80,6 +92,9 @@ class EntityService(BaseService[EntityModel]):
         self.link_resolver = link_resolver
         self.search_service = search_service
         self.app_config = app_config
+        self.conflict_service = conflict_service
+        self.schema_service = schema_service
+        self.alias_repository = alias_repository
 
         # Phase 2 Optimization #5: 2Q cache for scan resistance
         # Use injected cache or create default with configurable size
@@ -694,6 +709,19 @@ class EntityService(BaseService[EntityModel]):
         # Clear observations for entity
         await self.observation_repository.delete_by_fields(entity_id=db_entity.id)
 
+        # --- Schema Normalisation (MemGraphRAG noise gate) ---
+        # Trigger: SchemaService is wired (opt-in at composition root)
+        # Why: normalise free-form LLM category strings to canonical names before
+        #      storing, keeping the observation vocabulary consistent
+        # Outcome: "Status" → "status"; new categories registered with freq=1
+        # Constraint: this mutates only the derived Observation objects. The source
+        #             markdown file remains unchanged and authoritative.
+        obs_list = list(markdown.observations)
+        if self.schema_service:
+            for obs in obs_list:
+                if obs.category:
+                    obs.category = await self.schema_service.normalize_category(obs.category)
+
         # add new observations
         observations = [
             Observation(
@@ -703,10 +731,27 @@ class EntityService(BaseService[EntityModel]):
                 category=obs.category,
                 context=obs.context,
                 tags=obs.tags,
+                # Grounding: record the originating file so conflict handler
+                # can trace back to the source passage (MemGraphRAG Passage Layer)
+                # The markdown file remains source of truth; this is derived index metadata.
+                provenance_path=file_path.as_posix(),
             )
             for obs in markdown.observations
         ]
-        await self.observation_repository.add_all(observations)
+        saved_observations = await self.observation_repository.add_all(observations)
+
+        # --- Conflict Detection (MemGraphRAG-inspired) ---
+        # Trigger: entity has observations; newly written content may contradict existing data
+        # Why: catch diverging facts in the same category before they corrupt LLM context
+        # Outcome: conflicting pairs flagged with conflict_score; surfaced via read_note/build_context
+        # Recommendation: future hardening should prefer explicit conflict markers and
+        #                 conservative possible-conflict hints to reduce false positives.
+        if self.conflict_service and saved_observations:
+            await self.conflict_service.detect_and_mark(
+                entity_id=db_entity.id,
+                new_observations=list(saved_observations),
+                provenance_path=file_path.as_posix(),
+            )
 
         # update values from markdown
         db_entity = entity_model_from_markdown(file_path, markdown, db_entity)
@@ -732,6 +777,22 @@ class EntityService(BaseService[EntityModel]):
             created = await self.create_entity_from_markdown(file_path, markdown)
         else:
             created = await self.update_entity_and_observations(file_path, markdown)
+
+        if self.alias_repository:
+            # Sync explicit frontmatter aliases after the entity exists.
+            # Trigger: markdown contains aliases: or aliases were removed.
+            # Why: support MemoPad-native alias resolution without merging entities.
+            # Outcome: LinkResolver can resolve exact alias WikiLinks such as [[Newton]].
+            raw_aliases = markdown.frontmatter.metadata.get("aliases", [])
+            if raw_aliases:
+                await self.alias_repository.upsert_aliases(
+                    entity_id=created.id,
+                    aliases=raw_aliases,
+                    source="frontmatter",
+                )
+            else:
+                await self.alias_repository.delete_by_entity(created.id)
+
         return await self.update_entity_relations(created.file_path, markdown)
 
     async def update_entity_relations(

@@ -3,14 +3,13 @@
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, Literal, Optional, List, Tuple
 from enum import Enum
 
 from loguru import logger
-from pydantic import BaseModel, Field, model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from memopad.utils import setup_logging, generate_permalink
@@ -163,6 +162,23 @@ class MemoPadConfig(BaseSettings):
         default=DEFAULT_PERMALINK_CACHE_SIZE,
         description="Size of the permalink cache for faster entity lookups. Larger values improve performance for large projects but use more memory. Default 1000.",
         gt=0,
+    )
+
+    # Context ranking configuration
+    hub_penalty_enabled: bool = Field(
+        default=True,
+        description="Whether hub-aware inverse-degree scoring is applied to context results.",
+    )
+    hub_penalty_weight: float = Field(
+        default=0.5,
+        description="Depth weight used by hub-aware context scoring. 0.5 preserves the original depth penalty balance.",
+        ge=0.0,
+        le=1.0,
+    )
+    hub_degree_threshold: int = Field(
+        default=0,
+        description="Relation degree threshold below which entities are not penalized as hubs.",
+        ge=0,
     )
 
     skip_initialization_sync: bool = Field(

@@ -5,7 +5,6 @@ import pytest
 from memopad.mcp.tools.assimilate.config import DEFAULT_CONFIG
 from memopad.mcp.tools.assimilate.content_detector import detect_content_type
 from memopad.mcp.tools.assimilate.html_utils import (
-    HTMLToText,
     LinkExtractor,
     categorize_links,
     extract_links,

@@ -37,7 +37,7 @@ if os.name == "nt":  # Windows-specific fix
     class _FakeWinloop:
         """Fake module that raises ImportError for any attribute access."""
         def __getattr__(self, name):
-            raise ImportError(f"winloop is disabled on this system due to stdio compatibility issues")
+            raise ImportError("winloop is disabled on this system due to stdio compatibility issues")
     
     # Install the fake module before anyio can import the real one
     sys.modules["winloop"] = _FakeWinloop()

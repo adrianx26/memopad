@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 from loguru import logger
 
 from memopad.models import Entity
+from memopad.repository.entity_alias_repository import EntityAliasRepository
 from memopad.repository.entity_repository import EntityRepository
 from memopad.schemas.search import SearchQuery, SearchItemType
 from memopad.services.search_service import SearchService
@@ -17,15 +18,25 @@ class LinkResolver:
     Uses a combination of exact matching and search-based resolution:
     1. Try exact permalink match (fastest)
     2. Try exact title match
-    3. Try exact file path match
-    4. Try file path with .md extension (for folder/title patterns)
-    5. Fall back to search for fuzzy matching
+    3. Try explicit frontmatter alias match (MemoPad-native entity alias layer)
+    4. Try exact file path match
+    5. Try file path with .md extension (for folder/title patterns)
+    6. Fall back to search for fuzzy matching when strict mode is disabled
+
+    Alias resolution is intentionally exact and conservative. MemoPad stores user-authored
+    frontmatter aliases but does not invent aliases or merge entities automatically.
     """
 
-    def __init__(self, entity_repository: EntityRepository, search_service: SearchService):
+    def __init__(
+        self,
+        entity_repository: EntityRepository,
+        search_service: SearchService,
+        alias_repository: EntityAliasRepository | None = None,
+    ):
         """Initialize with repositories."""
         self.entity_repository = entity_repository
         self.search_service = search_service
+        self.alias_repository = alias_repository
 
     async def resolve_link(
         self,
@@ -116,6 +127,18 @@ class LinkResolver:
             entity = found[0]
             logger.debug(f"Found title match: {entity.title}")
             return entity
+
+        # 2.5 Try explicit frontmatter alias match before path fallback.
+        # Trigger: permalink/title resolution failed and alias repository is wired.
+        # Why: support user-authored aliases such as [[Newton]] -> Isaac Newton without fuzzy guessing.
+        # Outcome: exact alias matches resolve before path and search fallbacks.
+        if self.alias_repository:
+            alias_match = await self.alias_repository.find_by_alias(clean_text)
+            if alias_match:
+                entity = await self.entity_repository.get_by_id(alias_match.entity_id)
+                if entity:
+                    logger.debug(f"Found alias match: {entity.title} via {clean_text}")
+                    return entity
 
         # 3. Try file path
         found_path = await self.entity_repository.get_by_file_path(clean_text)

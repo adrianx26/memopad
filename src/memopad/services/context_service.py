@@ -1,8 +1,10 @@
-﻿"""Service for building rich context from the knowledge graph."""
+"""Service for building rich context from the knowledge graph."""
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
+
+import math
 
 
 from loguru import logger
@@ -15,6 +17,7 @@ from memopad.repository.search_repository import SearchRepository, SearchIndexRo
 from memopad.schemas.memory import MemoryUrl, memory_url_path
 from memopad.schemas.search import SearchItemType
 from memopad.utils import generate_permalink
+from memopad.config import MemoPadConfig
 
 
 @dataclass
@@ -33,6 +36,12 @@ class ContextResultRow:
     content: Optional[str] = None
     category: Optional[str] = None
     entity_id: Optional[int] = None
+    # Conflict detection fields (MemGraphRAG-inspired)
+    conflict_score: Optional[float] = None
+    conflicting_obs_id: Optional[int] = None
+    conflict_resolved: bool = False
+    provenance_path: Optional[str] = None
+    relevance_score: float = 0.0
 
 
 @dataclass
@@ -74,6 +83,10 @@ class ContextService:
     1. Direct permalink lookup - exact match on path
     2. Pattern matching - using * wildcards
     3. Special modes via params (e.g., 'related')
+
+    The optional hub-aware post-processing step adapts MemGraphRAG's retrieval idea:
+    highly connected entities are down-weighted so specific, information-dense notes
+    are less likely to be buried by generic hub nodes.
     """
 
     def __init__(
@@ -81,10 +94,17 @@ class ContextService:
         search_repository: SearchRepository,
         entity_repository: EntityRepository,
         observation_repository: ObservationRepository,
+        app_config: MemoPadConfig | None = None,
     ):
         self.search_repository = search_repository
         self.entity_repository = entity_repository
         self.observation_repository = observation_repository
+        self.app_config = app_config
+        self.hub_penalty_enabled = (
+            app_config.hub_penalty_enabled if app_config else True
+        )
+        self.hub_penalty_weight = app_config.hub_penalty_weight if app_config else 0.5
+        self.hub_degree_threshold = app_config.hub_degree_threshold if app_config else 0
 
     async def build_context(
         self,
@@ -200,7 +220,12 @@ class ContextService:
                             entity_id=primary_item.id,
                             depth=0,
                             root_id=primary_item.id,
-                            created_at=primary_item.created_at,  # created_at time from entity
+                            created_at=primary_item.created_at,
+                            # --- Conflict fields ---
+                            conflict_score=obs.conflict_score,
+                            conflicting_obs_id=obs.conflicting_obs_id,
+                            conflict_resolved=obs.conflict_resolved,
+                            provenance_path=obs.provenance_path,
                         )
                     )
 
@@ -339,7 +364,73 @@ class ContextService:
             )
             for row in rows
         ]
+        if context_rows:
+            entity_ids = [row.id for row in context_rows if row.type == "entity"]
+            if entity_ids:
+                degrees = await self._fetch_entity_degrees(entity_ids)
+                context_rows = self._apply_hub_penalty(context_rows, degrees)
         return context_rows
+
+    async def _fetch_entity_degrees(self, entity_ids: list[int]) -> dict[int, int]:
+        """Return total incoming plus outgoing relation counts for entities.
+
+        Trigger: hub-aware scoring is requested after BFS context traversal.
+        Why: relation degree is a lightweight proxy for hub/generic-node risk.
+        Outcome: high-degree entities can be down-weighted during final ranking.
+        """
+        if not entity_ids:
+            return {}
+
+        query = text("""
+            SELECT entity_id, COUNT(*) AS degree
+            FROM (
+                SELECT from_id AS entity_id
+                FROM relation
+                WHERE from_id IN :entity_ids
+                  AND project_id = :project_id
+                UNION ALL
+                SELECT to_id AS entity_id
+                FROM relation
+                WHERE to_id IN :entity_ids
+                  AND project_id = :project_id
+            ) AS relation_degrees
+            GROUP BY entity_id
+        """)
+        result = await self.search_repository.execute_query(
+            query,
+            params={"entity_ids": tuple(entity_ids), "project_id": self.search_repository.project_id},
+        )
+        return {row.entity_id: row.degree for row in result.all()}
+
+    def _apply_hub_penalty(
+        self,
+        rows: list[ContextResultRow],
+        degrees: dict[int, int],
+        depth_weight: float = 0.5,
+    ) -> list[ContextResultRow]:
+        """Re-rank context rows by depth and inverse relation degree.
+
+        Trigger: context traversal returns related entity rows.
+        Why: generic hub nodes with many relations often add less specific value than
+             rare leaf nodes, so inverse-degree scoring reduces hub dominance.
+        Outcome: rows are sorted by combined depth and hub-aware relevance score.
+        """
+        for row in rows:
+            depth_penalty = 1.0 / (row.depth + 1)
+            if not self.hub_penalty_enabled:
+                row.relevance_score = depth_penalty ** self.hub_penalty_weight
+                continue
+
+            degree = degrees.get(row.id, 0)
+            if degree <= self.hub_degree_threshold:
+                row.relevance_score = depth_penalty ** self.hub_penalty_weight
+                continue
+
+            effective_degree = degree - self.hub_degree_threshold
+            hub_penalty = 1.0 / math.sqrt(effective_degree + 1)
+            row.relevance_score = (depth_penalty ** self.hub_penalty_weight) * hub_penalty
+
+        return sorted(rows, key=lambda row: row.relevance_score, reverse=True)
 
     def _build_postgres_query(  # pragma: no cover
         self,

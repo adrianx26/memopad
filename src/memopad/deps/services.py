@@ -1,4 +1,4 @@
-﻿"""Service dependency injection for memopad.
+"""Service dependency injection for memopad.
 
 This module provides service-layer dependencies:
 - EntityParser, MarkdownProcessor
@@ -24,6 +24,9 @@ from memopad.deps.repositories import (
     EntityRepositoryDep,
     EntityRepositoryV2Dep,
     EntityRepositoryV2ExternalDep,
+    EntityAliasRepositoryDep,
+    EntityAliasRepositoryV2Dep,
+    EntityAliasRepositoryV2ExternalDep,
     ObservationRepositoryDep,
     ObservationRepositoryV2Dep,
     ObservationRepositoryV2ExternalDep,
@@ -33,6 +36,7 @@ from memopad.deps.repositories import (
     SearchRepositoryDep,
     SearchRepositoryV2Dep,
     SearchRepositoryV2ExternalDep,
+    ObservationSchemaRepositoryDep,
 )
 from memopad.markdown import EntityParser
 from memopad.markdown.markdown_processor import MarkdownProcessor
@@ -42,6 +46,8 @@ from memopad.services.directory_service import DirectoryService
 from memopad.services.file_service import FileService
 from memopad.services.link_resolver import LinkResolver
 from memopad.services.search_service import SearchService
+from memopad.services.conflict_service import ConflictService
+from memopad.services.schema_service import SchemaService
 from memopad.sync import SyncService
 
 # --- Entity Parser ---
@@ -193,30 +199,104 @@ SearchServiceV2ExternalDep = Annotated[SearchService, Depends(get_search_service
 
 
 async def get_link_resolver(
-    entity_repository: EntityRepositoryDep, search_service: SearchServiceDep
+    entity_repository: EntityRepositoryDep,
+    search_service: SearchServiceDep,
+    alias_repository: EntityAliasRepositoryDep,
 ) -> LinkResolver:
-    return LinkResolver(entity_repository=entity_repository, search_service=search_service)
+    return LinkResolver(
+        entity_repository=entity_repository,
+        search_service=search_service,
+        alias_repository=alias_repository,
+    )
 
 
 LinkResolverDep = Annotated[LinkResolver, Depends(get_link_resolver)]
 
 
 async def get_link_resolver_v2(  # pragma: no cover
-    entity_repository: EntityRepositoryV2Dep, search_service: SearchServiceV2Dep
+    entity_repository: EntityRepositoryV2Dep,
+    search_service: SearchServiceV2Dep,
+    alias_repository: EntityAliasRepositoryV2Dep,
 ) -> LinkResolver:
-    return LinkResolver(entity_repository=entity_repository, search_service=search_service)
+    return LinkResolver(
+        entity_repository=entity_repository,
+        search_service=search_service,
+        alias_repository=alias_repository,
+    )
 
 
 LinkResolverV2Dep = Annotated[LinkResolver, Depends(get_link_resolver_v2)]
 
 
 async def get_link_resolver_v2_external(
-    entity_repository: EntityRepositoryV2ExternalDep, search_service: SearchServiceV2ExternalDep
+    entity_repository: EntityRepositoryV2ExternalDep,
+    search_service: SearchServiceV2ExternalDep,
+    alias_repository: EntityAliasRepositoryV2ExternalDep,
 ) -> LinkResolver:
-    return LinkResolver(entity_repository=entity_repository, search_service=search_service)
+    return LinkResolver(
+        entity_repository=entity_repository,
+        search_service=search_service,
+        alias_repository=alias_repository,
+    )
 
 
 LinkResolverV2ExternalDep = Annotated[LinkResolver, Depends(get_link_resolver_v2_external)]
+
+
+# --- Conflict Service ---
+
+
+async def get_conflict_service(
+    observation_repository: ObservationRepositoryDep,
+) -> ConflictService:
+    return ConflictService(observation_repository)
+
+
+async def get_schema_service(
+    observation_schema_repository: ObservationSchemaRepositoryDep,
+) -> SchemaService:
+    return SchemaService(observation_schema_repository)
+
+
+SchemaServiceDep = Annotated[SchemaService, Depends(get_schema_service)]
+
+
+async def get_schema_service_v2(  # pragma: no cover
+    observation_schema_repository: ObservationSchemaRepositoryV2Dep,
+) -> SchemaService:
+    return SchemaService(observation_schema_repository)
+
+
+SchemaServiceV2Dep = Annotated[SchemaService, Depends(get_schema_service_v2)]
+
+
+async def get_schema_service_v2_external(
+    observation_schema_repository: ObservationSchemaRepositoryV2ExternalDep,
+) -> SchemaService:
+    return SchemaService(observation_schema_repository)
+
+
+SchemaServiceV2ExternalDep = Annotated[SchemaService, Depends(get_schema_service_v2_external)]
+
+
+async def get_conflict_service_v2(  # pragma: no cover
+    observation_repository: ObservationRepositoryV2Dep,
+) -> ConflictService:
+    return ConflictService(observation_repository)
+
+
+ConflictServiceV2Dep = Annotated[ConflictService, Depends(get_conflict_service_v2)]
+
+
+async def get_conflict_service_v2_external(
+    observation_repository: ObservationRepositoryV2ExternalDep,
+) -> ConflictService:
+    return ConflictService(observation_repository)
+
+
+ConflictServiceV2ExternalDep = Annotated[
+    ConflictService, Depends(get_conflict_service_v2_external)
+]
 
 
 # --- Entity Service ---
@@ -231,6 +311,9 @@ async def get_entity_service(
     link_resolver: LinkResolverDep,
     search_service: SearchServiceDep,
     app_config: AppConfigDep,
+    conflict_service: ConflictServiceDep,
+    schema_service: SchemaServiceDep,
+    alias_repository: EntityAliasRepositoryDep,
 ) -> EntityService:
     """Create EntityService with repository."""
     return EntityService(
@@ -242,6 +325,9 @@ async def get_entity_service(
         link_resolver=link_resolver,
         search_service=search_service,
         app_config=app_config,
+        conflict_service=conflict_service,
+        schema_service=schema_service,
+        alias_repository=alias_repository,
     )
 
 
@@ -257,6 +343,9 @@ async def get_entity_service_v2(  # pragma: no cover
     link_resolver: LinkResolverV2Dep,
     search_service: SearchServiceV2Dep,
     app_config: AppConfigDep,
+    conflict_service: ConflictServiceV2Dep,
+    schema_service: SchemaServiceV2Dep,
+    alias_repository: EntityAliasRepositoryV2Dep,
 ) -> EntityService:
     """Create EntityService for v2 API."""
     return EntityService(
@@ -268,6 +357,9 @@ async def get_entity_service_v2(  # pragma: no cover
         link_resolver=link_resolver,
         search_service=search_service,
         app_config=app_config,
+        conflict_service=conflict_service,
+        schema_service=schema_service,
+        alias_repository=alias_repository,
     )
 
 
@@ -283,6 +375,9 @@ async def get_entity_service_v2_external(
     link_resolver: LinkResolverV2ExternalDep,
     search_service: SearchServiceV2ExternalDep,
     app_config: AppConfigDep,
+    conflict_service: ConflictServiceV2ExternalDep,
+    schema_service: SchemaServiceV2ExternalDep,
+    alias_repository: EntityAliasRepositoryV2ExternalDep,
 ) -> EntityService:
     """Create EntityService for v2 API (uses external_id)."""
     return EntityService(
@@ -294,6 +389,9 @@ async def get_entity_service_v2_external(
         link_resolver=link_resolver,
         search_service=search_service,
         app_config=app_config,
+        conflict_service=conflict_service,
+        schema_service=schema_service,
+        alias_repository=alias_repository,
     )
 
 

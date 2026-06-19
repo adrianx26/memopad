@@ -9,17 +9,70 @@ from typing import Annotated, Optional
 from fastapi import APIRouter, Query, Path
 from loguru import logger
 
-from memopad.deps import ContextServiceV2ExternalDep, EntityRepositoryV2ExternalDep
-from memopad.schemas.base import TimeFrame, parse_timeframe
+from memopad.deps import ContextServiceV2ExternalDep, EntityRepositoryV2ExternalDep, SchemaServiceV2ExternalDep
 from memopad.schemas.memory import (
+    ConsolidationSuggestionSummary,
     GraphContext,
+    ObservationSchemaSummary,
     normalize_memory_url,
 )
 from memopad.schemas.search import SearchItemType
+from memopad.schemas.base import TimeFrame, parse_timeframe
 from memopad.api.v2.utils import to_graph_context
 
 # Note: No prefix here - it's added during registration as /v2/{project_id}/memory
 router = APIRouter(tags=["memory"])
+
+
+@router.get("/memory/observation-schemas", response_model=list[ObservationSchemaSummary])
+async def list_observation_schemas(
+    schema_service: SchemaServiceV2ExternalDep,
+    project_id: str = Path(..., description="Project external UUID"),
+) -> list[ObservationSchemaSummary]:
+    """List canonical observation categories for the current project.
+
+    This endpoint exposes MemoPad's lightweight Schema Layer. It is intended to help
+    LLMs and users see category vocabulary, aliases, frequency, and rare/noisy
+    categories before writing or pruning observations.
+    """
+    schemas = await schema_service.get_schemas()
+    return [
+        ObservationSchemaSummary(
+            schema_id=schema.id,
+            project_id=schema.project_id,
+            name=schema.name,
+            aliases=schema.aliases or [],
+            frequency=schema.frequency,
+            status="rare" if schema.frequency == 1 else "stable",
+        )
+        for schema in schemas
+    ]
+
+
+@router.get(
+    "/memory/observation-schemas/consolidation-suggestions",
+    response_model=list[ConsolidationSuggestionSummary],
+)
+async def list_observation_schema_consolidation_suggestions(
+    schema_service: SchemaServiceV2ExternalDep,
+    project_id: str = Path(..., description="Project external UUID"),
+) -> list[ConsolidationSuggestionSummary]:
+    """List rare category consolidation suggestions.
+
+    Suggestions are review hints only. MemoPad never rewrites markdown or renames
+    categories automatically; humans and LLMs decide whether to consolidate.
+    """
+    suggestions = await schema_service.suggest_consolidation()
+    return [
+        ConsolidationSuggestionSummary(
+            schema_id=suggestion.schema_id,
+            name=suggestion.name,
+            frequency=suggestion.frequency,
+            possible_duplicate_of=suggestion.possible_duplicate_of,
+            confidence="high" if suggestion.possible_duplicate_of else "low",
+        )
+        for suggestion in suggestions
+    ]
 
 
 @router.get("/memory/recent", response_model=GraphContext)

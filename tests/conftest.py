@@ -31,6 +31,8 @@ from memopad.models.knowledge import Entity
 from memopad.models.project import Project
 from memopad.repository.entity_repository import EntityRepository
 from memopad.repository.observation_repository import ObservationRepository
+from memopad.repository.observation_schema_repository import ObservationSchemaRepository
+from memopad.repository.entity_alias_repository import EntityAliasRepository
 from memopad.repository.project_repository import ProjectRepository
 from memopad.repository.relation_repository import RelationRepository
 from memopad.schemas.base import Entity as EntitySchema
@@ -38,6 +40,8 @@ from memopad.services import (
     EntityService,
     ProjectService,
 )
+from memopad.services.conflict_service import ConflictService
+from memopad.services.schema_service import SchemaService
 from memopad.services.directory_service import DirectoryService
 from memopad.services.file_service import FileService
 from memopad.services.link_resolver import LinkResolver
@@ -300,6 +304,22 @@ async def observation_repository(
 
 
 @pytest_asyncio.fixture(scope="function")
+async def observation_schema_repository(
+    session_maker: async_sessionmaker[AsyncSession], test_project: Project
+) -> ObservationSchemaRepository:
+    """Create an ObservationSchemaRepository instance with project context."""
+    return ObservationSchemaRepository(session_maker, project_id=test_project.id)
+
+
+@pytest_asyncio.fixture(scope="function")
+async def entity_alias_repository(
+    session_maker: async_sessionmaker[AsyncSession], test_project: Project
+) -> EntityAliasRepository:
+    """Create an EntityAliasRepository instance with project context."""
+    return EntityAliasRepository(session_maker, project_id=test_project.id)
+
+
+@pytest_asyncio.fixture(scope="function")
 async def relation_repository(
     session_maker: async_sessionmaker[AsyncSession], test_project: Project
 ) -> RelationRepository:
@@ -338,6 +358,8 @@ async def test_project(config_home, engine_factory) -> Project:
 async def entity_service(
     entity_repository: EntityRepository,
     observation_repository: ObservationRepository,
+    observation_schema_repository: ObservationSchemaRepository,
+    entity_alias_repository: EntityAliasRepository,
     relation_repository: RelationRepository,
     entity_parser: EntityParser,
     file_service: FileService,
@@ -371,9 +393,9 @@ def markdown_processor(entity_parser: EntityParser) -> MarkdownProcessor:
 
 
 @pytest.fixture
-def link_resolver(entity_repository: EntityRepository, search_service: SearchService):
+def link_resolver(entity_repository: EntityRepository, search_service: SearchService, entity_alias_repository: EntityAliasRepository):
     """Create parser instance."""
-    return LinkResolver(entity_repository, search_service)
+    return LinkResolver(entity_repository, search_service, entity_alias_repository)
 
 
 @pytest.fixture
@@ -401,8 +423,12 @@ async def sync_service(
         entity_repository=entity_repository,
         relation_repository=relation_repository,
         entity_parser=entity_parser,
-        search_service=search_service,
         file_service=file_service,
+        link_resolver=link_resolver,
+        app_config=app_config,
+        conflict_service=ConflictService(observation_repository),
+        schema_service=SchemaService(observation_schema_repository),
+        alias_repository=entity_alias_repository,
     )
 
 

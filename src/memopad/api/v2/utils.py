@@ -1,4 +1,4 @@
-﻿from typing import Optional, List
+from typing import Optional, List
 
 from memopad.repository import EntityRepository
 from memopad.repository.search_repository import SearchIndexRow
@@ -81,6 +81,13 @@ async def to_graph_context(
                     content=item.content,  # pyright: ignore
                     permalink=item.permalink,  # pyright: ignore
                     created_at=item.created_at,
+                    # Conflict fields — populated when observation has diverging sibling.
+                    # ContextResultRow always defines these fields; keep direct access
+                    # instead of speculative getattr to satisfy MemoPad code quality rules.
+                    conflict_score=item.conflict_score,
+                    conflicting_obs_id=item.conflicting_obs_id,
+                    conflict_resolved=item.conflict_resolved,
+                    provenance_path=item.provenance_path,
                 )
             case SearchItemType.RELATION:
                 from_title = entity_title_lookup.get(item.from_id) if item.from_id else None  # pyright: ignore

@@ -17,6 +17,8 @@ from memopad.mcp.tools.write_note import write_note
 from memopad.mcp.tools.search import search_notes, search_by_metadata
 from memopad.mcp.tools.canvas import canvas
 from memopad.mcp.tools.list_directory import list_directory
+from memopad.mcp.tools.list_observation_schemas import list_observation_schemas
+from memopad.mcp.tools.list_observation_schema_suggestions import list_observation_schema_suggestions
 from memopad.mcp.tools.edit_note import edit_note
 from memopad.mcp.tools.move_note import move_note
 from memopad.mcp.tools.project_management import (
@@ -54,6 +56,8 @@ __all__ = [
     "get_relevant_context",
     "list_directory",
     "list_memory_projects",
+    "list_observation_schema_suggestions",
+    "list_observation_schemas",
     "move_note",
     "optimize_storage",
     "read_content",

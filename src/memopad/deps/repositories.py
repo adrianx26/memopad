@@ -1,4 +1,4 @@
-﻿"""Repository dependency injection for memopad.
+"""Repository dependency injection for memopad.
 
 This module provides repository dependencies:
 - EntityRepository
@@ -9,7 +9,7 @@ This module provides repository dependencies:
 Each repository is scoped to a project ID from the request.
 """
 
-from typing import Annotated, Union
+from typing import Annotated
 
 from fastapi import Depends
 
@@ -20,8 +20,10 @@ from memopad.deps.projects import (
     ProjectIdPathDep,
     ProjectExternalIdPathDep,
 )
+from memopad.repository.entity_alias_repository import EntityAliasRepository
 from memopad.repository.entity_repository import EntityRepository
 from memopad.repository.observation_repository import ObservationRepository
+from memopad.repository.observation_schema_repository import ObservationSchemaRepository
 from memopad.repository.relation_repository import RelationRepository
 from memopad.repository.search_repository import SearchRepository, create_search_repository
 
@@ -83,6 +85,48 @@ EntityRepositoryV2ExternalDep = Annotated[
 ]
 
 
+# --- Entity Alias Repository ---
+
+
+async def get_entity_alias_repository(
+    session_maker: SessionMakerDep,
+    project_id: ProjectIdDep,
+) -> EntityAliasRepository:
+    """Create an EntityAliasRepository instance for the current project."""
+    return EntityAliasRepository(session_maker, project_id=project_id)
+
+
+EntityAliasRepositoryDep = Annotated[
+    EntityAliasRepository, Depends(get_entity_alias_repository)
+]
+
+
+async def get_entity_alias_repository_v2(  # pragma: no cover
+    session_maker: SessionMakerDep,
+    project_id: ProjectIdPathDep,
+) -> EntityAliasRepository:
+    """Create an EntityAliasRepository instance for v2 API."""
+    return EntityAliasRepository(session_maker, project_id=project_id)
+
+
+EntityAliasRepositoryV2Dep = Annotated[
+    EntityAliasRepository, Depends(get_entity_alias_repository_v2)
+]
+
+
+async def get_entity_alias_repository_v2_external(
+    session_maker: SessionMakerDep,
+    project_id: ProjectExternalIdPathDep,
+) -> EntityAliasRepository:
+    """Create an EntityAliasRepository instance for v2 API (uses external_id)."""
+    return EntityAliasRepository(session_maker, project_id=project_id)
+
+
+EntityAliasRepositoryV2ExternalDep = Annotated[
+    EntityAliasRepository, Depends(get_entity_alias_repository_v2_external)
+]
+
+
 # --- Observation Repository ---
 
 
@@ -122,6 +166,39 @@ ObservationRepositoryV2ExternalDep = Annotated[
     ObservationRepository, Depends(get_observation_repository_v2_external)
 ]
 
+
+# --- Observation Schema Repository ---
+
+async def get_observation_schema_repository(
+    session_maker: SessionMakerDep,
+    project_id: ProjectIdDep,
+) -> ObservationSchemaRepository:
+    """Create an ObservationSchemaRepository instance for the current project."""
+    return ObservationSchemaRepository(session_maker, project_id=project_id)
+
+ObservationSchemaRepositoryDep = Annotated[ObservationSchemaRepository, Depends(get_observation_schema_repository)]
+
+async def get_observation_schema_repository_v2(  # pragma: no cover
+    session_maker: SessionMakerDep,
+    project_id: ProjectIdPathDep,
+) -> ObservationSchemaRepository:
+    """Create an ObservationSchemaRepository instance for v2 API."""
+    return ObservationSchemaRepository(session_maker, project_id=project_id)
+
+ObservationSchemaRepositoryV2Dep = Annotated[
+    ObservationSchemaRepository, Depends(get_observation_schema_repository_v2)
+]
+
+async def get_observation_schema_repository_v2_external(
+    session_maker: SessionMakerDep,
+    project_id: ProjectExternalIdPathDep,
+) -> ObservationSchemaRepository:
+    """Create an ObservationSchemaRepository instance for v2 API (uses external_id)."""
+    return ObservationSchemaRepository(session_maker, project_id=project_id)
+
+ObservationSchemaRepositoryV2ExternalDep = Annotated[
+    ObservationSchemaRepository, Depends(get_observation_schema_repository_v2_external)
+]
 
 # --- Relation Repository ---
 

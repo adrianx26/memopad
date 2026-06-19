@@ -8,7 +8,11 @@ from typing import Optional
 from httpx import AsyncClient
 
 from memopad.mcp.tools.utils import call_get
-from memopad.schemas.memory import GraphContext
+from memopad.schemas.memory import (
+    ConsolidationSuggestionSummary,
+    GraphContext,
+    ObservationSchemaSummary,
+)
 
 
 class MemoryClient:
@@ -87,21 +91,7 @@ class MemoryClient:
         page: int = 1,
         page_size: int = 10,
     ) -> GraphContext:
-        """Get recent activity.
-
-        Args:
-            timeframe: Time filter (e.g., "7d", "1 week", "2 days ago")
-            depth: How deep to traverse relations
-            types: Filter by item types
-            page: Page number (1-indexed)
-            page_size: Results per page
-
-        Returns:
-            GraphContext with recent activity
-
-        Raises:
-            ToolError: If the request fails
-        """
+        """Get recent activity."""
         params: dict = {
             "timeframe": timeframe,
             "depth": depth,
@@ -109,7 +99,6 @@ class MemoryClient:
             "page_size": page_size,
         }
         if types:
-            # Join types as comma-separated string if provided
             params["type"] = ",".join(types) if isinstance(types, list) else types
 
         response = await call_get(
@@ -118,3 +107,19 @@ class MemoryClient:
             params=params,
         )
         return GraphContext.model_validate(response.json())
+
+    async def list_observation_schemas(self) -> list[ObservationSchemaSummary]:
+        """List canonical observation category schemas."""
+        response = await call_get(
+            self.http_client,
+            f"{self._base_path}/observation-schemas",
+        )
+        return [ObservationSchemaSummary.model_validate(item) for item in response.json()]
+
+    async def list_observation_schema_suggestions(self) -> list[ConsolidationSuggestionSummary]:
+        """List rare category consolidation suggestions."""
+        response = await call_get(
+            self.http_client,
+            f"{self._base_path}/observation-schemas/consolidation-suggestions",
+        )
+        return [ConsolidationSuggestionSummary.model_validate(item) for item in response.json()]

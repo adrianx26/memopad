@@ -28,6 +28,9 @@ async def read_note(
 
     Finds and retrieves a note by its title, permalink, or content search,
     returning the raw markdown content including observations, relations, and metadata.
+    When unresolved observation conflicts are present, this tool appends a review
+    section derived from `build_context`. The source markdown is returned unchanged;
+    conflict annotations are appended only in the MCP response.
 
     Project Resolution:
     Server resolves projects in this order: Single Project Mode → project parameter → default project.
@@ -103,10 +106,11 @@ async def read_note(
         )
 
         # Import here to avoid circular import
-        from memopad.mcp.clients import KnowledgeClient, ResourceClient
+        from memopad.mcp.clients import KnowledgeClient, MemoryClient, ResourceClient
 
         # Use typed clients for API calls
         knowledge_client = KnowledgeClient(client, active_project.external_id)
+        memory_client = MemoryClient(client, active_project.external_id)
         resource_client = ResourceClient(client, active_project.external_id)
 
         try:
@@ -119,7 +123,11 @@ async def read_note(
             # If successful, return the content
             if response.status_code == 200:
                 logger.info("Returning read_note result from resource: {path}", path=entity_path)
-                return response.text
+                return await _append_conflict_markers(
+                    response.text,
+                    memory_client,
+                    entity_path,
+                )
         except Exception as e:  # pragma: no cover
             logger.info(f"Direct lookup failed for '{entity_path}': {e}")
             # Continue to fallback methods
@@ -143,7 +151,11 @@ async def read_note(
 
                     if response.status_code == 200:
                         logger.info(f"Found note by title search: {result.permalink}")
-                        return response.text
+                        return await _append_conflict_markers(
+                            response.text,
+                            memory_client,
+                            result.permalink,
+                        )
                 except Exception as e:  # pragma: no cover
                     logger.info(
                         f"Failed to fetch content for found title match {result.permalink}: {e}"
@@ -167,6 +179,44 @@ async def read_note(
         else:
             # We found some related results
             return format_related_results(active_project.name, identifier, text_results.results[:5])
+
+
+async def _append_conflict_markers(content: str, memory_client, path: str) -> str:
+    """Append unresolved conflict annotations to raw note content.
+
+    Trigger: read_note successfully fetches a note.
+    Why: surface derived conflict metadata to the LLM without changing the markdown file.
+    Outcome: unresolved conflicts appear after the note body as review hints.
+    """
+    try:
+        graph = await memory_client.build_context(path)
+    except Exception:
+        return content
+
+    conflicts = []
+    for result in graph.results:
+        for observation in result.observations:
+            if (
+                observation.conflict_score is not None
+                and observation.conflict_score > 0.5
+                and not observation.conflict_resolved
+            ):
+                conflicts.append(
+                    f"- ⚠️ CONFLICT `{observation.category}`: {observation.content} "
+                    f"(score={observation.conflict_score}, partner={observation.conflicting_obs_id}, "
+                    f"source={observation.provenance_path})"
+                )
+
+    if not conflicts:
+        return content
+
+    return "\n\n".join(
+        [
+            content.rstrip(),
+            "## ⚠️ Unresolved Observation Conflicts",
+            *conflicts,
+        ]
+    )
 
 
 def format_not_found_message(project: str | None, identifier: str) -> str:

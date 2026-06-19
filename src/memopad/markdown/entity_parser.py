@@ -262,6 +262,10 @@ class EntityParser:
         if tags:
             metadata["tags"] = tags
 
+        aliases = parse_tags(metadata.get("aliases", []))  # pyright: ignore
+        if aliases:
+            metadata["aliases"] = aliases
+
         # Parse content for observations and relations
         entity_frontmatter = EntityFrontmatter(metadata=metadata)
         entity_content = parse(post.content)

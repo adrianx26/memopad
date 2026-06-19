@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from .types import CrawlResult, PageData
+from .types import CrawlResult
 from .config import DEFAULT_CONFIG, TYPE_COLORS
 
 
