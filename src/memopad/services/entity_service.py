@@ -21,7 +21,7 @@ from memopad.markdown import EntityMarkdown
 from memopad.markdown.entity_parser import EntityParser, normalize_frontmatter_metadata
 from memopad.markdown.utils import entity_model_from_markdown, schema_to_markdown
 from memopad.models import Entity as EntityModel
-from memopad.models import Observation, Relation
+from memopad.models import Entity, Observation, Relation
 from memopad.repository import EntityAliasRepository, ObservationRepository, RelationRepository
 from memopad.repository.entity_repository import EntityRepository
 from memopad.schemas import Entity as EntitySchema

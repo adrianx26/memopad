@@ -37,6 +37,8 @@ from memopad.deps.repositories import (
     SearchRepositoryV2Dep,
     SearchRepositoryV2ExternalDep,
     ObservationSchemaRepositoryDep,
+    ObservationSchemaRepositoryV2Dep,
+    ObservationSchemaRepositoryV2ExternalDep,
 )
 from memopad.markdown import EntityParser
 from memopad.markdown.markdown_processor import MarkdownProcessor
@@ -250,6 +252,9 @@ async def get_conflict_service(
     observation_repository: ObservationRepositoryDep,
 ) -> ConflictService:
     return ConflictService(observation_repository)
+
+
+ConflictServiceDep = Annotated[ConflictService, Depends(get_conflict_service)]
 
 
 async def get_schema_service(
