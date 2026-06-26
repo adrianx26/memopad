@@ -140,6 +140,66 @@ async def test_fuzzy_title_partial_match(link_resolver):
 
 
 @pytest.mark.asyncio
+async def test_fuzzy_best_match_trusts_repository_order():
+    """link_resolver must trust the repository's best-first ordering rather than
+    re-sorting by score. SQLite FTS5 bm25() orders ASC (lower=better) while
+    Postgres ts_rank orders DESC (higher=better); re-sorting by raw score would be
+    correct for one backend and wrong for the other. The first result must be taken.
+    """
+    from datetime import datetime, timezone
+
+    from memopad.repository.search_index_row import SearchIndexRow
+    from memopad.services.link_resolver import LinkResolver
+
+    now = datetime.now(timezone.utc)
+
+    class FakeEntityRepo:
+        async def get_by_permalink(self, permalink):
+            # Return an entity only for the "best" permalink (the search branch),
+            # so the earlier exact-permalink/title lookups fall through to search.
+            if permalink != "best":
+                return None
+            return EntityModel(
+                title="Best Match",
+                permalink=permalink,
+                file_path=f"{permalink}.md",
+            )
+
+        async def get_by_id(self, _):
+            return None
+
+        async def get_by_file_path(self, _):
+            return None
+
+        async def get_by_title(self, _):
+            return []
+
+    class FakeSearchService:
+        async def search(self, query=None, **kw):
+            # Repository guarantees best-first ordering. Return a list where the
+            # "best" result is first even though its raw score (0.0001) would look
+            # smaller/worse depending on backend convention.
+            return [
+                SearchIndexRow(
+                    project_id=1, id=1, type="entity",
+                    file_path="best.md", created_at=now, updated_at=now,
+                    permalink="best", score=0.0001,
+                ),
+                SearchIndexRow(
+                    project_id=1, id=2, type="entity",
+                    file_path="worst.md", created_at=now, updated_at=now,
+                    permalink="worst", score=0.9,
+                ),
+            ]
+
+    resolver = LinkResolver(FakeEntityRepo(), FakeSearchService())
+    # Force the fuzzy-search branch: a non-slash link that won't resolve exactly.
+    result = await resolver.resolve_link("totally-unmatched-title-zzz")
+    assert result is not None
+    assert result.permalink == "best"
+
+
+@pytest.mark.asyncio
 async def test_fuzzy_title_exact_match(link_resolver):
     # Test partial match
     result = await link_resolver.resolve_link("auth-service")

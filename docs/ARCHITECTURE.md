@@ -28,7 +28,7 @@ A composition root is the single place in an application where dependencies are 
 Each entrypoint has a container dataclass in its package:
 
 ```
-src/basic_memory/
+src/memopad/
 ├── api/
 │   └── container.py      # ApiContainer
 ├── mcp/
@@ -117,7 +117,7 @@ def resolve_runtime_mode(cloud_mode_enabled: bool, is_test_env: bool) -> Runtime
 The `deps/` package provides FastAPI dependencies organized by feature:
 
 ```
-src/basic_memory/deps/
+src/memopad/deps/
 ├── __init__.py       # Re-exports for backwards compatibility
 ├── config.py         # Configuration access
 ├── db.py             # Database/session management
@@ -130,8 +130,8 @@ src/basic_memory/deps/
 ### Usage in Routers
 
 ```python
-from basic_memory.deps.services import get_entity_service
-from basic_memory.deps.projects import get_project_config
+from memopad.deps.services import get_entity_service
+from memopad.deps.projects import get_project_config
 
 @router.get("/entities/{id}")
 async def get_entity(
@@ -148,10 +148,10 @@ The old `deps.py` file still exists as a thin re-export shim:
 
 ```python
 # deps.py - backwards compatibility shim
-from basic_memory.deps import *
+from memopad.deps import *
 ```
 
-New code should import from specific submodules (`basic_memory.deps.services`) for clarity.
+New code should import from specific submodules (`memopad.deps.services`) for clarity.
 
 ## MCP Tools Architecture
 
@@ -160,7 +160,7 @@ New code should import from specific submodules (`basic_memory.deps.services`) f
 MCP tools communicate with the API through typed clients that encapsulate HTTP paths and response validation:
 
 ```
-src/basic_memory/mcp/clients/
+src/memopad/mcp/clients/
 ├── __init__.py       # Re-exports all clients
 ├── base.py           # BaseClient with common logic
 ├── knowledge.py      # KnowledgeClient - entity CRUD
@@ -225,8 +225,8 @@ async def search_notes(
         active_project = await get_active_project(client, project)
 
         # Import client inside function to avoid circular imports
-        from basic_memory.mcp.clients import SearchClient
-        from basic_memory.schemas.search import SearchQuery
+        from memopad.mcp.clients import SearchClient
+        from memopad.schemas.search import SearchQuery
 
         search_query = SearchQuery(
             text=query,
@@ -330,7 +330,7 @@ When testing MCP tools, mock at the client level:
 
 ```python
 def test_search_notes(monkeypatch):
-    import basic_memory.mcp.clients as clients_mod
+    import memopad.mcp.clients as clients_mod
 
     class MockSearchClient:
         async def search(self, query):
@@ -372,7 +372,7 @@ To avoid circular imports, typed clients are imported inside functions:
 async def my_tool():
     async with get_client() as client:
         # Import here to avoid circular dependency
-        from basic_memory.mcp.clients import KnowledgeClient
+        from memopad.mcp.clients import KnowledgeClient
 
         knowledge_client = KnowledgeClient(client, project_id)
 ```
@@ -383,11 +383,11 @@ When refactoring, maintain backwards compatibility via shims:
 
 ```python
 # Old module becomes a shim
-from basic_memory.new_location import *
+from memopad.new_location import *
 
 # Docstring explains migration path
 """
-DEPRECATED: Import from basic_memory.new_location instead.
+DEPRECATED: Import from memopad.new_location instead.
 This shim will be removed in a future version.
 """
 ```
@@ -395,7 +395,7 @@ This shim will be removed in a future version.
 ## File Organization
 
 ```
-src/basic_memory/
+src/memopad/
 ├── api/
 │   ├── container.py          # API composition root
 │   ├── routers/              # FastAPI routers

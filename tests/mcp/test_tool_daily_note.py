@@ -40,8 +40,10 @@ class TestDefaultTemplate:
     def test_includes_iso_date_in_prev_next_links(self):
         d = date(2026, 5, 1)
         body = _build_default_template(d)
-        assert "[[2026-04-30]]" in body
-        assert "[[2026-05-02]]" in body
+        # Wikilinks are scoped under the daily/ namespace so an unrelated note
+        # titled YYYY-MM-DD elsewhere in the vault doesn't resolve in its place.
+        assert "[[daily/2026-04-30]]" in body
+        assert "[[daily/2026-05-02]]" in body
 
     def test_includes_pretty_date(self):
         d = date(2026, 5, 1)

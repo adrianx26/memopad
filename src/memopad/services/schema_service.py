@@ -18,6 +18,7 @@ from loguru import logger
 
 from memopad.models.observation_schema import ObservationSchema
 from memopad.repository.observation_schema_repository import ObservationSchemaRepository
+from memopad.text_similarity import character_overlap
 
 
 @dataclass
@@ -122,11 +123,10 @@ class SchemaService:
 
 
 def _name_overlap(a: str, b: str) -> float:
-    """Compute character-overlap similarity for two short strings."""
-    from collections import Counter
-    ca, cb = Counter(a), Counter(b)
-    common = sum((ca & cb).values())
-    total = sum(ca.values()) + sum(cb.values())
-    if total == 0:
-        return 1.0
-    return (2 * common) / total
+    """Compute character-overlap similarity for two short schema names.
+
+    Thin wrapper over the shared `character_overlap` metric
+    (see `memopad.text_similarity`) — kept as a local alias so the schema-
+    consolidation call sites read naturally.
+    """
+    return character_overlap(a, b)

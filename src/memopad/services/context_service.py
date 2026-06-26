@@ -8,7 +8,7 @@ import math
 
 
 from loguru import logger
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from memopad.repository.entity_repository import EntityRepository
 from memopad.repository.observation_repository import ObservationRepository
@@ -395,10 +395,10 @@ class ContextService:
                   AND project_id = :project_id
             ) AS relation_degrees
             GROUP BY entity_id
-        """)
+        """).bindparams(bindparam("entity_ids", expanding=True))
         result = await self.search_repository.execute_query(
             query,
-            params={"entity_ids": tuple(entity_ids), "project_id": self.search_repository.project_id},
+            params={"entity_ids": list(entity_ids), "project_id": self.search_repository.project_id},
         )
         return {row.entity_id: row.degree for row in result.all()}
 

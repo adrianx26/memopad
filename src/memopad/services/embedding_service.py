@@ -100,6 +100,30 @@ class FastEmbedProvider:
         return out
 
 
+# --- Provider cache ---
+
+# Trigger: the ONNX model is expensive to load (download + JIT compile).
+# Why: long-running servers and CLI backfills call embed() many times; reloading
+#      the model per call (as the original code did via a fresh FastEmbedProvider
+#      on every hybrid_search) dominated latency. Caching at module scope means
+#      the model loads once per process and `maybe_create` becomes a dict lookup.
+_PROVIDER_CACHE: dict[str, EmbeddingProvider] = {}
+
+
+def _get_provider(model_name: str = DEFAULT_MODEL_NAME) -> EmbeddingProvider:
+    """Return a process-cached provider, loading the model only on first use."""
+    cached = _PROVIDER_CACHE.get(model_name)
+    if cached is None:
+        cached = FastEmbedProvider(model_name)
+        _PROVIDER_CACHE[model_name] = cached
+    return cached
+
+
+def reset_provider_cache() -> None:
+    """Drop cached providers. Used by tests and forced reloads."""
+    _PROVIDER_CACHE.clear()
+
+
 # --- Storage helpers ---
 
 
@@ -158,18 +182,33 @@ class EmbeddingService:
         self.session_maker = session_maker
         self.project_id = project_id
         self.provider = provider
+        # Trigger: creating the table is async and idempotent, but running it on
+        # every upsert/similar is wasteful. Track initialization so it happens once.
+        self._store_initialized = False
 
     @classmethod
     def maybe_create(
         cls,
         session_maker: async_sessionmaker,
         project_id: int,
+        model_name: str = DEFAULT_MODEL_NAME,
     ) -> Optional["EmbeddingService"]:
-        """Build a service only if embeddings are enabled & available."""
+        """Build a service only if embeddings are enabled & available.
+
+        Uses the process-cached provider so the model loads at most once per
+        process regardless of how often this is called.
+        """
         if not is_enabled():
             return None
-        provider = FastEmbedProvider()
+        provider = _get_provider(model_name)
         return cls(session_maker, project_id, provider)
+
+    async def _ensure_store(self) -> None:
+        """Create the embedding table once, lazily, on first use."""
+        if self._store_initialized:
+            return
+        await self.init_store()
+        self._store_initialized = True
 
     async def init_store(self) -> None:
         """Create the embedding table if it doesn't exist. Idempotent."""
@@ -194,11 +233,13 @@ class EmbeddingService:
                     "ON embedding(project_id, model)"
                 )
             )
+            await session.commit()
 
     async def upsert(self, entity_id: int, content: str) -> None:
         """Embed `content` and write it to the store, replacing any prior row."""
         if not self.provider:
             return
+        await self._ensure_store()
         vec = self.provider.embed([content])[0]
         blob = _pack_vector(vec)
 
@@ -224,14 +265,19 @@ class EmbeddingService:
                     "vec": blob,
                 },
             )
+            await session.commit()
 
     async def delete(self, entity_id: int) -> None:
         """Remove an entity's embedding (called when an entity is deleted)."""
+        if not self.provider:
+            return
+        await self._ensure_store()
         async with db.scoped_session(self.session_maker) as session:
             await session.execute(
                 text("DELETE FROM embedding WHERE entity_id = :eid"),
                 {"eid": entity_id},
             )
+            await session.commit()
 
     async def similar(self, query: str, limit: int = 10) -> list[EmbeddingHit]:
         """Return the top-K most similar entities to `query` by cosine score.
@@ -243,6 +289,7 @@ class EmbeddingService:
         """
         if not self.provider:
             return []
+        await self._ensure_store()
         q_vec = self.provider.embed([query])[0]
 
         async with db.scoped_session(self.session_maker) as session:

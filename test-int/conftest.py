@@ -211,6 +211,15 @@ def config_home(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path))
     # Set MEMOPAD_HOME to the test directory
     monkeypatch.setenv("MEMOPAD_HOME", str(tmp_path / "memopad"))
+    # Point ConfigManager at the same directory the config_manager fixture
+    # writes to (legacy ".memopad"). Without this, the MCP server's lifespan
+    # constructs its own ConfigManager() which defaults to DATA_DIR_NAME
+    # ("memopad") — a different, non-existent file — loads a default {main}
+    # config, and synchronize_projects then deletes `test-project` from the
+    # test DB as "deleted from config" before any tool runs. ConfigManager.__init__
+    # honors MEMOPAD_CONFIG_DIR, so this makes every ConfigManager() instance
+    # (including the lifespan's) read the fixture's config file.
+    monkeypatch.setenv("MEMOPAD_CONFIG_DIR", str(tmp_path / ".memopad"))
     return tmp_path
 
 
@@ -255,10 +264,12 @@ def app_config(
 
 @pytest.fixture
 def config_manager(app_config: MemoPadConfig, config_home) -> ConfigManager:
-    # Invalidate config cache to ensure clean state for each test
+    # Invalidate config cache to ensure clean state for each test.
+    # Use the public helper: assigning to a module attribute named
+    # `_CONFIG_CACHE` does NOT clear the real cache (`_config_cache` instance).
     from memopad import config as config_module
 
-    config_module._CONFIG_CACHE = None
+    config_module.clear_config_cache()
 
     config_manager = ConfigManager()
     # Update its paths to use the test directory

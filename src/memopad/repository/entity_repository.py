@@ -527,6 +527,35 @@ class EntityRepository(Repository[Entity]):
         result = await self.execute_query(query, use_query_options=False)
         return list(result.scalars().all())
 
+    async def find_path_conflict_candidates(self, file_path: str) -> Sequence[Entity]:
+        """Return entities that could conflict with `file_path`, scoped narrowly.
+
+        Conflicts (case/unicode variants, permalink collisions) almost always
+        involve a file in the *same directory* — a case-variant filename, or a
+        sibling whose permalink collides (space vs hyphen vs underscore). So
+        instead of `find_all()` (which eager-loads every entity in the project on
+        every create/update), we fetch only the same-directory siblings with a
+        case-insensitive prefix match. The caller then runs the exact fuzzy
+        comparison (`detect_potential_file_conflicts`) over this small set.
+
+        Root-level files (no path separator) are matched against other root
+        files only. This is an advisory conflict warning, not a correctness
+        path, so the rare cross-directory permalink collision is not surfaced
+        here — it is independently caught by the permalink-uniqueness loop.
+        """
+        posix_path = Path(file_path).as_posix()
+        parent = posix_path.rsplit("/", 1)[0] if "/" in posix_path else ""
+
+        if parent == "":
+            # Root level: files with no separator.
+            query = self.select().where(~Entity.file_path.like("%/%"))
+        else:
+            pattern = f"{parent.lower()}/%"
+            query = self.select().where(func.lower(Entity.file_path).like(pattern))
+
+        result = await self.execute_query(query, use_query_options=False)
+        return list(result.scalars().all())
+
     async def _resolve_permalink_conflict(self, session: AsyncSession, entity: Entity) -> Entity:
         """Handle permalink conflicts by generating a unique permalink."""
         base_permalink = entity.permalink

@@ -423,12 +423,8 @@ async def sync_service(
         entity_repository=entity_repository,
         relation_repository=relation_repository,
         entity_parser=entity_parser,
+        search_service=search_service,
         file_service=file_service,
-        link_resolver=link_resolver,
-        app_config=app_config,
-        conflict_service=ConflictService(observation_repository),
-        schema_service=SchemaService(observation_schema_repository),
-        alias_repository=entity_alias_repository,
     )
 
 

@@ -30,10 +30,12 @@ class MemoryJsonImporter(Importer[EntityImportResult]):
     async def import_data(
         self, source_data, destination_folder: str = "", **kwargs: Any
     ) -> EntityImportResult:
-        """Import entities and relations from a memory.json file.
+        """Import entities and relations from a memory.json export.
 
         Args:
-            source_data: Path to the memory.json file.
+            source_data: Parsed/deserialized memory.json — an iterable of records
+                (callers load/parse the file before passing it in; this method does
+                not read a path from disk).
             destination_folder: Optional destination folder within the project.
             **kwargs: Additional keyword arguments.
 

@@ -3,7 +3,8 @@
 import ast
 import re
 from datetime import datetime
-from typing import List, Optional, Set, Dict, Any
+from functools import lru_cache
+from typing import AbstractSet, List, Optional, Set, Dict, Any
 
 
 from dateparser import parse
@@ -47,22 +48,108 @@ class SearchService:
         search_repository: SearchRepository,
         entity_repository: EntityRepository,
         file_service: FileService,
+        session_maker=None,
+        project_id: Optional[int] = None,
     ):
         self.repository = search_repository
         self.entity_repository = entity_repository
         self.file_service = file_service
+        # Embedding wiring (optional). When session_maker + project_id are injected
+        # (the API/v2 DI path), every indexed note also writes its semantic vector.
+        # When absent (legacy 3-arg construction), embeddings stay disabled and
+        # behavior is unchanged. See Phase 3 of optimax.md.
+        self.session_maker = session_maker
+        self.project_id = project_id
+        self._embedding_service = None  # lazy, cached on first use
+
+    async def _get_embedding_service(self):
+        """Return a cached EmbeddingService, or None when embeddings are off.
+
+        The provider (ONNX model) is cached at module scope in embedding_service,
+        so this only does real work once per process; subsequent calls are a
+        cached attribute read.
+        """
+        if self._embedding_service is not None:
+            return self._embedding_service
+        if self.session_maker is None or self.project_id is None:
+            return None
+        from memopad.services.embedding_service import EmbeddingService
+
+        self._embedding_service = EmbeddingService.maybe_create(
+            self.session_maker, self.project_id
+        )
+        return self._embedding_service
+
+    @staticmethod
+    def _entity_embedding_text(entity: Entity, content: Optional[str]) -> str:
+        """Build the text we embed for an entity: title + permalink + content.
+
+        Permalink is included so path-based queries (e.g. "specs/search") match
+        semantically even when the body lacks the literal terms.
+        """
+        parts = [entity.title or "", entity.permalink or ""]
+        if content:
+            parts.append(content)
+        return "\n".join(p for p in parts if p)
+
+    async def _upsert_embedding(self, entity: Entity, content: Optional[str]) -> None:
+        """Best-effort: write the entity's semantic vector alongside its FTS row.
+
+        Embeddings are optional; when disabled this is a no-op. A failure here
+        must NOT break FTS indexing — we log and move on so a model/IO hiccup
+        can't corrupt the keyword index that everything else depends on.
+        """
+        try:
+            svc = await self._get_embedding_service()
+        except Exception as e:  # pragma: no cover
+            logger.warning(
+                f"Embedding service unavailable for entity_id={entity.id}: {e}"
+            )
+            return
+        if svc is None:
+            return
+        try:
+            if content is None:
+                content = await self.file_service.read_entity_content(entity)
+            await svc.upsert(entity.id, self._entity_embedding_text(entity, content))
+        except Exception as e:  # pragma: no cover
+            logger.warning(f"Embedding upsert failed for entity_id={entity.id}: {e}")
+
+    async def _delete_embedding(self, entity: Entity) -> None:
+        """Best-effort: drop an entity's vector when the entity is deleted."""
+        try:
+            svc = await self._get_embedding_service()
+        except Exception:  # pragma: no cover
+            return
+        if svc is None:
+            return
+        try:
+            await svc.delete(entity.id)
+        except Exception as e:  # pragma: no cover
+            logger.warning(f"Embedding delete failed for entity_id={entity.id}: {e}")
 
     async def init_search_index(self):
         """Create FTS5 virtual table if it doesn't exist."""
         await self.repository.init_search_index()
 
     async def reindex_all(self, background_tasks: Optional[BackgroundTasks] = None) -> None:
-        """Reindex all content from database."""
+        """Reindex all content from database.
+
+        Clears this project's rows in place (DELETE) rather than DROP+recreate so the
+        index table and its schema stay present throughout the rebuild. A concurrent
+        search therefore sees stale-but-present results instead of an empty or
+        missing table. The table is created if it does not yet exist.
+        """
 
         logger.info("Starting full reindex")
-        # Clear and recreate search index
-        await self.repository.execute_query(text("DROP TABLE IF EXISTS search_index"), params={})
+        # Ensure the index table exists (CREATE IF NOT EXISTS), then clear this
+        # project's rows in place. We avoid DROP TABLE here so concurrent readers
+        # never observe an empty/missing index during the (potentially long) rebuild.
         await self.init_search_index()
+        await self.repository.execute_query(
+            text("DELETE FROM search_index WHERE project_id = :project_id"),
+            params={"project_id": self.repository.project_id},
+        )
 
         # Reindex all entities
         logger.debug("Indexing entities")
@@ -132,7 +219,8 @@ class SearchService:
         return results
 
     @staticmethod
-    def _generate_variants(text: str) -> Set[str]:
+    @lru_cache(maxsize=4096)
+    def _generate_variants(text: str) -> AbstractSet[str]:
         """Generate text variants for better fuzzy matching.
 
         Creates variations of the text to improve match chances:
@@ -140,6 +228,12 @@ class SearchService:
         - Lowercase form
         - Path segments (for permalinks)
         - Common word boundaries
+
+        Memoized: this is a pure function of `text`, called once per observation
+        and per relation during indexing. A note with many observations sharing
+        categories/content re-computes the same variants repeatedly; the lru_cache
+        turns those into O(1) lookups. Returns an immutable frozenset so callers
+        can't accidentally corrupt the cached value.
         """
         variants = {text, text.lower()}
 
@@ -155,7 +249,7 @@ class SearchService:
         # See: https://github.com/basicmachines-co/memopad/issues/351
         # variants.update(text[i : i + 3].lower() for i in range(len(text) - 2))
 
-        return variants
+        return frozenset(variants)
 
     def _extract_entity_tags(self, entity: Entity) -> List[str]:
         """Extract tags from entity metadata for search indexing.
@@ -222,14 +316,15 @@ class SearchService:
                 f"[BackgroundTask] Completed search index for entity_id={entity.id} "
                 f"permalink={entity.permalink}"
             )
-        except Exception as e:  # pragma: no cover
-            # Background task failure logging; exceptions are re-raised.
-            # Avoid forcing synthetic failures just for line coverage.
-            logger.error(  # pragma: no cover
+        except Exception as e:
+            # Background task failure logging; exceptions are re-raised so the
+            # caller (sync background task) can record the failure. Covered by
+            # test_index_entity_data_reraises_on_repository_error.
+            logger.error(
                 f"[BackgroundTask] Failed search index for entity_id={entity.id} "
                 f"permalink={entity.permalink} error={e}"
             )
-            raise  # pragma: no cover
+            raise
 
     async def index_entity_file(
         self,
@@ -405,6 +500,11 @@ class SearchService:
         # Batch insert all rows at once
         await self.repository.bulk_index_items(rows_to_index)
 
+        # Write the semantic vector for this entity (best-effort; no-op when
+        # embeddings are disabled). Done after the FTS rows are committed so a
+        # vector failure can't leave the keyword index half-written.
+        await self._upsert_embedding(entity, content)
+
     async def delete_by_permalink(self, permalink: str):
         """Delete an item from the search index."""
         await self.repository.delete_by_permalink(permalink)
@@ -442,6 +542,9 @@ class SearchService:
             else:
                 await self.delete_by_entity_id(entity.id)
 
+        # Drop the semantic vector too, so deleted entities stop matching.
+        await self._delete_embedding(entity)
+
     async def hybrid_search(
         self,
         query_text: str,
@@ -454,8 +557,14 @@ class SearchService:
         if mode == "fts":
             return await self.search(SearchQuery(text=query_text), limit=limit)
 
-        from memopad.services.embedding_service import EmbeddingService
-        embedding_service = EmbeddingService.maybe_create(session_maker, project_id)
+        # Prefer the injected (cached) service; fall back to building one from the
+        # caller-supplied session_maker/project_id. Either way the ONNX model is
+        # loaded at most once per process via the module-level provider cache.
+        embedding_service = await self._get_embedding_service()
+        if embedding_service is None:
+            from memopad.services.embedding_service import EmbeddingService
+
+            embedding_service = EmbeddingService.maybe_create(session_maker, project_id)
         if not embedding_service:
             raise ValueError(
                 "Embeddings are disabled or not installed. "

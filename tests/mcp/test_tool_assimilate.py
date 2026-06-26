@@ -400,6 +400,37 @@ async def test_assimilate_stores_notes(app, test_project, monkeypatch):
     assert f"[Session: Using project '{test_project.name}']" in result
 
 
+@pytest.mark.asyncio
+async def test_assimilate_handles_cancelled_error(app, test_project, monkeypatch):
+    """Regression guard for the Windows long-run cancellation hardening
+    (commits 7fe35ed / dd0aa7a): a CancelledError raised mid-crawl must surface
+    as a helpful, non-propagating message — not crash the tool.
+
+    On Windows, long-running assimilation can be cancelled (ProactorEventLoop /
+    pipe issues); the tool catches asyncio.CancelledError and returns guidance.
+    """
+    import asyncio
+    import sys
+    from memopad.mcp.tools.assimilate import assimilate
+
+    assimilate_mod = sys.modules["memopad.mcp.tools.assimilate"]
+
+    async def cancelling_crawl(url, max_depth=10, max_pages=0):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(assimilate_mod, "crawl", cancelling_crawl)
+
+    result = await assimilate.fn(
+        url="https://test-site.example.com", project=test_project.name
+    )
+
+    assert "Error" in result
+    assert "Assimilation was cancelled" in result
+    assert "https://test-site.example.com" in result
+    # Guidance text the handler emits for the Windows long-run scenario.
+    assert "Pre-cloning the repo manually" in result
+
+
 # ---------------------------------------------------------------------------
 # Safety limit tests (Bug fixes for oversized content)
 # ---------------------------------------------------------------------------

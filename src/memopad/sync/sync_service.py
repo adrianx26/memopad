@@ -78,6 +78,19 @@ class SkippedFile:
 
 
 @dataclass
+class SyncFailure:
+    """A file whose sync task raised an exception.
+
+    Surfaced on SyncReport.failed so callers can tell that a sync did not fully
+    succeed (previously these were only logged and silently dropped).
+    """
+
+    path: str
+    error_class: str
+    message: str
+
+
+@dataclass
 class SyncReport:
     """Report of file changes found compared to database state.
 
@@ -89,6 +102,7 @@ class SyncReport:
         moves: Files that have been moved from one location to another
         checksums: Current checksums for files on disk
         skipped_files: Files that were skipped due to repeated failures
+        failed: Files whose sync task raised an exception (not just skipped)
     """
 
     # We keep paths as strings in sets/dicts for easier serialization
@@ -98,6 +112,7 @@ class SyncReport:
     moves: Dict[str, str] = field(default_factory=dict)  # old_path -> new_path
     checksums: Dict[str, str] = field(default_factory=dict)  # path -> checksum
     skipped_files: List[SkippedFile] = field(default_factory=list)
+    failed: List[SyncFailure] = field(default_factory=list)
 
     @property
     def total(self) -> int:
@@ -366,8 +381,16 @@ class SyncService:
             all_paths = list(report.new) + list(report.modified)
             for path, result in zip(all_paths, results):
                 if isinstance(result, Exception):
-                    # Task raised an exception
+                    # Task raised an exception — record it on the report so callers
+                    # can tell the sync did not fully succeed (previously only logged).
                     logger.error(f"Sync task failed for {path}: {result}")
+                    report.failed.append(
+                        SyncFailure(
+                            path=path,
+                            error_class=type(result).__name__,
+                            message=str(result),
+                        )
+                    )
                     continue
                 
                 entity, checksum = result
@@ -1314,7 +1337,9 @@ async def get_sync_service(project: Project) -> SyncService:  # pragma: no cover
     project_repository = ProjectRepository(session_maker)
 
     # Initialize services
-    search_service = SearchService(search_repository, entity_repository, file_service)
+    search_service = SearchService(
+        search_repository, entity_repository, file_service, session_maker, project.id
+    )
     link_resolver = LinkResolver(entity_repository, search_service)
 
     # Initialize services

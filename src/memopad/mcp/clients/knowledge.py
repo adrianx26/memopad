@@ -6,6 +6,7 @@ Encapsulates all /v2/projects/{project_id}/knowledge/* endpoints.
 from typing import Any
 
 from httpx import AsyncClient
+from mcp.server.fastmcp.exceptions import ToolError
 
 from memopad.mcp.tools.utils import call_get, call_post, call_put, call_patch, call_delete
 from memopad.schemas.response import (
@@ -14,6 +15,7 @@ from memopad.schemas.response import (
     DirectoryMoveResult,
     DirectoryDeleteResult,
 )
+from memopad.services.exceptions import EntityAlreadyExistsError
 
 
 class KnowledgeClient:
@@ -55,15 +57,29 @@ class KnowledgeClient:
             EntityResponse with created entity details
 
         Raises:
-            ToolError: If the request fails
+            ToolError: If the request fails.
+            EntityAlreadyExistsError: If the server responds 409 Conflict (the entity
+                already exists). Lets callers branch on "already exists" via a typed
+                exception instead of string-matching the error message or HTTP status.
         """
         params = {"fast": fast} if fast is not None else None
-        response = await call_post(
-            self.http_client,
-            f"{self._base_path}/entities",
-            json=entity_data,
-            params=params,
-        )
+        try:
+            response = await call_post(
+                self.http_client,
+                f"{self._base_path}/entities",
+                json=entity_data,
+                params=params,
+            )
+        except ToolError as e:
+            # call_post wraps the real httpx HTTPStatusError as ToolError.__cause__.
+            # Surface a 409 as a typed EntityAlreadyExistsError so callers don't have
+            # to grep the message for "conflict"/"already exists" (fragile across
+            # transports and locales).
+            cause = getattr(e, "__cause__", None)
+            status = getattr(getattr(cause, "response", None), "status_code", None)
+            if status == 409:
+                raise EntityAlreadyExistsError(str(e) or "Entity already exists") from e
+            raise
         return EntityResponse.model_validate(response.json())
 
     async def update_entity(

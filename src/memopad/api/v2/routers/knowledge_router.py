@@ -28,6 +28,7 @@ from memopad.deps import (
 from memopad.schemas import DeleteEntitiesResponse
 from memopad.schemas.base import Entity
 from memopad.schemas.request import EditEntityRequest
+from memopad.services.exceptions import EntityAlreadyExistsError
 from memopad.schemas.v2 import (
     EntityResolveRequest,
     EntityResolveResponse,
@@ -195,7 +196,13 @@ async def create_entity(
             project_id=project_id,
         )
     else:
-        entity = await entity_service.create_entity(data)
+        try:
+            entity = await entity_service.create_entity(data)
+        except EntityAlreadyExistsError as e:
+            # Duplicate create is a 409 Conflict, not a 500. Mapping it here (rather
+            # than letting the global handler turn it into a 500) lets clients branch
+            # on the typed status instead of string-matching an "already exists" detail.
+            raise HTTPException(status_code=409, detail=str(e)) from e
         await search_service.index_entity(entity, background_tasks=background_tasks)
 
     result = EntityResponseV2.model_validate(entity)

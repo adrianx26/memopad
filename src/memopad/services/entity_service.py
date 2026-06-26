@@ -34,7 +34,12 @@ from memopad.schemas.response import (
 )
 from memopad.services import BaseService, FileService
 from memopad.services.conflict_service import ConflictService
-from memopad.services.exceptions import EntityCreationError, EntityNotFoundError
+from memopad.services.exceptions import (
+    EntityAlreadyExistsError,
+    EntityCreationError,
+    EntityNotFoundError,
+    EntityUpdateError,
+)
 from memopad.services.link_resolver import LinkResolver
 from memopad.services.schema_service import SchemaService
 from memopad.services.search_service import SearchService
@@ -132,15 +137,21 @@ class EntityService(BaseService[EntityModel]):
 
         conflicts = []
 
-        # Get all existing file paths
-        all_entities = await self.repository.find_all()
-        existing_paths = [entity.file_path for entity in all_entities]
+        # Narrow to same-directory siblings before the fuzzy compare. The old
+        # code called find_all() and scanned every entity in the project on every
+        # create/update (O(N) per note, O(N²) over a bulk import) — and this only
+        # feeds an advisory warning (resolve_permalink never acts on the result).
+        # Real conflicts (case/unicode variants, permalink collisions) live in the
+        # same directory, so a case-insensitive prefix query captures the candidate
+        # set; the exact fuzzy check runs only over those.
+        candidate_entities = await self.repository.find_path_conflict_candidates(file_path)
+        existing_paths = [entity.file_path for entity in candidate_entities]
 
         # Use the enhanced conflict detection utility
         conflicting_paths = detect_potential_file_conflicts(file_path, existing_paths)
 
         # Find the entities corresponding to conflicting paths
-        for entity in all_entities:
+        for entity in candidate_entities:
             if entity.file_path in conflicting_paths:
                 conflicts.append(entity)
 
@@ -236,14 +247,21 @@ class EntityService(BaseService[EntityModel]):
         self._permalink_cache.put(cache_key, permalink)
     
     def invalidate_permalink_cache(self, file_path: Union[str, Path]) -> None:
-        """Invalidate permalink cache entries for a file.
-        
-        Call this when a file is moved, deleted, or title changes.
+        """Invalidate the permalink cache entry for a single file.
+
+        Call this when a file is moved, deleted, or its permalink changes. Evicts
+        only that file's key so bulk operations keep the cache warm, instead of
+        clearing the whole 2Q cache. Falls back to clear() for caches injected
+        without a `remove` method.
         """
-        # 2Q cache doesn't support selective invalidation easily
-        # For now, clear entire cache (or could track keys separately)
-        self._permalink_cache.clear()
-        logger.debug("Cleared permalink cache after file change")
+        cache_key = f"path:{Path(file_path).as_posix().lower()}"
+        remover = getattr(self._permalink_cache, "remove", None)
+        if remover is not None:
+            if remover(cache_key):
+                logger.debug(f"Invalidated permalink cache entry: {cache_key}")
+        else:  # pragma: no cover
+            self._permalink_cache.clear()
+            logger.debug("Cleared permalink cache after file change")
     
     async def warm_permalink_cache(self, top_n: int = 1000) -> int:
         """Pre-load most frequently accessed permalinks into cache.
@@ -331,7 +349,10 @@ class EntityService(BaseService[EntityModel]):
         file_path = Path(schema.file_path)
 
         if await self.file_service.exists(file_path):
-            raise EntityCreationError(
+            # Duplicate create — raise the specific EntityAlreadyExistsError (a subclass
+            # of EntityCreationError) so the API layer can map it to HTTP 409 and callers
+            # can branch on the typed exception instead of string-matching the message.
+            raise EntityAlreadyExistsError(
                 f"file for entity {schema.directory}/{schema.title} already exists: {file_path}"
             )
 
@@ -524,7 +545,7 @@ class EntityService(BaseService[EntityModel]):
         if existing:
             updated = await self.repository.update(existing.id, update_data)
             if not updated:
-                raise ValueError(f"Failed to update entity in database: {existing.id}")
+                raise EntityUpdateError(f"Failed to update entity in database: {existing.id}")
             return updated
 
         create_data = dict(update_data)
@@ -586,7 +607,7 @@ class EntityService(BaseService[EntityModel]):
 
         updated = await self.repository.update(entity.id, update_data)
         if not updated:
-            raise ValueError(f"Failed to update entity in database: {entity.id}")
+            raise EntityUpdateError(f"Failed to update entity in database: {entity.id}")
         return updated
 
     async def reindex_entity(self, entity_id: int) -> None:
@@ -608,7 +629,7 @@ class EntityService(BaseService[EntityModel]):
         checksum = await self.file_service.compute_checksum(file_path)
         updated = await self.repository.update(updated.id, {"checksum": checksum})
         if not updated:
-            raise ValueError(f"Failed to update entity in database: {entity.id}")
+            raise EntityUpdateError(f"Failed to update entity in database: {entity.id}")
 
         # --- Search Reindex ---
         if self.search_service:
@@ -718,9 +739,21 @@ class EntityService(BaseService[EntityModel]):
         #             markdown file remains unchanged and authoritative.
         obs_list = list(markdown.observations)
         if self.schema_service:
+            # Dedupe categories within the note before normalising. A note often
+            # repeats the same category (several "[process]" observations), and
+            # normalize_category does up to 3 DB round-trips per call. Normalising
+            # each *unique* category once and reusing the result cuts K calls down
+            # to U (unique) — the bulk of the practical win without changing
+            # normalize_category semantics or adding batched repo methods.
+            normalized: dict[str, str] = {}
+            for obs in obs_list:
+                if obs.category and obs.category not in normalized:
+                    normalized[obs.category] = await self.schema_service.normalize_category(
+                        obs.category
+                    )
             for obs in obs_list:
                 if obs.category:
-                    obs.category = await self.schema_service.normalize_category(obs.category)
+                    obs.category = normalized[obs.category]
 
         # add new observations
         observations = [
@@ -1086,16 +1119,16 @@ class EntityService(BaseService[EntityModel]):
                 yaml_fm = yaml.dump(frontmatter_data, sort_keys=False, allow_unicode=True)
                 return f"---\n{yaml_fm}---\n\n{new_body.strip()}"
 
-            except Exception as e:  # pragma: no cover
+            except Exception as e:
                 logger.warning(
                     f"Failed to parse frontmatter during prepend: {e}"
-                )  # pragma: no cover
-                # Fall back to simple prepend if frontmatter parsing fails  # pragma: no cover
+                )
+                # Fall back to simple prepend if frontmatter parsing fails
 
-        # No frontmatter or parsing failed - do simple prepend  # pragma: no cover
-        if content and not content.endswith("\n"):  # pragma: no cover
-            return content + "\n" + current_content  # pragma: no cover
-        return content + current_content  # pragma: no cover
+        # No frontmatter or parsing failed - do simple prepend
+        if content and not content.endswith("\n"):
+            return content + "\n" + current_content
+        return content + current_content
 
     async def move_entity(
         self,
@@ -1180,23 +1213,35 @@ class EntityService(BaseService[EntityModel]):
             # 9. Update database
             updated_entity = await self.repository.update(entity.id, updates)
             if not updated_entity:
-                raise ValueError(f"Failed to update entity in database: {entity.id}")
+                # DB update was a no-op for a record we expected to update. Surface a
+                # typed error so callers can distinguish this from bad input (ValueError);
+                # the except block below rolls the filesystem move back.
+                raise EntityUpdateError(f"Failed to update entity in database: {entity.id}")
 
             return updated_entity
 
         except Exception as e:
-            # Rollback: try to restore original file location if move succeeded
-            try:
-                if await self.file_service.exists(
-                    destination_path
-                ) and not await self.file_service.exists(current_path):
+            # Rollback: if the filesystem move already happened but a later step
+            # (frontmatter update, checksum, or DB update) failed, restore the file to
+            # its original location so file and DB row don't diverge.
+            moved_but_not_reverted = await self.file_service.exists(
+                destination_path
+            ) and not await self.file_service.exists(current_path)
+            if moved_but_not_reverted:
+                try:
                     await self.file_service.move_file(destination_path, current_path)
                     logger.info(f"Rolled back file move: {destination_path} -> {current_path}")
-            except Exception as rollback_error:  # pragma: no cover
-                logger.error(f"Failed to rollback file move: {rollback_error}")
+                except Exception as rollback_error:  # pragma: no cover
+                    logger.error(
+                        f"Rollback of file move failed — file may be at {destination_path} "
+                        f"while DB still points at {current_path}: {rollback_error}"
+                    )
 
-            # Re-raise the original error with context
-            raise ValueError(f"Move failed: {str(e)}") from e
+            # Preserve the original exception type/cause instead of masking it as
+            # ValueError. EntityUpdateError (DB no-op) already carries the right type;
+            # other failures (e.g. CancelledError, IOError) propagate unchanged so the
+            # caller can react to the real error class.
+            raise
 
     async def move_directory(
         self,

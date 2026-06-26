@@ -31,6 +31,28 @@ class TestBasicOperations:
         cache.get("k")  # Second access promotes A1 → Am
         assert cache.stats["promotions"] == 1
 
+    def test_remove_from_a1_evicts_only_that_key(self):
+        cache = TwoQueueCache[str, str](total_size=10)
+        cache.put("a", "1")
+        cache.put("b", "2")  # both in A1
+        assert cache.remove("a") is True
+        assert cache.get("a") is None
+        assert cache.get("b") == "2"  # sibling survives
+
+    def test_remove_from_am_evicts_only_that_key(self):
+        cache = TwoQueueCache[str, str](total_size=10)
+        cache.put("a", "1")
+        cache.put("b", "2")
+        cache.get("a")  # promote a -> Am
+        cache.get("b")  # promote b -> Am
+        assert cache.remove("a") is True
+        assert cache.get("a") is None
+        assert cache.get("b") == "2"
+
+    def test_remove_missing_key_returns_false(self):
+        cache = TwoQueueCache[str, str](total_size=10)
+        assert cache.remove("absent") is False
+
 
 class TestSizeEnforcement:
     def test_size_capped_at_total(self):

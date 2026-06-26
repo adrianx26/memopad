@@ -1,5 +1,6 @@
 ﻿"""Service for resolving markdown links to permalinks."""
 
+import asyncio
 from typing import Optional, Tuple
 
 
@@ -74,33 +75,41 @@ class LinkResolver:
                 # Construct relative path from source folder
                 relative_path = f"{source_folder}/{clean_text}"
 
-                # Try with .md extension
-                if not relative_path.endswith(".md"):
-                    relative_path_md = f"{relative_path}.md"
-                    entity = await self.entity_repository.get_by_file_path(relative_path_md)
+                if relative_path.endswith(".md"):
+                    # Already has .md — single lookup, no parallel pair possible.
+                    entity = await self.entity_repository.get_by_file_path(relative_path)
                     if entity:
                         return entity
-
-                # Try as-is (already has extension or is a permalink)
-                entity = await self.entity_repository.get_by_file_path(relative_path)
-                if entity:
-                    return entity
+                else:
+                    # The .md-prefixed path has priority (original tried it
+                    # first and returned early), so resolve both concurrently
+                    # and prefer the .md match on a tie.
+                    md_entity, as_is_entity = await asyncio.gather(
+                        self.entity_repository.get_by_file_path(f"{relative_path}.md"),
+                        self.entity_repository.get_by_file_path(relative_path),
+                    )
+                    if md_entity:
+                        return md_entity
+                    if as_is_entity:
+                        return as_is_entity
 
         # When source_path is provided, use context-aware resolution:
         # Check both permalink and title matches, prefer closest to source.
         # Example: [[testing]] from folder/note.md prefers folder/testing.md
         # over a root testing.md with permalink "testing".
         if source_path:
-            # Gather all potential matches
+            # Permalink and title lookups are independent — run them concurrently
+            # instead of sequentially. Precedence is preserved: the permalink match
+            # is appended to `candidates` first, title matches after (deduped).
             candidates: list[Entity] = []
+            permalink_entity, title_entities = await asyncio.gather(
+                self.entity_repository.get_by_permalink(clean_text),
+                self.entity_repository.get_by_title(clean_text),
+            )
 
-            # Check permalink match
-            permalink_entity = await self.entity_repository.get_by_permalink(clean_text)
             if permalink_entity:
                 candidates.append(permalink_entity)
 
-            # Check title matches
-            title_entities = await self.entity_repository.get_by_title(clean_text)
             for entity in title_entities:
                 # Avoid duplicates (permalink match might also be in title matches)
                 if entity.id not in [c.id for c in candidates]:
@@ -165,8 +174,12 @@ class LinkResolver:
             )
 
             if results:
-                # Look for best match
-                best_match = min(results, key=lambda x: x.score)  # pyright: ignore
+                # The search repository already returns results best-first regardless of
+                # backend (SQLite bm25() sorts ASC — lower=better; Postgres ts_rank sorts
+                # DESC — higher=better). Re-sorting by `score` here would be correct for one
+                # backend and wrong for the other, so trust the repository's ordering and
+                # take the first result.
+                best_match = results[0]
                 logger.trace(
                     f"Selected best match from {len(results)} results: {best_match.permalink}"
                 )

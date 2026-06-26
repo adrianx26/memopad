@@ -81,13 +81,14 @@ async def to_graph_context(
                     content=item.content,  # pyright: ignore
                     permalink=item.permalink,  # pyright: ignore
                     created_at=item.created_at,
-                    # Conflict fields — populated when observation has diverging sibling.
-                    # ContextResultRow always defines these fields; keep direct access
-                    # instead of speculative getattr to satisfy MemoPad code quality rules.
-                    conflict_score=item.conflict_score,
-                    conflicting_obs_id=item.conflicting_obs_id,
-                    conflict_resolved=item.conflict_resolved,
-                    provenance_path=item.provenance_path,
+                    # Conflict fields — populated when an observation has a diverging
+                    # sibling. ContextResultRow (context path) defines these; SearchIndexRow
+                    # (search path) does not, so use getattr with a None default — a search
+                    # result legitimately has no conflict data (the index doesn't store it).
+                    conflict_score=getattr(item, "conflict_score", None),
+                    conflicting_obs_id=getattr(item, "conflicting_obs_id", None),
+                    conflict_resolved=getattr(item, "conflict_resolved", False),
+                    provenance_path=getattr(item, "provenance_path", None),
                 )
             case SearchItemType.RELATION:
                 from_title = entity_title_lookup.get(item.from_id) if item.from_id else None  # pyright: ignore

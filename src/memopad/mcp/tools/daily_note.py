@@ -15,6 +15,7 @@ from memopad.mcp.async_client import get_client
 from memopad.mcp.project_context import add_project_metadata, get_active_project
 from memopad.mcp.server import mcp
 from memopad.schemas.base import Entity
+from memopad.services.exceptions import EntityAlreadyExistsError
 
 
 # --- Configuration ---
@@ -41,7 +42,10 @@ def _build_default_template(d: date) -> str:
     """Build the default daily note body.
 
     Wikilinks to the previous and next day form the timeline chain — the
-    target notes don't need to exist yet; sync resolves them when they do.
+    target notes don't need to exist yet; sync resolves them when they do. The
+    links are scoped under the ``daily/`` namespace (``[[daily/YYYY-MM-DD]]``) so
+    an unrelated note titled ``YYYY-MM-DD`` elsewhere in the vault doesn't
+    accidentally resolve in place of the daily note.
     """
     prev_day = (d - timedelta(days=1)).isoformat()
     next_day = (d + timedelta(days=1)).isoformat()
@@ -49,8 +53,8 @@ def _build_default_template(d: date) -> str:
     return (
         f"# {pretty}\n\n"
         f"- [category] Daily journal entry for {d.isoformat()}\n"
-        f"- previous_day [[{prev_day}]]\n"
-        f"- next_day [[{next_day}]]\n\n"
+        f"- previous_day [[{DAILY_DIRECTORY}/{prev_day}]]\n"
+        f"- next_day [[{DAILY_DIRECTORY}/{next_day}]]\n\n"
         "## Notes\n\n"
         "## Decisions\n\n"
         "## Tomorrow\n"
@@ -123,21 +127,17 @@ async def daily_note(
 
         # Trigger: optimistic create. Conflict means the note already exists.
         # Why: avoids a separate read-then-write round trip on the happy path.
-        # Outcome: on 409, we surface the existing note's permalink without overwriting.
+        # Outcome: on a 409 (typed EntityAlreadyExistsError from the client), we
+        # surface the existing note's permalink without overwriting it.
         action = "Created"
         try:
             result = await knowledge_client.create_entity(entity.model_dump(), fast=False)
-        except Exception as e:
-            status = getattr(getattr(e, "response", None), "status_code", None)
-            msg_lower = str(e).lower()
-            is_conflict = status == 409 or "conflict" in msg_lower or "already exists" in msg_lower
-
-            if is_conflict and entity.permalink:
-                entity_id = await knowledge_client.resolve_entity(entity.permalink)
-                result = await knowledge_client.get_entity(entity_id)
-                action = "Opened existing"
-            else:
+        except EntityAlreadyExistsError:
+            if not entity.permalink:
                 raise
+            entity_id = await knowledge_client.resolve_entity(entity.permalink)
+            result = await knowledge_client.get_entity(entity_id)
+            action = "Opened existing"
 
         summary = [
             f"# {action} daily note: {title}",
@@ -145,7 +145,7 @@ async def daily_note(
             f"file_path: {result.file_path}",
             f"permalink: {result.permalink}",
             f"day: {target_date.strftime('%A, %B %d, %Y')}",
-            f"previous: [[{(target_date - timedelta(days=1)).isoformat()}]]",
-            f"next: [[{(target_date + timedelta(days=1)).isoformat()}]]",
+            f"previous: [[{DAILY_DIRECTORY}/{(target_date - timedelta(days=1)).isoformat()}]]",
+            f"next: [[{DAILY_DIRECTORY}/{(target_date + timedelta(days=1)).isoformat()}]]",
         ]
         return add_project_metadata("\n".join(summary), active_project.name)

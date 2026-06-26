@@ -14,10 +14,14 @@ from fastapi import Depends
 from loguru import logger
 
 from memopad.deps.config import AppConfigDep
+from memopad.deps.db import SessionMakerDep
 from memopad.deps.projects import (
     ProjectConfigDep,
     ProjectConfigV2Dep,
     ProjectConfigV2ExternalDep,
+    ProjectExternalIdPathDep,
+    ProjectIdDep,
+    ProjectIdPathDep,
     ProjectRepositoryDep,
 )
 from memopad.deps.repositories import (
@@ -165,9 +169,17 @@ async def get_search_service(
     search_repository: SearchRepositoryDep,
     entity_repository: EntityRepositoryDep,
     file_service: FileServiceDep,
+    session_maker: SessionMakerDep,
+    project_id: ProjectIdDep,
 ) -> SearchService:
-    """Create SearchService with dependencies."""
-    return SearchService(search_repository, entity_repository, file_service)
+    """Create SearchService with dependencies.
+
+    session_maker + project_id are injected so the service can lazily build an
+    EmbeddingService and write semantic vectors during indexing (Phase 3).
+    """
+    return SearchService(
+        search_repository, entity_repository, file_service, session_maker, project_id
+    )
 
 
 SearchServiceDep = Annotated[SearchService, Depends(get_search_service)]
@@ -177,9 +189,13 @@ async def get_search_service_v2(  # pragma: no cover
     search_repository: SearchRepositoryV2Dep,
     entity_repository: EntityRepositoryV2Dep,
     file_service: FileServiceV2Dep,
+    session_maker: SessionMakerDep,
+    project_id: ProjectIdPathDep,
 ) -> SearchService:
     """Create SearchService for v2 API."""
-    return SearchService(search_repository, entity_repository, file_service)
+    return SearchService(
+        search_repository, entity_repository, file_service, session_maker, project_id
+    )
 
 
 SearchServiceV2Dep = Annotated[SearchService, Depends(get_search_service_v2)]
@@ -189,9 +205,13 @@ async def get_search_service_v2_external(
     search_repository: SearchRepositoryV2ExternalDep,
     entity_repository: EntityRepositoryV2ExternalDep,
     file_service: FileServiceV2ExternalDep,
+    session_maker: SessionMakerDep,
+    project_id: ProjectExternalIdPathDep,
 ) -> SearchService:
     """Create SearchService for v2 API (uses external_id)."""
-    return SearchService(search_repository, entity_repository, file_service)
+    return SearchService(
+        search_repository, entity_repository, file_service, session_maker, project_id
+    )
 
 
 SearchServiceV2ExternalDep = Annotated[SearchService, Depends(get_search_service_v2_external)]
@@ -407,6 +427,7 @@ EntityServiceV2ExternalDep = Annotated[EntityService, Depends(get_entity_service
 
 
 async def get_context_service(
+    app_config: AppConfigDep,
     search_repository: SearchRepositoryDep,
     entity_repository: EntityRepositoryDep,
     observation_repository: ObservationRepositoryDep,
@@ -415,6 +436,7 @@ async def get_context_service(
         search_repository=search_repository,
         entity_repository=entity_repository,
         observation_repository=observation_repository,
+        app_config=app_config,
     )
 
 
@@ -422,6 +444,7 @@ ContextServiceDep = Annotated[ContextService, Depends(get_context_service)]
 
 
 async def get_context_service_v2(  # pragma: no cover
+    app_config: AppConfigDep,
     search_repository: SearchRepositoryV2Dep,
     entity_repository: EntityRepositoryV2Dep,
     observation_repository: ObservationRepositoryV2Dep,
@@ -431,6 +454,7 @@ async def get_context_service_v2(  # pragma: no cover
         search_repository=search_repository,
         entity_repository=entity_repository,
         observation_repository=observation_repository,
+        app_config=app_config,
     )
 
 
@@ -438,6 +462,7 @@ ContextServiceV2Dep = Annotated[ContextService, Depends(get_context_service_v2)]
 
 
 async def get_context_service_v2_external(
+    app_config: AppConfigDep,
     search_repository: SearchRepositoryV2ExternalDep,
     entity_repository: EntityRepositoryV2ExternalDep,
     observation_repository: ObservationRepositoryV2ExternalDep,
@@ -447,6 +472,7 @@ async def get_context_service_v2_external(
         search_repository=search_repository,
         entity_repository=entity_repository,
         observation_repository=observation_repository,
+        app_config=app_config,
     )
 
 
