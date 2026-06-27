@@ -1,4 +1,4 @@
-﻿"""Database management commands."""
+"""Database management commands."""
 
 import os
 from pathlib import Path
@@ -49,13 +49,14 @@ async def _reindex_projects(app_config):
         await db.shutdown_db()
 
 
-async def _reindex_all_projects(app_config, embeddings: bool = False):
+async def _reindex_all_projects(app_config, embeddings: bool = False, batch_size: int = 128):
     """Rebuild the search index (and optionally embeddings) for every project.
 
     Uses SearchService.reindex_all() rather than a filesystem sync so we rebuild
     the index from what's already in the database without touching note files.
     When `embeddings` is true the env var is already set by the caller, so the
-    injected EmbeddingService upserts a vector for each indexed note.
+    injected EmbeddingService upserts a vector for each indexed note. `batch_size`
+    controls the embedding backfill chunk size (one model call per chunk).
     """
     try:
         await reconcile_projects_with_config(app_config)
@@ -74,7 +75,7 @@ async def _reindex_all_projects(app_config, embeddings: bool = False):
             # get_sync_service wires session_maker + project_id into SearchService,
             # so reindex_all() will backfill embeddings when enabled.
             sync_service = await get_sync_service(project)
-            await sync_service.search_service.reindex_all()
+            await sync_service.search_service.reindex_all(batch_size=batch_size)
             logger.info(f"Reindex completed for project: {project.name}")
     finally:
         await db.shutdown_db()
@@ -148,6 +149,14 @@ def reindex(
             "Requires the optional extra: pip install 'memopad[embeddings]'."
         ),
     ),
+    batch_size: int = typer.Option(
+        128,
+        "--batch-size",
+        help=(
+            "Number of items embedded per model call during --embeddings backfill. "
+            "Larger = fewer model calls (faster), more memory."
+        ),
+    ),
 ):  # pragma: no cover
     """Rebuild the search index from the database for all projects.
 
@@ -186,5 +195,7 @@ def reindex(
 
     label = "Reindexing (with embeddings)" if embeddings else "Reindexing"
     console.print(f"{label} {len(projects)} project(s)...")
-    run_with_cleanup(_reindex_all_projects(app_config, embeddings=embeddings))
+    run_with_cleanup(
+        _reindex_all_projects(app_config, embeddings=embeddings, batch_size=batch_size)
+    )
     console.print("[green]Reindex complete[/green]")

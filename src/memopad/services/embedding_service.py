@@ -6,14 +6,29 @@ doesn't need to know which provider is in use. The default provider uses
 `embeddings` extra. When the extra isn't installed the service is disabled and
 all operations become no-ops.
 
-The embedding store is a simple SQLite table managed via raw SQL so no Alembic
-migration is required for the optional feature. The schema is created lazily on
-first write and is a peer of the FTS5 search_index table.
+Vectors are keyed by ``(item_type, item_id)`` so that entities, observations
+(facts), and relations can all be embedded — semantic search surfaces a specific
+fact or relationship, not just the parent note. ``item_type`` is one of
+``entity`` / ``observation`` / ``relation`` and ``item_id`` is the corresponding
+table's primary key (ids collide across those tables, hence the composite key).
 
-Hybrid search uses Reciprocal Rank Fusion (RRF) to combine BM25 results from
-the FTS5 index with cosine-similarity results from this store. RRF is robust to
-score-scale differences between the two retrievers and avoids the need to tune
-weights per dataset.
+Storage is two-tier:
+
+1. **Canonical BLOB store** — a single SQLite/Postgres ``embedding`` table holding
+   packed float32 vectors. Portable, works on every backend, and the source of
+   truth. Created lazily on first write (and by the ``m6f7a8b9c0d1`` migration).
+2. **Optional ``sqlite-vec`` ANN index** — on the default SQLite backend, when the
+   ``sqlite-vec`` extension loads, a ``vec0`` virtual table *per item type per
+   project* mirrors the BLOB store for sublinear KNN. The service writes to both
+   (the BLOB insert is cheap; embedding inference dominates) and queries vec0 when
+   available, falling back to a numpy-vectorized cosine over the BLOB store
+   otherwise. ``numpy`` ships with ``fastembed``, so the fallback is fast to
+   ~100k+ vectors; vec0 scales to millions.
+
+Hybrid search uses Reciprocal Rank Fusion (RRF) to combine BM25 results from the
+FTS5 index with similarity results from this store. RRF is robust to score-scale
+differences between the two retrievers and avoids the need to tune weights per
+dataset.
 """
 
 from __future__ import annotations
@@ -22,10 +37,10 @@ import math
 import os
 import struct
 from dataclasses import dataclass
-from typing import Iterable, Optional, Protocol, Sequence
+from typing import Any, Hashable, Iterable, Optional, Protocol, Sequence, TypeVar
 
 from loguru import logger
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from memopad import db
@@ -36,6 +51,38 @@ from memopad import db
 EMBEDDINGS_ENABLED_ENV = "MEMOPAD_EMBEDDINGS_ENABLED"
 DEFAULT_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 EMBEDDING_DIM_DEFAULT = 384  # bge-small-en-v1.5 produces 384-d vectors
+
+# Item types stored in the embedding table. Each maps to its own vec0 table on the
+# ANN path so the integer `id` (= the item's table PK) is unique within a table.
+ITEM_TYPE_ENTITY = "entity"
+ITEM_TYPE_OBSERVATION = "observation"
+ITEM_TYPE_RELATION = "relation"
+_ITEM_TYPES = (ITEM_TYPE_ENTITY, ITEM_TYPE_OBSERVATION, ITEM_TYPE_RELATION)
+
+# Default chunk size for batched backfill (one model call per chunk).
+BACKFILL_BATCH_DEFAULT = 128
+
+# numpy is a fastembed dependency, so it's present whenever embeddings are enabled.
+# Imported lazily so this module stays importable without the extra (unit tests for
+# the pure helpers run without numpy/fastembed installed).
+# Declared up front (Any) so the optional-import block below keeps a single,
+# always-bound name pyright is happy with — the numpy module when available,
+# ``None`` otherwise. The numpy scoring path is only entered when _HAS_NUMPY.
+_np: Any
+try:
+    import numpy as _np  # type: ignore[import-not-found]
+
+    _HAS_NUMPY = True
+except ImportError:  # pragma: no cover - numpy present whenever fastembed is
+    _np = None
+    _HAS_NUMPY = False
+
+
+# Reciprocal Rank Fusion is generic over the ranking key type so callers get
+# back their own key type (e.g. ``tuple[str, int]``) rather than a widened
+# ``Hashable``. Module-scoped: class-body names are not lexically visible inside
+# methods, so a TypeVar used in a method must live at module level.
+_K = TypeVar("_K", bound=Hashable)
 
 
 def is_enabled() -> bool:
@@ -131,7 +178,8 @@ def reset_provider_cache() -> None:
 class EmbeddingHit:
     """One result from a similarity search."""
 
-    entity_id: int
+    item_type: str
+    item_id: int
     score: float
 
 
@@ -166,11 +214,19 @@ def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
 class EmbeddingService:
     """Manages the embedding store and similarity search.
 
-    The store is a single SQLite table:
-        embedding(entity_id INTEGER PK, project_id INTEGER, model TEXT,
-                  dim INTEGER, vector BLOB, updated_at TEXT)
+    Canonical store (all backends):
 
-    A composite index on (project_id, model) lets us scope queries cheaply.
+        embedding(item_type TEXT, item_id INTEGER, project_id INTEGER, model TEXT,
+                  dim INTEGER, vector BLOB, updated_at TEXT,
+                  PRIMARY KEY (item_type, item_id))
+
+    An index on (project_id, model) scopes BLOB-path queries cheaply.
+
+    ANN index (SQLite + sqlite-vec only): one ``vec0`` virtual table per item type
+    per project, ``embedding_vec_{item_type}_p{project_id}``, with ``id = item_id``
+    and a cosine-distance vector column. KNN scans only that project+type's vectors
+    (vec0 0.1.x disallows auxiliary-column filters inside a KNN query, so we scope
+    by table rather than by WHERE).
     """
 
     def __init__(
@@ -182,9 +238,11 @@ class EmbeddingService:
         self.session_maker = session_maker
         self.project_id = project_id
         self.provider = provider
-        # Trigger: creating the table is async and idempotent, but running it on
+        # Trigger: creating tables is async and idempotent, but running it on
         # every upsert/similar is wasteful. Track initialization so it happens once.
         self._store_initialized = False
+        # Resolved on init_store: True when the sqlite-vec vec0 index is available.
+        self._use_vec0 = False
 
     @classmethod
     def maybe_create(
@@ -203,26 +261,50 @@ class EmbeddingService:
         provider = _get_provider(model_name)
         return cls(session_maker, project_id, provider)
 
+    # --- store lifecycle ---
+
     async def _ensure_store(self) -> None:
-        """Create the embedding table once, lazily, on first use."""
+        """Create the embedding tables once, lazily, on first use."""
         if self._store_initialized:
             return
         await self.init_store()
         self._store_initialized = True
 
     async def init_store(self) -> None:
-        """Create the embedding table if it doesn't exist. Idempotent."""
+        """Create the BLOB table (always) and vec0 tables (if sqlite-vec loads).
+
+        Idempotent. The BLOB table is also created by the m6f7a8b9c0d1 migration;
+        we recreate it lazily so test databases that skip migrations still work.
+        """
+        await self._init_blob_store()
+        # Best-effort ANN index. A failure here (extension missing, unsupported
+        # platform, version mismatch) is non-fatal: the BLOB + numpy path still
+        # serves queries, just without sublinear scaling.
+        self._use_vec0 = await self._try_init_vec0_store()
+        if self._use_vec0:  # pragma: no cover - requires sqlite-vec extension
+            logger.debug(f"Embedding ANN index enabled (vec0) for project_id={self.project_id}")
+        else:
+            logger.debug(
+                f"Embedding ANN index unavailable; using BLOB + "
+                f"{'numpy' if _HAS_NUMPY else 'python'} scoring "
+                f"for project_id={self.project_id}"
+            )
+
+    async def _init_blob_store(self) -> None:
+        """Create the canonical embedding BLOB table and its project/model index."""
         async with db.scoped_session(self.session_maker) as session:
             await session.execute(
                 text(
                     """
                     CREATE TABLE IF NOT EXISTS embedding (
-                        entity_id INTEGER PRIMARY KEY,
+                        item_type TEXT NOT NULL,
+                        item_id INTEGER NOT NULL,
                         project_id INTEGER NOT NULL,
                         model TEXT NOT NULL,
                         dim INTEGER NOT NULL,
                         vector BLOB NOT NULL,
-                        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                        PRIMARY KEY (item_type, item_id)
                     )
                     """
                 )
@@ -235,21 +317,71 @@ class EmbeddingService:
             )
             await session.commit()
 
-    async def upsert(self, entity_id: int, content: str) -> None:
-        """Embed `content` and write it to the store, replacing any prior row."""
-        if not self.provider:
+    def _vec_table(self, item_type: str) -> str:
+        """Name of the vec0 table for a given item type in this project."""
+        return f"embedding_vec_{item_type}_p{self.project_id}"
+
+    async def _try_init_vec0_store(self) -> bool:
+        """Create one vec0 table per item type. Return True iff all succeeded."""
+        if self.provider is None:
+            return False
+        dim = self.provider.dim
+        ddl = [
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS {self._vec_table(t)} "
+            f"USING vec0(id integer primary key, embedding float[{dim}] distance_metric=cosine)"
+            for t in _ITEM_TYPES
+        ]
+        try:
+            async with db.scoped_session(self.session_maker) as session:
+                for stmt in ddl:
+                    await session.execute(text(stmt))
+                await session.commit()
+            return True  # pragma: no cover - requires sqlite-vec extension
+        except Exception as e:  # pragma: no cover - environment-gated (extension absent)
+            logger.debug(f"sqlite-vec vec0 init skipped: {e}")
+            return False
+
+    # --- writes ---
+
+    async def upsert(self, item_type: str, item_id: int, content: str) -> None:
+        """Embed `content` and write it, replacing any prior vector for this item."""
+        await self.upsert_batch([(item_type, item_id, content)])
+
+    async def upsert_batch(self, items: Sequence[tuple[str, int, str]]) -> None:
+        """Embed a batch of items in one model call and write all vectors.
+
+        Args:
+            items: sequence of (item_type, item_id, text). Order preserved through
+                embedding so texts and keys stay aligned.
+        """
+        if not self.provider or not items:
             return
         await self._ensure_store()
-        vec = self.provider.embed([content])[0]
-        blob = _pack_vector(vec)
+
+        texts = [text for _, _, text in items]
+        vectors = self.provider.embed(texts)
+
+        # Canonical BLOB rows (always written, all backends).
+        blob_rows = [
+            {
+                "t": item_type,
+                "iid": item_id,
+                "pid": self.project_id,
+                "model": self.provider.model_name,
+                "dim": self.provider.dim,
+                "vec": _pack_vector(vector),
+            }
+            for (item_type, item_id, _), vector in zip(items, vectors)
+        ]
 
         async with db.scoped_session(self.session_maker) as session:
             await session.execute(
                 text(
                     """
-                    INSERT INTO embedding (entity_id, project_id, model, dim, vector, updated_at)
-                    VALUES (:eid, :pid, :model, :dim, :vec, datetime('now'))
-                    ON CONFLICT(entity_id) DO UPDATE SET
+                    INSERT INTO embedding
+                        (item_type, item_id, project_id, model, dim, vector, updated_at)
+                    VALUES (:t, :iid, :pid, :model, :dim, :vec, datetime('now'))
+                    ON CONFLICT(item_type, item_id) DO UPDATE SET
                         project_id = excluded.project_id,
                         model = excluded.model,
                         dim = excluded.dim,
@@ -257,72 +389,222 @@ class EmbeddingService:
                         updated_at = excluded.updated_at
                     """
                 ),
-                {
-                    "eid": entity_id,
-                    "pid": self.project_id,
-                    "model": self.provider.model_name,
-                    "dim": self.provider.dim,
-                    "vec": blob,
-                },
+                blob_rows,
             )
+            # ANN index mirror: one upsert per item into its type's vec0 table.
+            # vec0 has no UPSERT/REPLACE support, so re-embedding an item is a
+            # delete-then-insert against its integer id.
+            if self._use_vec0:  # pragma: no cover - requires sqlite-vec extension
+                for (item_type, item_id, _), vector in zip(items, vectors):
+                    await session.execute(
+                        text(f"DELETE FROM {self._vec_table(item_type)} WHERE id = :id"),
+                        {"id": item_id},
+                    )
+                    await session.execute(
+                        text(
+                            f"INSERT INTO {self._vec_table(item_type)} (id, embedding) "
+                            f"VALUES (:id, :vec)"
+                        ),
+                        {"id": item_id, "vec": _pack_vector(vector)},
+                    )
             await session.commit()
 
-    async def delete(self, entity_id: int) -> None:
-        """Remove an entity's embedding (called when an entity is deleted)."""
+    async def delete_batch(self, keys: Sequence[tuple[str, int]]) -> None:
+        """Remove vectors for a batch of (item_type, item_id) keys."""
+        if not self.provider or not keys:
+            return
+        await self._ensure_store()
+        # Group by type so each BLOB delete is a single IN (...) statement and each
+        # vec0 delete targets the right table.
+        by_type: dict[str, list[int]] = {}
+        for item_type, item_id in keys:
+            by_type.setdefault(item_type, []).append(item_id)
+
+        async with db.scoped_session(self.session_maker) as session:
+            for item_type, ids in by_type.items():
+                await session.execute(
+                    text(
+                        "DELETE FROM embedding WHERE project_id = :pid "
+                        "AND item_type = :t AND item_id IN :ids"
+                    ).bindparams(bindparam("ids", expanding=True)),
+                    {"pid": self.project_id, "t": item_type, "ids": ids},
+                )
+                if self._use_vec0:  # pragma: no cover - requires sqlite-vec extension
+                    await session.execute(
+                        text(
+                            f"DELETE FROM {self._vec_table(item_type)} WHERE id IN :ids"
+                        ).bindparams(bindparam("ids", expanding=True)),
+                        {"ids": ids},
+                    )
+            await session.commit()
+
+    async def clear_project(self, project_id: Optional[int] = None) -> None:
+        """Delete every vector for a project (used by full reindex to drop stale rows).
+
+        Defaults to this service's project_id.
+        """
         if not self.provider:
             return
         await self._ensure_store()
+        pid = project_id if project_id is not None else self.project_id
         async with db.scoped_session(self.session_maker) as session:
             await session.execute(
-                text("DELETE FROM embedding WHERE entity_id = :eid"),
-                {"eid": entity_id},
+                text("DELETE FROM embedding WHERE project_id = :pid"),
+                {"pid": pid},
             )
+            if self._use_vec0:  # pragma: no cover - requires sqlite-vec extension
+                for t in _ITEM_TYPES:
+                    await session.execute(
+                        text(f"DELETE FROM {self._vec_table(t)}"),
+                    )
             await session.commit()
 
-    async def similar(self, query: str, limit: int = 10) -> list[EmbeddingHit]:
-        """Return the top-K most similar entities to `query` by cosine score.
+    # --- reads ---
 
-        Implementation note: we score in Python because SQLite has no native
-        vector ops. For large collections this won't scale; the long-term plan
-        is to swap in sqlite-vec or a column-oriented store. For now, this is
-        fine — the bottleneck is embedding the query, not the dot products.
+    async def similar(
+        self,
+        query: str,
+        limit: int = 10,
+        item_type: Optional[str] = None,
+    ) -> list[EmbeddingHit]:
+        """Return the top-K most similar items to `query` by cosine similarity.
+
+        Primary path: vec0 KNN (sublinear, scans only this project+type's vectors).
+        Fallback: numpy matmul over the BLOB store (fast to ~100k+ vectors), or a
+        pure-Python cosine loop if numpy is somehow absent.
         """
         if not self.provider:
             return []
         await self._ensure_store()
         q_vec = self.provider.embed([query])[0]
 
+        if self._use_vec0:  # pragma: no cover - requires sqlite-vec extension
+            return await self._similar_vec0(q_vec, limit, item_type)
+        return await self._similar_blob(q_vec, limit, item_type)
+
+    async def _similar_vec0(
+        self,
+        q_vec: Sequence[float],
+        limit: int,
+        item_type: Optional[str],
+    ) -> list[EmbeddingHit]:  # pragma: no cover - requires sqlite-vec extension
+        """KNN via sqlite-vec. One vec0 table per type; merge across types if unfiltered."""
+        packed = _pack_vector(q_vec)
+        # Trigger: no item_type filter
+        # Why: the caller wants the best matches across all item kinds (entities,
+        #      observations, relations) fused together by hybrid search.
+        # Outcome: query each type's vec0 table and merge by score
+        types = (item_type,) if item_type else _ITEM_TYPES
+        hits: list[EmbeddingHit] = []
         async with db.scoped_session(self.session_maker) as session:
-            result = await session.execute(
-                text(
-                    "SELECT entity_id, vector FROM embedding "
-                    "WHERE project_id = :pid AND model = :model"
-                ),
-                {"pid": self.project_id, "model": self.provider.model_name},
-            )
+            for t in types:
+                result = await session.execute(
+                    text(
+                        f"SELECT id, distance FROM {self._vec_table(t)} "
+                        f"WHERE embedding MATCH :q ORDER BY distance LIMIT :k"
+                    ),
+                    {"q": packed, "k": limit},
+                )
+                for row in result.fetchall():
+                    # cosine distance ∈ [0, 2]; similarity = 1 - distance
+                    hits.append(EmbeddingHit(item_type=t, item_id=row[0], score=1.0 - row[1]))
+        hits.sort(key=lambda h: h.score, reverse=True)
+        return hits[:limit]
+
+    async def _similar_blob(
+        self,
+        q_vec: Sequence[float],
+        limit: int,
+        item_type: Optional[str],
+    ) -> list[EmbeddingHit]:
+        """Score every vector for this project in memory and take the top-K.
+
+        numpy matmul when available (one vectorized dot product); pure-Python
+        cosine otherwise. The BLOB path is the fallback when sqlite-vec is absent,
+        e.g. on Postgres or platforms where the extension won't load.
+        """
+        model = self.provider.model_name if self.provider else ""
+        async with db.scoped_session(self.session_maker) as session:
+            if item_type:
+                result = await session.execute(
+                    text(
+                        "SELECT item_type, item_id, vector FROM embedding "
+                        "WHERE project_id = :pid AND model = :model AND item_type = :t"
+                    ),
+                    {"pid": self.project_id, "model": model, "t": item_type},
+                )
+            else:
+                result = await session.execute(
+                    text(
+                        "SELECT item_type, item_id, vector FROM embedding "
+                        "WHERE project_id = :pid AND model = :model"
+                    ),
+                    {"pid": self.project_id, "model": model},
+                )
             rows = result.fetchall()
 
+        if not rows:
+            return []
+
+        if _HAS_NUMPY:
+            return self._score_numpy(q_vec, rows, limit)
+        # pragma: no cover - numpy is present whenever embeddings are enabled
+        return self._score_python(q_vec, rows, limit)
+
+    @staticmethod
+    def _score_numpy(
+        q_vec: Sequence[float],
+        rows: Sequence[Any],
+        limit: int,
+    ) -> list[EmbeddingHit]:
+        """Vectorized cosine: normalize rows + query, then one matmul."""
+        mat = _np.vstack([_np.frombuffer(row[2], dtype=_np.float32) for row in rows])
+        mat = mat / _np.linalg.norm(mat, axis=1, keepdims=True).clip(min=1e-12)
+        q = _np.asarray(q_vec, dtype=_np.float32)
+        q = q / max(float(_np.linalg.norm(q)), 1e-12)
+        scores = mat @ q
+        order = _np.argsort(-scores)[:limit]
+        return [
+            EmbeddingHit(item_type=rows[i][0], item_id=rows[i][1], score=float(scores[i]))
+            for i in order
+        ]
+
+    @staticmethod
+    def _score_python(
+        q_vec: Sequence[float],
+        rows: Sequence[Any],
+        limit: int,
+    ) -> list[EmbeddingHit]:  # pragma: no cover - numpy is present whenever embeddings are enabled
+        """Pure-Python cosine fallback (used only when numpy is unavailable)."""
         scored = [
-            EmbeddingHit(entity_id=row[0], score=_cosine(q_vec, _unpack_vector(row[1])))
+            EmbeddingHit(
+                item_type=row[0], item_id=row[1], score=_cosine(q_vec, _unpack_vector(row[2]))
+            )
             for row in rows
         ]
         scored.sort(key=lambda h: h.score, reverse=True)
         return scored[:limit]
 
+    # --- fusion ---
+
     @staticmethod
     def reciprocal_rank_fusion(
-        rankings: Iterable[Sequence[int]], k: int = 60
-    ) -> list[tuple[int, float]]:
-        """Fuse multiple ranked lists of entity_ids via Reciprocal Rank Fusion.
+        rankings: Iterable[Sequence[_K]], k: int = 60
+    ) -> list[tuple[_K, float]]:
+        """Fuse multiple ranked lists of item keys via Reciprocal Rank Fusion.
 
-        RRF score for an item = sum over rankings of 1 / (k + rank).
-        k=60 is the value from the original RRF paper and works well in practice.
-        Items not appearing in a ranking simply contribute zero from that source.
+        Keys are hashable item identifiers — ints (legacy entity-only callers) or
+        ``(item_type, item_id)`` tuples (mixed-type hybrid search). RRF score for
+        an item = sum over rankings of 1 / (k + rank). k=60 is the value from the
+        original RRF paper and works well in practice. Items not appearing in a
+        ranking contribute zero from that source.
 
-        Returns a list of (entity_id, score) sorted by score desc.
+        Returns a list of (key, score) sorted by score desc. Generic over the key
+        type so callers get back their own key type (e.g. ``tuple[str, int]``)
+        rather than a widened ``Hashable``.
         """
-        scores: dict[int, float] = {}
+        scores: dict[_K, float] = {}
         for ranking in rankings:
-            for rank, eid in enumerate(ranking):
-                scores[eid] = scores.get(eid, 0.0) + 1.0 / (k + rank + 1)
+            for rank, key in enumerate(ranking):
+                scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
         return sorted(scores.items(), key=lambda kv: kv[1], reverse=True)

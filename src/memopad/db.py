@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from enum import Enum, auto
@@ -128,6 +128,23 @@ async def scoped_session(
         await factory.remove()
 
 
+def _load_sqlite_vec(dbapi_conn, sqlite_vec) -> None:  # pragma: no cover - requires the extra
+    """Load the sqlite-vec extension on a SQLite connection.
+
+    Handles both a plain ``sqlite3`` connection (sync engines) and SQLAlchemy's
+    aiosqlite adapter. The adapter does not expose ``enable_load_extension``
+    directly, so we drive the async ``aiosqlite.Connection`` via the adapter's
+    ``run_async`` — which dispatches the load onto aiosqlite's worker thread (the
+    only thread allowed to touch the underlying sqlite3 connection).
+    """
+    if hasattr(dbapi_conn, "enable_load_extension"):
+        dbapi_conn.enable_load_extension(True)
+        sqlite_vec.load(dbapi_conn)
+    else:
+        dbapi_conn.run_async(lambda c: c.enable_load_extension(True))
+        dbapi_conn.run_async(lambda c: c.load_extension(sqlite_vec.loadable_path()))
+
+
 def _configure_sqlite_connection(dbapi_conn, enable_wal: bool = True) -> None:
     """Configure SQLite connection with WAL mode and optimizations.
 
@@ -144,7 +161,9 @@ def _configure_sqlite_connection(dbapi_conn, enable_wal: bool = True) -> None:
         cursor.execute("PRAGMA busy_timeout=10000")  # 10 seconds
         # Optimize for performance
         cursor.execute("PRAGMA synchronous=NORMAL")
-        cursor.execute("PRAGMA cache_size=-128000")  # 128MB cache (increased from 64MB for better performance)
+        cursor.execute(
+            "PRAGMA cache_size=-128000"
+        )  # 128MB cache (increased from 64MB for better performance)
         cursor.execute("PRAGMA temp_store=MEMORY")
         # Enable query optimizer for better query plans
         cursor.execute("PRAGMA optimize")
@@ -152,6 +171,21 @@ def _configure_sqlite_connection(dbapi_conn, enable_wal: bool = True) -> None:
         # Windows-specific optimizations
         if os.name == "nt":
             cursor.execute("PRAGMA locking_mode=NORMAL")  # Ensure normal locking on Windows
+
+        # Best-effort: load the sqlite-vec extension so the embeddings feature can
+        # use vec0 ANN indexes. Gated on the embeddings env var so the common case
+        # (embeddings off) pays zero per-connection extension-load cost. A failure
+        # here is non-fatal — EmbeddingService falls back to the BLOB + numpy path.
+        # Trigger: MEMOPAD_EMBEDDINGS_ENABLED is set and sqlite_vec is importable
+        # Why: vec0 KNN needs the extension loaded on the connection that runs it
+        # Outcome: vec0 available; or silently skipped (numpy fallback used)
+        if os.environ.get("MEMOPAD_EMBEDDINGS_ENABLED", "").lower() in ("1", "true", "yes"):
+            try:
+                import sqlite_vec  # type: ignore[import-not-found]
+
+                _load_sqlite_vec(dbapi_conn, sqlite_vec)  # pragma: no cover - requires the extra
+            except Exception as e:  # pragma: no cover - environment-gated
+                logger.debug(f"sqlite-vec extension not loaded (fallback will be used): {e}")
     except Exception as e:
         # Log but don't fail - some PRAGMAs may not be supported
         logger.warning(f"Failed to configure SQLite connection: {e}")
@@ -369,6 +403,7 @@ async def get_stoolap_db(config: Optional[MemoPadConfig] = None):
 
     # Apply DDL schema (idempotent — uses CREATE TABLE IF NOT EXISTS)
     from memopad.repository.stoolap_schema import STOOLAP_DDL
+
     for statement in STOOLAP_DDL:
         await _stoolap_db.execute(statement)
 

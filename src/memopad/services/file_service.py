@@ -1,4 +1,4 @@
-﻿"""Service for file operations with checksum tracking."""
+"""Service for file operations with checksum tracking."""
 
 import asyncio
 import hashlib
@@ -54,10 +54,11 @@ class FileService:
         # Semaphore to limit concurrent file operations
         # Prevents OOM on large projects by processing files in batches
         self._file_semaphore = asyncio.Semaphore(max_concurrent_files)
-        
+
         # File metadata cache with TTL and size limit (Phase 1 Optimization #1)
         # Use OrderedDict for LRU eviction
         from collections import OrderedDict
+
         self._metadata_cache: OrderedDict[str, Tuple[FileMetadata, float]] = OrderedDict()
         self._max_metadata_cache_size = 5000  # Prevent unbounded memory growth
         self._metadata_cache_ttl = 60.0  # Base TTL - can be adaptive per file
@@ -550,7 +551,7 @@ class FileService:
                 logger.trace(f"Cached file metadata: {cache_key}")
 
         return metadata
-    
+
     async def invalidate_metadata_cache(self, path: Optional[FilePath] = None) -> None:
         """Invalidate file metadata cache.
 
@@ -572,40 +573,40 @@ class FileService:
                 if cache_key in self._metadata_cache:
                     del self._metadata_cache[cache_key]
                     logger.trace(f"Invalidated metadata cache: {cache_key}")
-    
+
     def _calculate_adaptive_ttl(self, file_path: Path) -> float:
         """Calculate adaptive TTL based on file characteristics.
-        
+
         Phase 1 Optimization #3: Dynamic TTL based on file age.
-        
+
         Longer TTL for:
         - Old files (rarely change)
         - Files in stable directories
-        
+
         Shorter TTL for:
         - Recently modified files
         - Files in active directories
-        
+
         Args:
             file_path: Path to the file
-        
+
         Returns:
             TTL in seconds
         """
         try:
             stat = file_path.stat()
             age_days = (time.time() - stat.st_mtime) / 86400
-            
+
             # Older files get longer TTL
             if age_days > 30:
                 return 300.0  # 5 minutes for old files
             elif age_days > 7:
                 return 120.0  # 2 minutes for week-old files
             else:
-                return 30.0   # 30 seconds for recent files
+                return 30.0  # 30 seconds for recent files
         except Exception:
             return self._metadata_cache_ttl  # Default fallback
-    
+
     async def _evict_metadata_cache_if_needed(self) -> None:
         """Enforce both TTL and size limits on metadata cache.
 
@@ -619,7 +620,8 @@ class FileService:
             # Remove expired entries (TTL eviction)
             now = time.time()
             expired_keys = [
-                k for k, (_, timestamp) in self._metadata_cache.items()
+                k
+                for k, (_, timestamp) in self._metadata_cache.items()
                 if now - timestamp > self._metadata_cache_ttl
             ]
 
@@ -634,7 +636,6 @@ class FileService:
                 evicted_key, _ = self._metadata_cache.popitem(last=False)
                 logger.trace(f"LRU evicted metadata: {evicted_key}")
 
-
     def content_type(self, path: FilePath) -> str:
         """Return content_type for a given path.
 
@@ -647,6 +648,15 @@ class FileService:
         # Convert string to Path if needed
         path_obj = self.base_path / path if isinstance(path, str) else path
         full_path = path_obj if path_obj.is_absolute() else self.base_path / path_obj
+
+        # Markdown is a first-class content type in memopad: don't rely on the OS
+        # mimetype registry, which on Windows often does not register `.md`. Without
+        # this, markdown notes route through the file-sync path (sync_regular_file)
+        # and skip observation/relation parsing entirely — so facts and relations
+        # never reach the DB or the embedding index.
+        if full_path.suffix.lower() in (".md", ".markdown"):
+            return "text/markdown"
+
         # get file timestamps
         mime_type, _ = mimetypes.guess_type(full_path.name)
 

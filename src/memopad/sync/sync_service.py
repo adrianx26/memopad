@@ -1,4 +1,4 @@
-﻿"""Service for syncing files between filesystem and database."""
+"""Service for syncing files between filesystem and database."""
 
 import asyncio
 import os
@@ -38,7 +38,6 @@ MAX_CONSECUTIVE_FAILURES = 3
 
 # Parallel sync configuration
 MAX_CONCURRENT_SYNCS = 10  # Limit concurrent file operations to prevent resource exhaustion
-
 
 
 @dataclass
@@ -278,16 +277,16 @@ class SyncService:
         cached_checksum: Optional[str] = None,
     ) -> Tuple[Optional[Entity], Optional[str]]:
         """Sync a file with semaphore-controlled concurrency.
-        
+
         This wrapper enables parallel processing while limiting concurrent operations
         to prevent resource exhaustion (memory, file handles, database connections).
-        
+
         Args:
             semaphore: Semaphore to limit concurrent operations
             path: File path to sync
             new: Whether this is a new file
             cached_checksum: Pre-calculated checksum if available
-        
+
         Returns:
             Tuple of (entity, checksum) or (None, None) on failure
         """
@@ -343,29 +342,23 @@ class SyncService:
         # Sync new and modified files in parallel with controlled concurrency
         # Create semaphore to limit concurrent operations
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_SYNCS)
-        
+
         # Build tasks for all new files
         new_tasks = [
             self._sync_file_with_semaphore(
-                semaphore,
-                path,
-                new=True,
-                cached_checksum=report.checksums.get(path)
+                semaphore, path, new=True, cached_checksum=report.checksums.get(path)
             )
             for path in report.new
         ]
-        
+
         # Build tasks for all modified files
         modified_tasks = [
             self._sync_file_with_semaphore(
-                semaphore,
-                path,
-                new=False,
-                cached_checksum=report.checksums.get(path)
+                semaphore, path, new=False, cached_checksum=report.checksums.get(path)
             )
             for path in report.modified
         ]
-        
+
         # Execute all tasks in parallel (respecting semaphore limit)
         if new_tasks or modified_tasks:
             logger.info(
@@ -373,10 +366,10 @@ class SyncService:
                 f"{len(modified_tasks)} modified files "
                 f"(max {MAX_CONCURRENT_SYNCS} concurrent)"
             )
-            
+
             all_tasks = new_tasks + modified_tasks
             results = await asyncio.gather(*all_tasks, return_exceptions=True)
-            
+
             # Process results and track skipped files
             all_paths = list(report.new) + list(report.modified)
             for path, result in zip(all_paths, results):
@@ -392,9 +385,9 @@ class SyncService:
                         )
                     )
                     continue
-                
+
                 entity, checksum = result
-                
+
                 # Track if file was skipped
                 if entity is None and await self._should_skip_file(path):
                     failure_info = self._file_failures[path]
@@ -545,7 +538,8 @@ class SyncService:
         # Step 3a: Batch fetch all entities for files being scanned (eliminates N+1 queries)
         logger.debug(f"Batch fetching entities for {len(file_paths_to_scan)} files")
         db_entities = await self.entity_repository.get_by_file_paths_batch(
-            file_paths_to_scan, eager_load=False  # We only need basic info for scanning
+            file_paths_to_scan,
+            eager_load=False,  # We only need basic info for scanning
         )
         db_entity_map = {entity.file_path: entity for entity in db_entities}
         logger.debug(f"Fetched {len(db_entities)} existing entities from database")
@@ -961,6 +955,11 @@ class SyncService:
                     await self.search_service.delete_by_permalink(permalink)
                 else:
                     await self.search_service.delete_by_entity_id(entity.id)
+
+            # Drop the semantic vectors (entity + observations + relations) via the
+            # shared cleanup helper, so file-sync deletes don't orphan vectors the
+            # way the explicit API/CLI delete path cleans them.
+            await self.search_service.delete_entity_embeddings(entity)
 
     async def handle_move(self, old_path, new_path):
         logger.debug("Moving entity", old_path=old_path, new_path=new_path)

@@ -1,4 +1,4 @@
-﻿"""Utility functions for memopad."""
+"""Utility functions for memopad."""
 
 import logging
 import mimetypes
@@ -11,6 +11,15 @@ from typing import List, Protocol, Tuple, Union, runtime_checkable
 
 from loguru import logger
 from unidecode import unidecode
+
+# Markdown is a first-class content type in memopad. On some platforms (notably
+# Windows) the mimetypes registry does not register `.md`/`.markdown`, so
+# `_split_extension` would treat them as unknown and keep the extension in the
+# permalink (e.g. "my-feature.md" instead of "my-feature"). Register them up
+# front so permalink generation is consistent across platforms. `add_type` is
+# idempotent and process-global.
+mimetypes.add_type("text/markdown", ".md")
+mimetypes.add_type("text/markdown", ".markdown")
 
 
 def normalize_project_path(path: str) -> str:
@@ -126,12 +135,8 @@ def _process_cjk_path(base: str) -> str:
 
     # Insert hyphens between CJK and Latin character transitions
     # Match: CJK followed by Latin letter/digit, or Latin letter/digit followed by CJK
-    result = re.sub(
-        r"([\u4e00-\u9fff\u3000-\u303f\u3400-\u4dbf])([a-zA-Z0-9])", r"\1-\2", result
-    )
-    result = re.sub(
-        r"([a-zA-Z0-9])([\u4e00-\u9fff\u3000-\u303f\u3400-\u4dbf])", r"\1-\2", result
-    )
+    result = re.sub(r"([\u4e00-\u9fff\u3000-\u303f\u3400-\u4dbf])([a-zA-Z0-9])", r"\1-\2", result)
+    result = re.sub(r"([a-zA-Z0-9])([\u4e00-\u9fff\u3000-\u303f\u3400-\u4dbf])", r"\1-\2", result)
 
     # Insert dash between camelCase
     result = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", result)
@@ -268,6 +273,7 @@ def setup_logging(
     # Add file handler with rotation
     if log_to_file:
         from memopad.config import DATA_DIR_NAME
+
         log_path = Path.home() / DATA_DIR_NAME / "memopad.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         # Keep logging synchronous (enqueue=False) to avoid background logging threads.
@@ -443,7 +449,7 @@ def valid_project_path_value(path: str):
         return False
 
     # Check for Windows-style path traversal (even on Unix systems)
-    if "\\\".." in path or path.startswith("\\\\") or path.startswith("\\"):
+    if '\\"..' in path or path.startswith("\\\\") or path.startswith("\\"):
         return False
 
     # Block absolute paths (Unix-style starting with / or Windows-style with drive letters)

@@ -1,22 +1,31 @@
 """Service for search operations."""
 
 import ast
+import json
 import re
 from datetime import datetime
 from functools import lru_cache
-from typing import AbstractSet, List, Optional, Set, Dict, Any
+from typing import AbstractSet, List, Optional, Dict, Any
 
 
 from dateparser import parse
 from fastapi import BackgroundTasks
 from loguru import logger
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
+from memopad import db
 from memopad.models import Entity
 from memopad.repository import EntityRepository
 from memopad.repository.search_repository import SearchRepository, SearchIndexRow
 from memopad.schemas.search import SearchQuery, SearchItemType
 from memopad.services import FileService
+from memopad.services.embedding_service import (
+    BACKFILL_BATCH_DEFAULT,
+    ITEM_TYPE_ENTITY,
+    ITEM_TYPE_OBSERVATION,
+    ITEM_TYPE_RELATION,
+    EmbeddingService,
+)
 
 # Maximum size for content_stems field to stay under Postgres's 8KB index row limit.
 # We use 6000 characters to leave headroom for other indexed columns and overhead.
@@ -75,9 +84,7 @@ class SearchService:
             return None
         from memopad.services.embedding_service import EmbeddingService
 
-        self._embedding_service = EmbeddingService.maybe_create(
-            self.session_maker, self.project_id
-        )
+        self._embedding_service = EmbeddingService.maybe_create(self.session_maker, self.project_id)
         return self._embedding_service
 
     @staticmethod
@@ -92,8 +99,51 @@ class SearchService:
             parts.append(content)
         return "\n".join(p for p in parts if p)
 
-    async def _upsert_embedding(self, entity: Entity, content: Optional[str]) -> None:
-        """Best-effort: write the entity's semantic vector alongside its FTS row.
+    @staticmethod
+    def _observation_embedding_text(obs) -> str:
+        """Build the text we embed for an observation (a single fact): category + content."""
+        parts = [obs.category or "", obs.content or ""]
+        return "\n".join(p for p in parts if p)
+
+    @staticmethod
+    def _relation_embedding_text(rel) -> str:
+        """Build the text we embed for an outgoing relation: from → type → to.
+
+        Captures the relationship as a phrase so queries like "what depends on
+        the parser" match the relation itself, not just the endpoints.
+        """
+        from_title = rel.from_entity.title if rel.from_entity else ""
+        if rel.to_entity:
+            to_title = rel.to_entity.title
+            return f"{from_title} → {rel.relation_type} → {to_title}"
+        return f"{from_title} → {rel.relation_type}"
+
+    def _entity_embedding_items(
+        self, entity: Entity, content: Optional[str]
+    ) -> list[tuple[str, int, str]]:
+        """Build the (item_type, item_id, text) batch for an entity and its facts/relations.
+
+        One entity yields one entity vector plus a vector per observation and per
+        outgoing relation, so semantic search can surface a specific fact or edge.
+        """
+        items: list[tuple[str, int, str]] = [
+            (ITEM_TYPE_ENTITY, entity.id, self._entity_embedding_text(entity, content))
+        ]
+        for obs in entity.observations:
+            items.append((ITEM_TYPE_OBSERVATION, obs.id, self._observation_embedding_text(obs)))
+        for rel in entity.outgoing_relations:
+            items.append((ITEM_TYPE_RELATION, rel.id, self._relation_embedding_text(rel)))
+        return items
+
+    def _entity_embedding_keys(self, entity: Entity) -> list[tuple[str, int]]:
+        """The (item_type, item_id) keys for an entity's vectors (used on delete)."""
+        keys: list[tuple[str, int]] = [(ITEM_TYPE_ENTITY, entity.id)]
+        keys.extend((ITEM_TYPE_OBSERVATION, o.id) for o in entity.observations)
+        keys.extend((ITEM_TYPE_RELATION, r.id) for r in entity.outgoing_relations)
+        return keys
+
+    async def _upsert_entity_embeddings(self, entity: Entity, content: Optional[str]) -> None:
+        """Best-effort: write the entity's + its facts'/relations' vectors alongside FTS.
 
         Embeddings are optional; when disabled this is a no-op. A failure here
         must NOT break FTS indexing — we log and move on so a model/IO hiccup
@@ -102,21 +152,23 @@ class SearchService:
         try:
             svc = await self._get_embedding_service()
         except Exception as e:  # pragma: no cover
-            logger.warning(
-                f"Embedding service unavailable for entity_id={entity.id}: {e}"
-            )
+            logger.warning(f"Embedding service unavailable for entity_id={entity.id}: {e}")
             return
         if svc is None:
             return
         try:
-            if content is None:
+            if content is None and entity.is_markdown:
                 content = await self.file_service.read_entity_content(entity)
-            await svc.upsert(entity.id, self._entity_embedding_text(entity, content))
+            await svc.upsert_batch(self._entity_embedding_items(entity, content))
         except Exception as e:  # pragma: no cover
             logger.warning(f"Embedding upsert failed for entity_id={entity.id}: {e}")
 
-    async def _delete_embedding(self, entity: Entity) -> None:
-        """Best-effort: drop an entity's vector when the entity is deleted."""
+    async def delete_entity_embeddings(self, entity: Entity) -> None:
+        """Best-effort: drop an entity's vectors (entity + observations + relations).
+
+        Public so the sync file-delete path can call the same cleanup the explicit
+        API/CLI delete path uses, keeping the two from diverging.
+        """
         try:
             svc = await self._get_embedding_service()
         except Exception:  # pragma: no cover
@@ -124,7 +176,7 @@ class SearchService:
         if svc is None:
             return
         try:
-            await svc.delete(entity.id)
+            await svc.delete_batch(self._entity_embedding_keys(entity))
         except Exception as e:  # pragma: no cover
             logger.warning(f"Embedding delete failed for entity_id={entity.id}: {e}")
 
@@ -132,13 +184,21 @@ class SearchService:
         """Create FTS5 virtual table if it doesn't exist."""
         await self.repository.init_search_index()
 
-    async def reindex_all(self, background_tasks: Optional[BackgroundTasks] = None) -> None:
+    async def reindex_all(
+        self,
+        background_tasks: Optional[BackgroundTasks] = None,
+        batch_size: int = BACKFILL_BATCH_DEFAULT,
+    ) -> None:
         """Reindex all content from database.
 
         Clears this project's rows in place (DELETE) rather than DROP+recreate so the
         index table and its schema stay present throughout the rebuild. A concurrent
         search therefore sees stale-but-present results instead of an empty or
         missing table. The table is created if it does not yet exist.
+
+        When embeddings are enabled, the project's vectors are cleared too (so notes
+        deleted since the last reindex stop matching) and re-populated in batched
+        chunks — one model call per chunk instead of one per note.
         """
 
         logger.info("Starting full reindex")
@@ -151,13 +211,63 @@ class SearchService:
             params={"project_id": self.repository.project_id},
         )
 
-        # Reindex all entities
+        # Trigger: embeddings are enabled for this project
+        # Why: vectors for notes deleted since the last reindex would otherwise
+        #      persist and match queries to content that no longer exists
+        # Outcome: clear the project's vectors before re-embedding everything
+        embedding_svc = await self._get_embedding_service()
+        if embedding_svc is not None:
+            await embedding_svc.clear_project(self.repository.project_id)
+
+        # Reindex all entities into FTS, suppressing per-note embedding — the
+        # batched backfill pass below embeds everything in far fewer model calls.
+        # Load each note's content once so the FTS write and the backfill share it
+        # instead of reading the file twice.
         logger.debug("Indexing entities")
         entities = await self.entity_repository.find_all()
+        loaded: list[tuple[Entity, Optional[str]]] = []
         for entity in entities:
-            await self.index_entity(entity, background_tasks)
+            content = (
+                await self.file_service.read_entity_content(entity) if entity.is_markdown else None
+            )
+            await self.index_entity(
+                entity, background_tasks, content=content, write_embeddings=False
+            )
+            loaded.append((entity, content))
+
+        # Batched semantic backfill (only when embeddings are enabled).
+        if embedding_svc is not None and loaded:
+            await self._backfill_embeddings(loaded, batch_size)
 
         logger.info("Reindex complete")
+
+    async def _backfill_embeddings(
+        self,
+        loaded: list[tuple[Entity, Optional[str]]],
+        batch_size: int,
+    ) -> None:
+        """Embed every entity + observation + relation in batched chunks.
+
+        Gathering across notes lets one model call cover `batch_size` items, so a
+        full backfill costs ceil(total_items / batch_size) model calls instead of
+        one per note. Best-effort: a failure logs and aborts the backfill but does
+        not undo the FTS rebuild.
+        """
+        svc = await self._get_embedding_service()
+        if svc is None:
+            return
+        items: list[tuple[str, int, str]] = []
+        for entity, content in loaded:
+            items.extend(self._entity_embedding_items(entity, content))
+        if not items:
+            return
+        logger.info(f"Backfilling {len(items)} embedding items in chunks of {batch_size}")
+        for i in range(0, len(items), batch_size):
+            try:
+                await svc.upsert_batch(items[i : i + batch_size])
+            except Exception as e:  # pragma: no cover
+                logger.warning(f"Embedding backfill chunk failed at offset {i}: {e}")
+                raise
 
     async def search(self, query: SearchQuery, limit=10, offset=0) -> List[SearchIndexRow]:
         """Search across all indexed content.
@@ -288,16 +398,19 @@ class SearchService:
         entity: Entity,
         background_tasks: Optional[BackgroundTasks] = None,
         content: str | None = None,
+        *,
+        write_embeddings: bool = True,
     ) -> None:
         if background_tasks:
-            background_tasks.add_task(self.index_entity_data, entity, content)
+            background_tasks.add_task(self.index_entity_data, entity, content, write_embeddings)
         else:
-            await self.index_entity_data(entity, content)
+            await self.index_entity_data(entity, content, write_embeddings)
 
     async def index_entity_data(
         self,
         entity: Entity,
         content: str | None = None,
+        write_embeddings: bool = True,
     ) -> None:
         logger.info(
             f"[BackgroundTask] Starting search index for entity_id={entity.id} "
@@ -308,9 +421,10 @@ class SearchService:
             await self.repository.delete_by_entity_id(entity_id=entity.id)
 
             # reindex
-            await self.index_entity_markdown(
-                entity, content
-            ) if entity.is_markdown else await self.index_entity_file(entity)
+            if entity.is_markdown:
+                await self.index_entity_markdown(entity, content, write_embeddings)
+            else:
+                await self.index_entity_file(entity, write_embeddings)
 
             logger.info(
                 f"[BackgroundTask] Completed search index for entity_id={entity.id} "
@@ -329,6 +443,7 @@ class SearchService:
     async def index_entity_file(
         self,
         entity: Entity,
+        write_embeddings: bool = True,
     ) -> None:
         # Index entity file with no content
         await self.repository.index_item(
@@ -347,11 +462,18 @@ class SearchService:
                 project_id=entity.project_id,
             )
         )
+        # Trigger: caller did not suppress embedding writes
+        # Why: file entities (binaries) carry no observations/relations, but their
+        #      title + permalink are still useful semantic matches
+        # Outcome: writes a single entity vector for the file
+        if write_embeddings:
+            await self._upsert_entity_embeddings(entity, None)
 
     async def index_entity_markdown(
         self,
         entity: Entity,
         content: str | None = None,
+        write_embeddings: bool = True,
     ) -> None:
         """Index an entity and all its observations and relations.
 
@@ -500,10 +622,13 @@ class SearchService:
         # Batch insert all rows at once
         await self.repository.bulk_index_items(rows_to_index)
 
-        # Write the semantic vector for this entity (best-effort; no-op when
-        # embeddings are disabled). Done after the FTS rows are committed so a
-        # vector failure can't leave the keyword index half-written.
-        await self._upsert_embedding(entity, content)
+        # Write semantic vectors for this entity and its observations/relations
+        # (best-effort; no-op when embeddings are disabled). Done after the FTS
+        # rows are committed so a vector failure can't leave the keyword index
+        # half-written. Suppressed during a full reindex, which backfills all
+        # vectors in batched chunks instead of one model call per note.
+        if write_embeddings:
+            await self._upsert_entity_embeddings(entity, content)
 
     async def delete_by_permalink(self, permalink: str):
         """Delete an item from the search index."""
@@ -542,8 +667,10 @@ class SearchService:
             else:
                 await self.delete_by_entity_id(entity.id)
 
-        # Drop the semantic vector too, so deleted entities stop matching.
-        await self._delete_embedding(entity)
+        # Drop the semantic vectors too (entity + observations + relations), so
+        # deleted content stops matching. Routed through the shared cleanup helper
+        # that the sync file-delete path also uses.
+        await self.delete_entity_embeddings(entity)
 
     async def hybrid_search(
         self,
@@ -562,8 +689,6 @@ class SearchService:
         # loaded at most once per process via the module-level provider cache.
         embedding_service = await self._get_embedding_service()
         if embedding_service is None:
-            from memopad.services.embedding_service import EmbeddingService
-
             embedding_service = EmbeddingService.maybe_create(session_maker, project_id)
         if not embedding_service:
             raise ValueError(
@@ -571,53 +696,105 @@ class SearchService:
                 "Set MEMOPAD_EMBEDDINGS_ENABLED=true and install memopad[embeddings]."
             )
 
-        # 1. Get semantic hits
+        # 1. Semantic hits — mixed item types (entity / observation / relation),
+        #    ranked by cosine similarity. Each hit carries its (item_type, item_id).
         semantic_hits = await embedding_service.similar(query_text, limit=limit * 2)
-        semantic_ranking = [hit.entity_id for hit in semantic_hits]
+        semantic_ranking = [(hit.item_type, hit.item_id) for hit in semantic_hits]
 
-        # 2. Get FTS hits if mode is hybrid
-        fts_ranking = []
+        # 2. FTS hits if mode is hybrid — also mixed types. We dedupe by (type, id)
+        #    so a note that matches as both an entity row and an observation row
+        #    doesn't double-count in fusion.
+        fts_ranking: list[tuple[str, int]] = []
+        fts_rows_by_key: dict[tuple[str, int], SearchIndexRow] = {}
         if mode == "hybrid":
             fts_results = await self.search(SearchQuery(text=query_text), limit=limit * 2)
-            # Filter to just ENTITY results since embeddings currently only apply to entities
-            seen_entities = set()
             for r in fts_results:
-                eid = r.entity_id or r.id  # Fallback to id if entity_id is not set
-                if eid and eid not in seen_entities:
-                    seen_entities.add(eid)
-                    fts_ranking.append(eid)
+                key = (r.type, r.id)
+                if key in fts_rows_by_key:
+                    continue
+                fts_rows_by_key[key] = r
+                fts_ranking.append(key)
 
-        # 3. Fuse rankings
+        # 3. Fuse rankings over item keys. RRF is key-agnostic (any hashable key),
+        #    so entity/observation/relation ids fuse on equal footing. For
+        #    semantic-only mode we keep the raw similarity scores (no fusion).
         if mode == "hybrid":
-            # embedding_service.reciprocal_rank_fusion returns list of (entity_id, score) sorted desc
             fused = EmbeddingService.reciprocal_rank_fusion([semantic_ranking, fts_ranking])
         else:
-            fused = [(hit.entity_id, hit.score) for hit in semantic_hits]
+            fused = [((hit.item_type, hit.item_id), hit.score) for hit in semantic_hits]
 
         top_fused = fused[:limit]
         if not top_fused:
             return []
 
-        # 4. Reconstruct SearchIndexRows
-        entity_ids = [eid for eid, _ in top_fused]
-        entities = await self.entity_repository.find_by_ids(entity_ids)
-        entity_map = {e.id: e for e in entities}
+        # 4. Reconstruct SearchIndexRows. FTS already produced rows for any key that
+        #    matched by keyword; semantic-only hits (and semantic-only mode) are
+        #    fetched from the search_index by (type, id). Items missing from the
+        #    index (e.g. a vector whose note was deleted) are silently dropped.
+        keys = [key for key, _ in top_fused]
+        rows_by_key = dict(fts_rows_by_key)
+        missing = [k for k in keys if k not in rows_by_key]
+        if missing:
+            rows_by_key.update(await self._fetch_index_rows_by_keys(session_maker, missing))
 
         results = []
-        for eid, score in top_fused:
-            entity = entity_map.get(eid)
-            if entity:
-                row = SearchIndexRow(
-                    id=entity.id,
-                    type=SearchItemType.ENTITY.value,
-                    title=entity.title,
-                    permalink=entity.permalink,
-                    file_path=entity.file_path,
-                    entity_id=entity.id,
-                    project_id=entity.project_id,
-                    created_at=entity.created_at,
-                    updated_at=_mtime_to_datetime(entity),
-                )
+        for key, score in top_fused:
+            row = rows_by_key.get(key)
+            if row:
                 row.score = score
                 results.append(row)
         return results
+
+    async def _fetch_index_rows_by_keys(
+        self,
+        session_maker,
+        keys: list[tuple[str, int]],
+    ) -> dict[tuple[str, int], SearchIndexRow]:
+        """Fetch search_index rows for a set of (type, id) keys.
+
+        Used by hybrid_search to reconstruct semantic-only hits that didn't also
+        match by keyword. Groups by type so each lookup is one ``IN (...)`` query.
+        """
+        by_type: dict[str, list[int]] = {}
+        for item_type, item_id in keys:
+            by_type.setdefault(item_type, []).append(item_id)
+
+        out: dict[tuple[str, int], SearchIndexRow] = {}
+        async with db.scoped_session(session_maker) as session:
+            for item_type, ids in by_type.items():
+                result = await session.execute(
+                    text(
+                        "SELECT id, type, title, permalink, file_path, entity_id, "
+                        "from_id, to_id, relation_type, category, content_snippet, "
+                        "created_at, updated_at, project_id, metadata "
+                        "FROM search_index "
+                        "WHERE project_id = :pid AND type = :t AND id IN :ids"
+                    ).bindparams(bindparam("ids", expanding=True)),
+                    {"pid": self.repository.project_id, "t": item_type, "ids": ids},
+                )
+                for row in result.fetchall():
+                    # metadata is JSON text on SQLite, a dict on Postgres (JSONB).
+                    md = row[14]
+                    if isinstance(md, str):
+                        md = json.loads(md) if md else {}
+                    elif md is None:
+                        md = {}
+                    r = SearchIndexRow(
+                        project_id=row[13],
+                        id=row[0],
+                        type=row[1],
+                        file_path=row[4],
+                        created_at=row[11],
+                        updated_at=row[12],
+                        title=row[2],
+                        permalink=row[3],
+                        entity_id=row[5],
+                        from_id=row[6],
+                        to_id=row[7],
+                        relation_type=row[8],
+                        category=row[9],
+                        content_snippet=row[10],
+                        metadata=md,
+                    )
+                    out[(r.type, r.id)] = r
+        return out
