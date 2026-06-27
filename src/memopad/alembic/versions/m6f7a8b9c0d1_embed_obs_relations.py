@@ -40,9 +40,7 @@ def table_exists(connection, table: str) -> bool:
     """Check if a table exists (idempotent migration support)."""
     if connection.dialect.name == "postgresql":
         result = connection.execute(
-            text(
-                "SELECT 1 FROM information_schema.tables WHERE table_name = :table"
-            ),
+            text("SELECT 1 FROM information_schema.tables WHERE table_name = :table"),
             {"table": table},
         )
         return result.fetchone() is not None
@@ -149,27 +147,39 @@ def upgrade() -> None:
             )
             op.create_primary_key("pk_embedding", "embedding", ["item_type", "item_id"])
         else:
-            # SQLite: batch-rebuild the table (render_as_batch is on in env.py).
-            with op.batch_alter_table("embedding", recreate="always") as batch_op:
-                batch_op.alter_column(
-                    "entity_id",
-                    new_column_name="item_id",
-                    existing_type=sa.Integer(),
-                    nullable=False,
-                )
-                batch_op.add_column(
-                    sa.Column(
-                        "item_type", sa.String(), nullable=False, server_default="entity"
+            # SQLite: rebuild the table to the composite PK via an explicit table
+            # swap. We deliberately do NOT use batch_alter_table + create_primary_key
+            # here: batch mode reflects the existing single-column PK (entity_id)
+            # into the recreated table, and create_primary_key is then a silent no-op
+            # against that already-present PK — which leaves the PK as (item_id)
+            # instead of (item_type, item_id) and breaks every upsert. DBs that
+            # already applied the buggy version are repaired by n8b9c0d1e2f3.
+            has_rows = bool(connection.execute(text("SELECT COUNT(*) FROM embedding")).scalar())
+            if has_rows:
+                connection.execute(
+                    text(
+                        "CREATE TABLE _embedding_m6f7_backup AS "
+                        "SELECT 'entity' AS item_type, entity_id AS item_id, "
+                        "project_id, model, dim, vector, updated_at FROM embedding"
                     )
                 )
-                batch_op.create_primary_key("pk_embedding", ["item_type", "item_id"])
+            op.drop_table("embedding")
+            _create_new_table(connection)
+            if has_rows:
+                connection.execute(
+                    text(
+                        "INSERT INTO embedding "
+                        "(item_type, item_id, project_id, model, dim, vector, updated_at) "
+                        "SELECT item_type, item_id, project_id, model, dim, vector, "
+                        "updated_at FROM _embedding_m6f7_backup"
+                    )
+                )
+                connection.execute(text("DROP TABLE _embedding_m6f7_backup"))
 
     # (Re)create the project/model index idempotently.
     if index_exists(connection, "ix_embedding_project_model"):
         op.drop_index("ix_embedding_project_model", table_name="embedding")
-    op.create_index(
-        "ix_embedding_project_model", "embedding", ["project_id", "model"]
-    )
+    op.create_index("ix_embedding_project_model", "embedding", ["project_id", "model"])
 
 
 def downgrade() -> None:
