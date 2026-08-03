@@ -624,8 +624,8 @@ async def get_task_scheduler(
             force_full=force_full,
         )
 
-    async def _reindex_project(**_: Any) -> None:
-        await search_service.reindex_all()
+    async def _reindex_project(force: bool = False, **_: Any) -> None:
+        await search_service.reindex_all(force=force)
 
     return LocalTaskScheduler(
         {
