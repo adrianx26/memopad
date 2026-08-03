@@ -1,6 +1,7 @@
 """Service for search operations."""
 
 import ast
+import hashlib
 import json
 import re
 from datetime import datetime
@@ -30,6 +31,14 @@ from memopad.services.embedding_service import (
 # Maximum size for content_stems field to stay under Postgres's 8KB index row limit.
 # We use 6000 characters to leave headroom for other indexed columns and overhead.
 MAX_CONTENT_STEMS_SIZE = 6000
+
+# Incremental reindex schema version. Bump this whenever the FTS schema, the
+# FTS5 tokenizer config, or _generate_variants/index_entity_markdown logic
+# changes the indexed output for an unchanged entity. Rows in reindex_state
+# carrying an older version are treated as stale and force a reindex, so a bump
+# is the lever for triggering a clean rebuild after such a change without
+# dropping the index.
+REINDEX_INDEX_VERSION = 1
 
 
 def _mtime_to_datetime(entity: Entity) -> datetime:
@@ -188,8 +197,38 @@ class SearchService:
         self,
         background_tasks: Optional[BackgroundTasks] = None,
         batch_size: int = BACKFILL_BATCH_DEFAULT,
+        *,
+        force: bool = False,
+        incremental: bool = True,
     ) -> None:
-        """Reindex all content from database.
+        """Reindex content from the database.
+
+        By default the reindex is **incremental**: entities whose indexed output
+        is unchanged since the last reindex (per ``reindex_state``) are skipped
+        entirely — no file read, no FTS write, no embedding model call — and only
+        changed/new entities are re-indexed, with entries for vanished entities
+        pruned. This avoids redoing the whole corpus on every call.
+
+        Pass ``force=True`` (or ``incremental=False``) to run the legacy full
+        wipe-and-rebuild: clear this project's FTS rows and vectors, then
+        re-index and re-embed everything. The full path also repopulates
+        ``reindex_state`` so the next incremental run benefits.
+
+        The FTS index table is created if it does not yet exist, and cleared in
+        place (DELETE, not DROP) so concurrent searches see stale-but-present
+        results instead of an empty/missing table during a full rebuild.
+        """
+        if force or not incremental:
+            await self._reindex_full(background_tasks, batch_size)
+            return
+        await self._reindex_incremental(background_tasks, batch_size)
+
+    async def _reindex_full(
+        self,
+        background_tasks: Optional[BackgroundTasks] = None,
+        batch_size: int = BACKFILL_BATCH_DEFAULT,
+    ) -> None:
+        """Full wipe-and-rebuild of this project's FTS index and embeddings.
 
         Clears this project's rows in place (DELETE) rather than DROP+recreate so the
         index table and its schema stay present throughout the rebuild. A concurrent
@@ -199,6 +238,10 @@ class SearchService:
         When embeddings are enabled, the project's vectors are cleared too (so notes
         deleted since the last reindex stop matching) and re-populated in batched
         chunks — one model call per chunk instead of one per note.
+
+        ``reindex_state`` is wiped and repopulated for every current entity so a
+        subsequent incremental reindex skips correctly instead of treating
+        everything as new.
         """
 
         logger.info("Starting full reindex")
@@ -239,7 +282,221 @@ class SearchService:
         if embedding_svc is not None and loaded:
             await self._backfill_embeddings(loaded, batch_size)
 
+        # Reset reindex_state to match the freshly rebuilt index so the next
+        # incremental run skips unchanged entities.
+        await self._ensure_reindex_state()
+        await self.repository.execute_query(
+            text("DELETE FROM reindex_state WHERE project_id = :project_id"),
+            params={"project_id": self.repository.project_id},
+        )
+        await self._upsert_reindex_state(
+            [
+                (e.id, self._entity_fingerprint(e), REINDEX_INDEX_VERSION)
+                for e in entities
+            ]
+        )
+
         logger.info("Reindex complete")
+
+    async def _reindex_incremental(
+        self,
+        background_tasks: Optional[BackgroundTasks] = None,
+        batch_size: int = BACKFILL_BATCH_DEFAULT,
+    ) -> None:
+        """Reindex only what changed since the last reindex.
+
+        Loads per-entity fingerprints from ``reindex_state`` and compares them
+        against the current entity rows (which sync has already refreshed).
+        Unchanged entities are skipped; changed/new entities are re-indexed and
+        re-embedded (in batched chunks); entities present in state but no longer
+        in the DB have their FTS rows and embedding vectors pruned.
+        """
+        logger.info("Starting incremental reindex")
+        await self.init_search_index()
+        await self._ensure_reindex_state()
+        state = await self._load_reindex_state()
+
+        # find_all eager-loads observations + relations, so fingerprinting and
+        # _entity_embedding_keys add no extra IO beyond this single query.
+        entities = await self.entity_repository.find_all()
+        current_ids = {e.id for e in entities}
+
+        keep_keys: set[tuple[str, int]] = set()
+        changed: list[Entity] = []
+        skipped = 0
+        for entity in entities:
+            # Recompute the valid vector keys from current entities every run so
+            # prune_project also catches id drift on entities we skip below.
+            keep_keys.update(self._entity_embedding_keys(entity))
+            fingerprint = self._entity_fingerprint(entity)
+            prev = state.get(entity.id)
+            if (
+                prev is not None
+                and prev[0] == fingerprint
+                and prev[1] == REINDEX_INDEX_VERSION
+            ):
+                skipped += 1
+                continue
+            changed.append(entity)
+
+        deleted_ids = [eid for eid in state if eid not in current_ids]
+
+        # Re-index changed/new entities into FTS. index_entity_data already
+        # deletes the entity's prior FTS rows (delete_by_entity_id) before
+        # re-inserting, so no separate delete is needed. Embeddings are
+        # suppressed here and written in one batched pass below.
+        loaded: list[tuple[Entity, Optional[str]]] = []
+        state_upserts: list[tuple[int, str, int]] = []
+        for entity in changed:
+            content = (
+                await self.file_service.read_entity_content(entity)
+                if entity.is_markdown
+                else None
+            )
+            await self.index_entity_data(entity, content, write_embeddings=False)
+            loaded.append((entity, content))
+            state_upserts.append(
+                (entity.id, self._entity_fingerprint(entity), REINDEX_INDEX_VERSION)
+            )
+
+        # Batched semantic embed of just the changed subset — one model call per
+        # chunk instead of one per note. No-op when embeddings are disabled.
+        embedding_svc = await self._get_embedding_service()
+        if embedding_svc is not None and loaded:
+            await self._backfill_embeddings(loaded, batch_size)
+
+        # Prune FTS rows for entities that no longer exist. Observation and
+        # relation rows carry their parent entity's entity_id, so this removes
+        # all of a vanished entity's FTS rows.
+        for eid in deleted_ids:
+            await self.repository.delete_by_entity_id(eid)
+
+        # Prune orphan embedding vectors (replaces the guarantee clear_project
+        # gave in the full path). No-op when embeddings are disabled.
+        if embedding_svc is not None:
+            await embedding_svc.prune_project(self.repository.project_id, keep_keys)
+
+        # Persist state: record reindexed entities, drop vanished ones.
+        await self._upsert_reindex_state(state_upserts)
+        await self._delete_reindex_state(deleted_ids)
+
+        logger.info(
+            f"Incremental reindex complete: {len(changed)} reindexed, "
+            f"{skipped} skipped, {len(deleted_ids)} pruned"
+        )
+
+    # --- reindex_state bookkeeping ---
+
+    async def _ensure_reindex_state(self) -> None:
+        """Create the reindex_state table if it doesn't exist.
+
+        Mirrors EmbeddingService's lazy table creation so databases that skip
+        Alembic (e.g. the test fixture, which uses Base.metadata.create_all)
+        still work. The DDL matches the o9c0d1e2f3a4 migration.
+        """
+        await self.repository.execute_query(
+            text(
+                "CREATE TABLE IF NOT EXISTS reindex_state ("
+                " project_id INTEGER NOT NULL,"
+                " entity_id INTEGER NOT NULL,"
+                " fingerprint VARCHAR NOT NULL,"
+                " index_version INTEGER NOT NULL,"
+                " indexed_at TIMESTAMP WITH TIME ZONE,"
+                " PRIMARY KEY (project_id, entity_id)"
+                ")"
+            ),
+            params={},
+        )
+
+    @staticmethod
+    def _entity_fingerprint(entity: Entity) -> str:
+        """A stable hash of everything that determines an entity's indexed output.
+
+        ``checksum`` is the SHA-256 of the file content, so it covers the derived
+        observation/relation text as well as the note body. The entity-level
+        fields catch metadata/permalink-only edits that don't change the file.
+        The sorted observation/relation id lists catch id drift (e.g. an
+        observation deleted and recreated with a new id from unchanged file
+        content) that would otherwise leave stale FTS rows. ``mtime``/``size``
+        are the fallback signal for non-markdown entities where ``checksum`` may
+        be None.
+        """
+        payload = {
+            "checksum": entity.checksum,
+            "title": entity.title,
+            "permalink": entity.permalink,
+            "entity_metadata": entity.entity_metadata,
+            "entity_type": entity.entity_type,
+            "content_type": entity.content_type,
+            "file_path": entity.file_path,
+            "mtime": entity.mtime,
+            "size": entity.size,
+            "obs_ids": sorted(o.id for o in entity.observations),
+            "outgoing_rel_ids": sorted(r.id for r in entity.outgoing_relations),
+        }
+        blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+    def _now_sql(self) -> str:
+        """Dialect-aware 'current timestamp' SQL fragment for reindex_state writes."""
+        # The search repository's session bind determines the backend. We can't
+        # inspect the dialect through the protocol directly, so key off the
+        # repository class name's backend hint as a lightweight, stable check.
+        backend = type(self.repository).__name__.lower()
+        return "now()" if "postgres" in backend else "datetime('now')"
+
+    async def _load_reindex_state(self) -> Dict[int, tuple[str, int]]:
+        """Return ``{entity_id: (fingerprint, index_version)}`` for this project."""
+        result = await self.repository.execute_query(
+            text(
+                "SELECT entity_id, fingerprint, index_version "
+                "FROM reindex_state WHERE project_id = :pid"
+            ),
+            params={"pid": self.repository.project_id},
+        )
+        return {row[0]: (row[1], row[2]) for row in result.fetchall()}
+
+    async def _upsert_reindex_state(
+        self, rows: List[tuple[int, str, int]]
+    ) -> None:
+        """Insert or update reindex_state rows (entity_id, fingerprint, version)."""
+        if not rows:
+            return
+        now_sql = self._now_sql()
+        await self.repository.execute_query(
+            text(
+                "INSERT INTO reindex_state "
+                "(project_id, entity_id, fingerprint, index_version, indexed_at) "
+                f"VALUES (:pid, :eid, :fp, :iv, {now_sql}) "
+                "ON CONFLICT(project_id, entity_id) DO UPDATE SET "
+                " fingerprint = excluded.fingerprint, "
+                " index_version = excluded.index_version, "
+                " indexed_at = excluded.indexed_at"
+            ),
+            params=[
+                {
+                    "pid": self.repository.project_id,
+                    "eid": r[0],
+                    "fp": r[1],
+                    "iv": r[2],
+                }
+                for r in rows
+            ],
+        )
+
+    async def _delete_reindex_state(self, entity_ids: List[int]) -> None:
+        """Drop reindex_state rows for the given entity ids."""
+        if not entity_ids:
+            return
+        await self.repository.execute_query(
+            text(
+                "DELETE FROM reindex_state WHERE project_id = :pid AND entity_id IN :ids"
+            ).bindparams(bindparam("ids", expanding=True)),
+            params={
+                "pid": self.repository.project_id,
+                "ids": entity_ids,
+            },
+        )
 
     async def _backfill_embeddings(
         self,

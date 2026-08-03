@@ -459,6 +459,39 @@ class EmbeddingService:
                     )
             await session.commit()
 
+    async def prune_project(
+        self,
+        project_id: Optional[int] = None,
+        keep_keys: Optional[set[tuple[str, int]]] = None,
+    ) -> None:
+        """Drop vectors for this project whose (item_type, item_id) is not in ``keep_keys``.
+
+        Used by the incremental reindex to replace the guarantee ``clear_project``
+        gave: vectors for entities/observations/relations deleted since the last
+        reindex (whose ids are no longer enumerable) are removed. The set of valid
+        keys is recomputed from current entities each run, so this also catches
+        id drift on skipped entities.
+
+        Best-effort and a no-op when ``keep_keys`` is None (e.g. embeddings
+        disabled). Reuses ``delete_batch`` so both the BLOB store and the vec0
+        mirror tables stay consistent.
+        """
+        if not self.provider or keep_keys is None:
+            return
+        await self._ensure_store()
+        pid = project_id if project_id is not None else self.project_id
+        async with db.scoped_session(self.session_maker) as session:
+            result = await session.execute(
+                text("SELECT item_type, item_id FROM embedding WHERE project_id = :pid"),
+                {"pid": pid},
+            )
+            embedded = {(row[0], row[1]) for row in result.fetchall()}
+        diff = list(embedded - keep_keys)
+        if not diff:
+            return
+        for i in range(0, len(diff), BACKFILL_BATCH_DEFAULT):
+            await self.delete_batch(diff[i : i + BACKFILL_BATCH_DEFAULT])
+
     # --- reads ---
 
     async def similar(

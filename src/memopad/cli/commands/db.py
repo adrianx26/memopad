@@ -49,7 +49,9 @@ async def _reindex_projects(app_config):
         await db.shutdown_db()
 
 
-async def _reindex_all_projects(app_config, embeddings: bool = False, batch_size: int = 128):
+async def _reindex_all_projects(
+    app_config, embeddings: bool = False, batch_size: int = 128, *, force: bool = False
+):
     """Rebuild the search index (and optionally embeddings) for every project.
 
     Uses SearchService.reindex_all() rather than a filesystem sync so we rebuild
@@ -57,6 +59,10 @@ async def _reindex_all_projects(app_config, embeddings: bool = False, batch_size
     When `embeddings` is true the env var is already set by the caller, so the
     injected EmbeddingService upserts a vector for each indexed note. `batch_size`
     controls the embedding backfill chunk size (one model call per chunk).
+
+    By default the reindex is incremental: only changed/new entities are
+    re-indexed and unchanged ones are skipped. Pass ``force=True`` for a full
+    wipe-and-rebuild.
     """
     try:
         await reconcile_projects_with_config(app_config)
@@ -75,7 +81,9 @@ async def _reindex_all_projects(app_config, embeddings: bool = False, batch_size
             # get_sync_service wires session_maker + project_id into SearchService,
             # so reindex_all() will backfill embeddings when enabled.
             sync_service = await get_sync_service(project)
-            await sync_service.search_service.reindex_all(batch_size=batch_size)
+            await sync_service.search_service.reindex_all(
+                batch_size=batch_size, force=force
+            )
             logger.info(f"Reindex completed for project: {project.name}")
     finally:
         await db.shutdown_db()
@@ -157,12 +165,24 @@ def reindex(
             "Larger = fewer model calls (faster), more memory."
         ),
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help=(
+            "Full wipe-and-rebuild instead of the default incremental reindex. "
+            "Use after a schema change or when the index looks inconsistent."
+        ),
+    ),
 ):  # pragma: no cover
     """Rebuild the search index from the database for all projects.
 
     Unlike `reset --reindex` (which rebuilds after dropping the DB), this
     command leaves the database in place and just repopulates the search index
     from existing entity rows.
+
+    By default the reindex is incremental: only changed/new entities are
+    re-indexed and unchanged ones are skipped, so repeat calls don't redo the
+    whole corpus. Pass `--force` for a full wipe-and-rebuild.
 
     Pass `--embeddings` to additionally backfill semantic vectors for every
     note. This is the command `semantic_search` points users at when
@@ -194,8 +214,12 @@ def reindex(
         raise typer.Exit(0)
 
     label = "Reindexing (with embeddings)" if embeddings else "Reindexing"
+    if force:
+        label = f"{label} (forced full rebuild)"
     console.print(f"{label} {len(projects)} project(s)...")
     run_with_cleanup(
-        _reindex_all_projects(app_config, embeddings=embeddings, batch_size=batch_size)
+        _reindex_all_projects(
+            app_config, embeddings=embeddings, batch_size=batch_size, force=force
+        )
     )
     console.print("[green]Reindex complete[/green]")
