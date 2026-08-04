@@ -8,10 +8,12 @@ Two modes:
 
 from __future__ import annotations
 
+import re
 import tempfile
 import uuid
 from pathlib import Path
 
+import aiosqlite
 from loguru import logger
 from mcp.server.fastmcp.exceptions import ToolError
 from rich.console import Console
@@ -19,6 +21,7 @@ import typer
 
 from memopad.cli.app import app
 from memopad.cli.commands.command_utils import run_with_cleanup
+from memopad.config import APP_DATABASE_NAME, DATA_DIR_NAME
 from memopad.markdown.entity_parser import EntityParser
 from memopad.markdown.markdown_processor import MarkdownProcessor
 from memopad.markdown.schemas import EntityFrontmatter, EntityMarkdown
@@ -32,10 +35,122 @@ from memopad.schemas import SyncReportResponse
 
 console = Console()
 
+# Dim-scoped vec0 table names look like ``embedding_vec_<item_type>_p<project>_d<dim>``
+# (see EmbeddingService._vec_table). Any vec0 *main* virtual table that does
+# NOT match this pattern is a leftover from before dim-scoping and would
+# cause wrong-dim inserts to roll back canonical BLOB writes on a model swap.
+#
+# sqlite-vec creates shadow tables for each virtual table (``_info``,
+# ``_chunks``, ``_rowids``, ``_vector_chunksNN``); those carry an extra suffix
+# after the project/dim segment, so they are excluded by anchoring the
+# main-table patterns at the end of the name.
+_VEC_TABLE_DIM_SCOPED = re.compile(r"^embedding_vec_[a-z]+_p\d+_d\d+$")
+# A main vec0 table is either dim-scoped (above) or legacy ``..._p<project>``
+# with nothing after the project id. Shadow tables have a trailing suffix and
+# match neither pattern, so they're filtered out before the legacy check.
+_VEC_TABLE_MAIN = re.compile(r"^embedding_vec_[a-z]+_p\d+(_d\d+)?$")
+
+
+async def run_health_checks() -> int:
+    """Inspect the local app DB schema for invariants introduced recently.
+
+    These are read-only checks against the app-level SQLite database
+    (``~/memopad/memory.db``). They do not talk to the MCP server and do not
+    mutate anything. Returns the number of issues found.
+
+    Checks:
+      1. ``reindex_state`` table exists and has a ``content_hash`` column —
+         the per-entity SHA-256 fingerprint that makes incremental reindex
+         skip unchanged entities. Missing ⇒ incremental reindex is disabled.
+      2. Every ``embedding_vec_*`` virtual table is dim-scoped
+         (``..._p<project>_d<dim>``). Non-scoped leftovers break model swaps.
+
+    Cache invalidation (permalink/metadata caches) is a behavioural
+    invariant exercised by the roundtrip below, not a schema one, so it is
+    not checked here.
+    """
+    console.print("[blue]Running schema health checks...[/blue]")
+    db_path = Path.home() / DATA_DIR_NAME / APP_DATABASE_NAME
+    if not db_path.exists():
+        console.print(
+            "[yellow]App DB not found — skipping schema health checks "
+            "(run `memopad` once to initialise it).[/yellow]"
+        )
+        return 0
+
+    issues = 0
+    async with aiosqlite.connect(str(db_path)) as conn:
+        # --- Check 1: reindex_state + content_hash ---
+        cur = await conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='reindex_state'"
+        )
+        if await cur.fetchone() is None:
+            console.print(
+                "[yellow]reindex_state table missing — incremental reindex is "
+                "disabled (run migrations).[/yellow]"
+            )
+            issues += 1
+        else:
+            cur = await conn.execute("PRAGMA table_info(reindex_state)")
+            columns = {row[1] for row in await cur.fetchall()}
+            if "content_hash" not in columns:
+                console.print(
+                    "[yellow]reindex_state.content_hash missing — per-entity "
+                    "fingerprint absent, reindex can't skip unchanged rows.[/yellow]"
+                )
+                issues += 1
+            else:
+                console.print(
+                    "[green]OK[/green] reindex_state.content_hash present "
+                    "(incremental reindex enabled)"
+                )
+
+        # --- Check 2: vec0 table dim-scoping ---
+        # Only inspect main virtual tables; sqlite-vec's shadow tables
+        # (``_info``/``_chunks``/``_rowids``/``_vector_chunksNN``) are filtered
+        # out by ``_VEC_TABLE_MAIN``.
+        cur = await conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name LIKE 'embedding\\_vec\\_%' ESCAPE '\\'"
+        )
+        all_vec_names = [row[0] for row in await cur.fetchall()]
+        vec_tables = [n for n in all_vec_names if _VEC_TABLE_MAIN.match(n)]
+        legacy = [n for n in vec_tables if not _VEC_TABLE_DIM_SCOPED.match(n)]
+        if legacy:
+            console.print(
+                f"[yellow]{len(legacy)} legacy (non-dim-scoped) vec0 table(s) "
+                f"found — model swaps can break until they are dropped: "
+                f"{legacy}[/yellow]"
+            )
+            issues += len(legacy)
+        elif vec_tables:
+            console.print(
+                f"[green]OK[/green] all {len(vec_tables)} vec0 table(s) "
+                "are dim-scoped"
+            )
+        else:
+            console.print(
+                "[green]OK[/green] no vec0 tables yet "
+                "(created on first embedding index)"
+            )
+
+    if issues:
+        console.print(f"[yellow]Schema health: {issues} issue(s).[/yellow]")
+    else:
+        console.print("[green]Schema health checks passed.[/green]")
+    return issues
+
 
 async def run_doctor() -> None:
     """Run local consistency checks for file <-> database flows."""
     console.print("[blue]Running Memopad doctor checks...[/blue]")
+
+    # Schema health checks run first and are best-effort: a schema issue should
+    # be reported but must not abort the functional roundtrip below.
+    try:
+        await run_health_checks()
+    except Exception as e:  # pragma: no cover
+        console.print(f"[yellow]Schema health checks skipped: {e}[/yellow]")
 
     project_name = f"doctor-{uuid.uuid4().hex[:8]}"
     api_note_title = "Doctor API Note"
@@ -237,9 +352,23 @@ def doctor(
         "--fix",
         help="With --project: run a force_full sync to reconcile file ↔ DB drift.",
     ),
+    health: bool = typer.Option(
+        False,
+        "--health",
+        help="Only run local schema health checks (reindex_state content_hash, "
+        "vec0 dim-scoping) against the app DB; skip the roundtrip.",
+    ),
 ) -> None:
     """Run local consistency checks to verify file/database sync."""
     try:
+        if health:
+            issues = run_with_cleanup(run_health_checks())
+            if issues:
+                console.print(
+                    f"[yellow]{issues} schema issue(s) found.[/yellow]"
+                )
+                raise typer.Exit(code=1)
+            return
         if project:
             remaining = run_with_cleanup(run_drift_check(project, fix))
             if remaining:

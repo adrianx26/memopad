@@ -450,8 +450,26 @@ class EmbeddingService:
             return any(row[1] == "content_hash" for row in result.fetchall())
 
     def _vec_table(self, item_type: str) -> str:
-        """Name of the vec0 table for a given item type in this project."""
-        return f"embedding_vec_{item_type}_p{self.project_id}"
+        """Name of the vec0 table for a given item type + model dim in this project.
+
+        Scoped by the provider's vector dimension so a model swap (which usually
+        changes the dimension, e.g. bge-small 384 → bge-base 768) writes to a fresh
+        vec0 table instead of INSERT-ing wrong-dimension vectors into the old
+        table. Without the dim suffix the old-dim table persists (``IF NOT
+        EXISTS`` is a no-op), the wrong-dim INSERT raises inside the same
+        transaction as the canonical BLOB write, and the whole transaction rolls
+        back — so after a model swap no embeddings would advance at all (and the
+        broad ``except`` in SearchService would swallow it silently). The old-dim
+        table is left in place (a space leak, never queried again); a ``--force``
+        reindex rebuilds the current-dim table.
+
+        Note: two *same-dimension* but different models would still share a table
+        and blend in KNN. The process runs one model at a time, so this is not a
+        live concern; a future per-model suffix would need a slug + a data
+        migration to rebuild existing vec0 rows.
+        """
+        dim = self.provider.dim if self.provider else EMBEDDING_DIM_DEFAULT
+        return f"embedding_vec_{item_type}_p{self.project_id}_d{dim}"
 
     async def _try_init_vec0_store(self) -> bool:
         """Create one vec0 table per item type. Return True iff all succeeded."""

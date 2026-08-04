@@ -3,9 +3,10 @@
 from typing import Dict, List, Sequence
 
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from memopad import db
 from memopad.models import Observation
 from memopad.repository.repository import Repository
 
@@ -28,21 +29,53 @@ class ObservationRepository(Repository[Observation]):
         result = await self.execute_query(query)
         return result.scalars().all()
 
+    async def replace_observations(
+        self, entity_id: int, observations: List[Observation]
+    ) -> Sequence[Observation]:
+        """Atomically replace an entity's observations in a single transaction.
+
+        Deletes the entity's existing observations and inserts the new ones in
+        one session/commit, so a failure mid-replace can't leave the entity with
+        zero observations (the old delete-then-add-on-separate-sessions path
+        committed the delete before the add, losing all observations if the add
+        then raised).
+        """
+        async with db.scoped_session(self.session_maker) as session:
+            await session.execute(
+                delete(Observation).where(Observation.entity_id == entity_id)
+            )
+            for model in observations:
+                self._set_project_id_if_needed(model)
+            if observations:
+                session.add_all(observations)
+                await session.flush()
+                result = await session.execute(
+                    select(Observation)
+                    .where(Observation.id.in_([m.id for m in observations]))
+                    .options(*self.get_load_options())
+                )
+                return result.scalars().all()
+            return []
+
     async def find_by_context(self, context: str) -> Sequence[Observation]:
         """Find observations with a specific context."""
-        query = select(Observation).filter(Observation.context == context)
+        query = self._add_project_filter(
+            select(Observation).filter(Observation.context == context)
+        )
         result = await self.execute_query(query)
         return result.scalars().all()
 
     async def find_by_category(self, category: str) -> Sequence[Observation]:
         """Find observations with a specific context."""
-        query = select(Observation).filter(Observation.category == category)
+        query = self._add_project_filter(
+            select(Observation).filter(Observation.category == category)
+        )
         result = await self.execute_query(query)
         return result.scalars().all()
 
     async def observation_categories(self) -> Sequence[str]:
         """Return a list of all observation categories."""
-        query = select(Observation.category).distinct()
+        query = self._add_project_filter(select(Observation.category).distinct())
         result = await self.execute_query(query, use_query_options=False)
         return result.scalars().all()
 

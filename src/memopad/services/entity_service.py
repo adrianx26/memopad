@@ -7,7 +7,7 @@ from typing import List, Optional, Protocol, Sequence, Tuple, TypeVar, Union
 import frontmatter
 import yaml
 from loguru import logger
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError  # noqa: F401  (re-exported for callers; see upsert_entity_from_markdown)
 
 from memopad.cache import TwoQueueCache
 from memopad.config import ProjectConfig, MemoPadConfig, DEFAULT_PERMALINK_CACHE_SIZE
@@ -183,9 +183,18 @@ class EntityService(BaseService[EntityModel]):
         # Use normalized file path for stability (title changes won't invalidate)
         # Normalize: lowercase, canonical path format
         cache_key = f"path:{file_path_str.lower()}"
-        
-        # Check cache first (warm path - avoid database queries)
-        if cache_key in self._permalink_cache:
+
+        # An explicit frontmatter permalink must always be validated against the
+        # DB (it can collide with another entity and need a suffix), so never let a
+        # cached value short-circuit it. The cache is only a fast path for the
+        # generated/existing-permalink cases, where it mirrors a DB value we
+        # already know to be unique. Stale entries after a move/delete are evicted
+        # by invalidate_permalink_cache (see move_entity / handle_delete).
+        explicit_permalink = bool(markdown and markdown.frontmatter.permalink)
+
+        # Check cache first (warm path - avoid database queries), but only when no
+        # explicit permalink is overriding the resolved value.
+        if not explicit_permalink and cache_key in self._permalink_cache:
             cached_permalink = self._permalink_cache[cache_key]
             logger.trace(f"Permalink cache hit: {file_path_str} -> {cached_permalink}")
             return cached_permalink
@@ -387,16 +396,56 @@ class EntityService(BaseService[EntityModel]):
         checksum = await self.file_service.write_file(file_path, final_content)
 
         # parse entity from content we just wrote (avoids re-reading file for cloud compatibility)
-        entity_markdown = await self.entity_parser.parse_markdown_content(
-            file_path=file_path,
-            content=final_content,
-        )
+        # create entity and relations. Wrapped so any failure after the file is
+        # written removes the orphaned file (it didn't exist at entry — see the
+        # EntityAlreadyExistsError check above) instead of leaving it on disk
+        # with no DB row.
+        try:
+            entity_markdown = await self.entity_parser.parse_markdown_content(
+                file_path=file_path,
+                content=final_content,
+            )
+            entity = await self.upsert_entity_from_markdown(
+                file_path, entity_markdown, is_new=True
+            )
 
-        # create entity and relations
-        entity = await self.upsert_entity_from_markdown(file_path, entity_markdown, is_new=True)
+            # Reconcile permalink: resolve_permalink already produced a unique
+            # permalink and wrote it to the file, so upsert normally stores the
+            # same value. On a rare create/create race the unique constraint trips
+            # inside upsert_entity and _resolve_permalink_conflict mints a
+            # suffixed DB permalink instead — without this the file would carry
+            # the original (colliding) permalink and the DB the suffixed one
+            # (file↔DB desync). If that happens, rewrite the file frontmatter to
+            # the DB's permalink and recompute the checksum so the row is marked
+            # complete against the real file content.
+            if entity.permalink and entity.permalink != schema._permalink:
+                logger.warning(
+                    f"Permalink reconciled after upsert for {file_path}: "
+                    f"{schema._permalink} -> {entity.permalink} "
+                    f"(likely a concurrent create race)"
+                )
+                await self.file_service.update_frontmatter(
+                    file_path, {"permalink": entity.permalink}
+                )
+                checksum = await self.file_service.compute_checksum(file_path)
 
-        # Set final checksum to mark complete
-        return await self.repository.update(entity.id, {"checksum": checksum})
+            # Set final checksum to mark complete
+            return await self.repository.update(entity.id, {"checksum": checksum})
+        except Exception:
+            # The file didn't exist at entry (we raised EntityAlreadyExistsError
+            # otherwise), so on any upsert/checksum failure remove the file we
+            # just wrote so we don't leave an orphan on disk with no DB row. The
+            # next sync would otherwise re-create it, but an explicit rollback
+            # here keeps file↔DB consistent immediately. Best-effort: a delete
+            # failure is logged but doesn't mask the original error.
+            try:
+                await self.file_service.delete_file(file_path)
+                logger.warning(f"Removed orphaned file after failed create: {file_path}")
+            except Exception as cleanup_error:  # pragma: no cover
+                logger.error(
+                    f"Failed to clean up orphaned file {file_path}: {cleanup_error}"
+                )
+            raise
 
     async def update_entity(self, entity: EntityModel, schema: EntitySchema) -> EntityModel:
         """Update an entity's content and metadata."""
@@ -727,9 +776,11 @@ class EntityService(BaseService[EntityModel]):
 
         db_entity = await self.repository.get_by_file_path(file_path.as_posix())
 
-        # Clear observations for entity
-        await self.observation_repository.delete_by_fields(entity_id=db_entity.id)
-
+        # Observations are replaced atomically below (replace_observations deletes
+        # the old set and inserts the new one in one transaction), instead of the
+        # old delete_by_fields + add_all pair whose two separate commits could
+        # lose all of the entity's observations if the add failed after the delete
+        # had already committed.
         # --- Schema Normalisation (MemGraphRAG noise gate) ---
         # Trigger: SchemaService is wired (opt-in at composition root)
         # Why: normalise free-form LLM category strings to canonical names before
@@ -771,7 +822,9 @@ class EntityService(BaseService[EntityModel]):
             )
             for obs in markdown.observations
         ]
-        saved_observations = await self.observation_repository.add_all(observations)
+        saved_observations = await self.observation_repository.replace_observations(
+            db_entity.id, observations
+        )
 
         # --- Conflict Detection (MemGraphRAG-inspired) ---
         # Trigger: entity has observations; newly written content may contradict existing data
@@ -838,26 +891,18 @@ class EntityService(BaseService[EntityModel]):
 
         db_entity = await self.repository.get_by_file_path(path)
 
-        # Clear existing relations first
-        await self.relation_repository.delete_outgoing_relations_from_entity(db_entity.id)
-
-        # Batch resolve all relation targets in parallel
+        # Resolve relation targets in parallel (strict=True keeps forward
+        # references to non-existent entities unresolved with to_id=NULL).
+        relations_to_add: list[Relation] = []
         if markdown.relations:
             import asyncio
 
-            # Create tasks for all relation lookups
-            # Use strict=True to disable fuzzy search - only exact matches should create resolved relations
-            # This ensures forward references (links to non-existent entities) remain unresolved (to_id=NULL)
             lookup_tasks = [
                 self.link_resolver.resolve_link(rel.target, strict=True)
                 for rel in markdown.relations
             ]
-
-            # Execute all lookups in parallel
             resolved_entities = await asyncio.gather(*lookup_tasks, return_exceptions=True)
 
-            # Process results and create relation records
-            relations_to_add = []
             for rel, resolved in zip(markdown.relations, resolved_entities):
                 # Handle exceptions from gather and None results
                 target_entity: Optional[Entity] = None
@@ -870,7 +915,6 @@ class EntityService(BaseService[EntityModel]):
                 # if the target is found, store the title, otherwise add the target for a "forward link"
                 target_name = target_entity.title if target_entity else rel.target
 
-                # Create the relation
                 relation = Relation(
                     project_id=self.relation_repository.project_id,
                     from_id=db_entity.id,
@@ -881,22 +925,14 @@ class EntityService(BaseService[EntityModel]):
                 )
                 relations_to_add.append(relation)
 
-            # Batch insert all relations
-            if relations_to_add:
-                try:
-                    await self.relation_repository.add_all(relations_to_add)
-                except IntegrityError:
-                    # Some relations might be duplicates - fall back to individual inserts
-                    logger.debug("Batch relation insert failed, trying individual inserts")
-                    for relation in relations_to_add:
-                        try:
-                            await self.relation_repository.add(relation)
-                        except IntegrityError:
-                            # Unique constraint violation - relation already exists
-                            logger.debug(
-                                f"Skipping duplicate relation {relation.relation_type} from {db_entity.permalink}"
-                            )
-                            continue
+        # Atomically replace outgoing relations (delete + insert-ignore in one
+        # transaction) so a failure can't strand the entity with zero outgoing
+        # relations the way the old separate-session delete-then-add could. The
+        # insert-ignore path also handles duplicate relations without a fallback
+        # loop.
+        await self.relation_repository.replace_outgoing_relations(
+            db_entity.id, relations_to_add
+        )
 
         return await self.repository.get_by_file_path(path)
 
@@ -1175,6 +1211,12 @@ class EntityService(BaseService[EntityModel]):
         if await self.file_service.exists(destination_path):
             raise ValueError(f"Destination already exists: {destination_path}")
 
+        # Tracks whether we rewrote the destination file's frontmatter with a new
+        # permalink before the DB update. On rollback we must restore the original
+        # permalink too, otherwise the file (now back at current_path) would carry
+        # the new permalink while the DB row still holds old_permalink.
+        wrote_new_permalink = False
+
         try:
             # 4. Ensure destination directory if needed (no-op for S3)
             await self.file_service.ensure_directory(Path(destination_path).parent)
@@ -1190,6 +1232,11 @@ class EntityService(BaseService[EntityModel]):
             if not app_config.disable_permalinks and (
                 app_config.update_permalinks_on_move or old_permalink is None
             ):
+                # The destination path may carry a stale cache entry from a file
+                # that previously lived there (and was moved/deleted). Drop it so
+                # resolve_permalink resolves the new file freshly against the DB
+                # instead of handing back the predecessor's permalink.
+                self.invalidate_permalink_cache(destination_path)
                 # Generate new permalink from destination path
                 new_permalink = await self.resolve_permalink(destination_path)
 
@@ -1197,6 +1244,7 @@ class EntityService(BaseService[EntityModel]):
                 await self.file_service.update_frontmatter(
                     destination_path, {"permalink": new_permalink}
                 )
+                wrote_new_permalink = True
 
                 updates["permalink"] = new_permalink
                 if old_permalink is None:
@@ -1218,6 +1266,12 @@ class EntityService(BaseService[EntityModel]):
                 # the except block below rolls the filesystem move back.
                 raise EntityUpdateError(f"Failed to update entity in database: {entity.id}")
 
+            # The file has left current_path; a future file created there must
+            # resolve its own permalink (not the moved entity's), so drop the
+            # stale cache entry. (destination_path was invalidated above before
+            # resolving, and resolve_permalink cached the new permalink.)
+            self.invalidate_permalink_cache(current_path)
+
             return updated_entity
 
         except Exception as e:
@@ -1231,6 +1285,21 @@ class EntityService(BaseService[EntityModel]):
                 try:
                     await self.file_service.move_file(destination_path, current_path)
                     logger.info(f"Rolled back file move: {destination_path} -> {current_path}")
+                    # If we rewrote the frontmatter with a new permalink before the
+                    # failure, restore the original so the rolled-back file matches
+                    # the (unchanged) DB row again.
+                    if wrote_new_permalink and old_permalink is not None:
+                        try:
+                            await self.file_service.update_frontmatter(
+                                current_path, {"permalink": old_permalink}
+                            )
+                            logger.info(
+                                f"Restored original permalink on rollback: {old_permalink}"
+                            )
+                        except Exception as fm_error:  # pragma: no cover
+                            logger.error(
+                                f"Restoring frontmatter permalink on rollback failed: {fm_error}"
+                            )
                 except Exception as rollback_error:  # pragma: no cover
                     logger.error(
                         f"Rollback of file move failed — file may be at {destination_path} "

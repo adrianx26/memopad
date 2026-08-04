@@ -1,5 +1,6 @@
 """Service for search operations."""
 
+import asyncio
 import ast
 import hashlib
 import json
@@ -84,10 +85,16 @@ class SearchService:
         # chunks, so a sync sweep that touches N files makes ceil(total_items /
         # batch_size) model calls instead of one per file. Outside batch mode
         # (single-file updates, API writes) each upsert embeds immediately as
-        # before. asyncio is single-threaded, so the list needs no locking even
-        # though sync_file coroutines feed it concurrently during a parallel scan.
+        # before. asyncio is single-threaded, so the list mutation needs no
+        # locking even though sync_file coroutines feed it concurrently.
         self._embedding_batch_mode = False
         self._embedding_buffer: list[tuple[str, int, str]] = []
+        # Serializes embedding flushes so that during a parallel sync sweep only
+        # one upsert_batch (and thus one off-loop ONNX inference) runs at a time.
+        # Without this, N coroutines crossing the flush threshold simultaneously
+        # would launch N concurrent `asyncio.to_thread` inference calls and
+        # oversubscribe CPU past the ONNX thread cap (Fix 1).
+        self._embedding_flush_lock = asyncio.Lock()
 
     async def _get_embedding_service(self):
         """Return a cached EmbeddingService, or None when embeddings are off.
@@ -188,7 +195,10 @@ class SearchService:
                 if len(self._embedding_buffer) >= BACKFILL_BATCH_DEFAULT:
                     await self._flush_embedding_buffer(svc)
             else:
-                await svc.upsert_batch(items)
+                # Serialize immediate writes with any concurrent flush so we never
+                # run two ONNX inferences at once (Fix 1 thread cap stays effective).
+                async with self._embedding_flush_lock:
+                    await svc.upsert_batch(items)
         except Exception as e:  # pragma: no cover
             logger.warning(f"Embedding upsert failed for entity_id={entity.id}: {e}")
 
@@ -203,9 +213,14 @@ class SearchService:
     async def flush_embedding_buffer(self) -> None:
         """Flush any buffered embedding items and leave batch mode.
 
-        Writes the remaining buffer in one ``upsert_batch`` call (which itself
-        skips unchanged items via content-hash dedup) and turns batch mode off
-        so subsequent single-entity writes embed immediately again.
+        Writes the remaining buffer in ``upsert_batch`` chunks (which themselves
+        skip unchanged items via content-hash dedup) and turns batch mode off so
+        subsequent single-entity writes embed immediately again. Transient
+        failures don't drop the items on the floor (Fix 5): ``_flush_embedding_buffer``
+        re-queues whatever it couldn't write, and we retry a couple of times;
+        anything still un-flushed stays in the buffer for the next sync rather
+        than being lost (a dropped item keeps its old content_hash, so the
+        content-hash dedup would otherwise never re-embed it).
         """
         if not self._embedding_batch_mode and not self._embedding_buffer:
             return
@@ -216,24 +231,47 @@ class SearchService:
             svc = await self._get_embedding_service()
         except Exception as e:  # pragma: no cover
             logger.warning(f"Embedding service unavailable during flush: {e}")
-            self._embedding_buffer.clear()
+            # Leave the buffer intact for the next sync to retry.
             return
         if svc is None:
-            self._embedding_buffer.clear()
             return
-        await self._flush_embedding_buffer(svc)
+        for _attempt in range(2):
+            if not self._embedding_buffer:
+                break
+            await self._flush_embedding_buffer(svc)
+        if self._embedding_buffer:
+            logger.warning(
+                f"Embedding flush gave up after retries; "
+                f"{len(self._embedding_buffer)} items remain buffered for next sync."
+            )
 
     async def _flush_embedding_buffer(self, svc: "EmbeddingService") -> None:
-        """Drain ``_embedding_buffer`` into ``svc`` in batch-sized chunks."""
+        """Drain ``_embedding_buffer`` into ``svc`` in batch-sized chunks.
+
+        Holds ``_embedding_flush_lock`` so only one flush/inference runs at a time
+        (Fix 4). On failure the un-flushed remainder is re-queued to the front of
+        the buffer so the next attempt retries it (Fix 5) instead of losing it.
+        """
         if not self._embedding_buffer:
             return
-        buffer = self._embedding_buffer
-        self._embedding_buffer = []
-        try:
-            for i in range(0, len(buffer), BACKFILL_BATCH_DEFAULT):
-                await svc.upsert_batch(buffer[i : i + BACKFILL_BATCH_DEFAULT])
-        except Exception as e:  # pragma: no cover
-            logger.warning(f"Embedding buffer flush failed ({len(buffer)} items): {e}")
+        async with self._embedding_flush_lock:
+            buffer = self._embedding_buffer
+            self._embedding_buffer = []
+            flushed_count = 0
+            try:
+                for i in range(0, len(buffer), BACKFILL_BATCH_DEFAULT):
+                    chunk = buffer[i : i + BACKFILL_BATCH_DEFAULT]
+                    await svc.upsert_batch(chunk)
+                    flushed_count = i + len(chunk)
+            except Exception as e:  # pragma: no cover
+                remaining = buffer[flushed_count:]
+                if remaining:
+                    # Re-prepend so the next flush retries these before newer items.
+                    self._embedding_buffer = remaining + self._embedding_buffer
+                logger.warning(
+                    f"Embedding buffer flush failed ({len(buffer)} items, "
+                    f"{len(remaining)} re-queued): {e}"
+                )
 
     async def delete_entity_embeddings(self, entity: Entity) -> None:
         """Best-effort: drop an entity's vectors (entity + observations + relations).

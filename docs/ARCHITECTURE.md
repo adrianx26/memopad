@@ -275,6 +275,27 @@ class SyncStatus(Enum):
     ERROR = "error"
 ```
 
+### File ↔ DB consistency invariants
+
+Two invariants keep the file and database views from diverging (see
+`docs/CHANGES-hardening-p0-p3.md`):
+
+- **Cache invalidation on every mutation.** `EntityService` keeps a 2Q
+  permalink cache (`_permalink_cache`, keyed `path:<file>`) and a 60 s
+  metadata cache. Moves and deletes invalidate both the old and new path keys
+  *around* the operation (before resolving the destination permalink, after
+  the DB update succeeds), and the sync write path reads metadata with
+  `use_cache=False`. `resolve_permalink` never serves a cached value when the
+  markdown carries an explicit `permalink:` frontmatter field. A failed move
+  restores the original permalink into the file.
+- **Atomic replace via single-session repository methods.** Replacing an
+  entity's observations or outgoing relations uses `replace_observations` /
+  `replace_outgoing_relations` — one `db.scoped_session`, delete + insert in
+  one commit — so a failure mid-replace can't leave the entity with zero
+  observations/relations (the old delete-then-add-on-separate-sessions path
+  committed the delete before the add). `create_entity` cleans up an
+  orphaned file if upsert/reconcile raises after the write.
+
 ## Project Resolution
 
 ### ProjectResolver
@@ -440,10 +461,14 @@ it directly.
   of truth; created by the `p9d1e2f3a4b5` migration (and lazily by
   `_init_blob_store`).
 - **Optional `sqlite-vec` ANN index**: one `vec0` virtual table per item type
-  per project mirrors the BLOB store for sublinear KNN. When the extension
-  can't load, search falls back to a numpy matmul over the BLOB store. `db.py`
-  loads the extension per connection (gated on the env var) and logs the
-  outcome once.
+  per project mirrors the BLOB store for sublinear KNN. Table names are
+  **dim-scoped** — `embedding_vec_<item_type>_p<project>_d<dim>` — so a model
+  swap (different `dim`) creates its own table instead of mutating an
+  existing `IF NOT EXISTS` table whose row width no longer matches; this
+  prevents a wrong-dim `INSERT` from rolling back the canonical BLOB write.
+  When the extension can't load, search falls back to a numpy matmul over the
+  BLOB store. `db.py` loads the extension per connection (gated on the env var)
+  and logs the outcome once.
 
 **Hybrid search** fuses BM25 (FTS5) and cosine rankings via Reciprocal Rank
 Fusion (RRF), keyed by `(item_type, item_id)` so entities, facts, and

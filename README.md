@@ -542,12 +542,23 @@ memopad doctor --project my-research
 
 # Drift check + auto-reconcile via force_full sync
 memopad doctor --project my-research --fix
+
+# Schema health checks only (reindex_state content_hash, vec0 dim-scoping)
+memopad doctor --health
 ```
 
 The `--project` mode reports new files on disk, modified/deleted entries, and
 unresolved `[[wikilinks]]`. With `--fix`, file ↔ DB drift is reconciled
 automatically. Unresolved wikilinks are reported only — fixing them is left
 to the user since fuzzy-rewriting markdown is risky.
+
+`--health` runs read-only schema checks against the app DB
+(`~/memopad/memory.db`): it verifies the `reindex_state.content_hash` column
+that powers incremental reindex, and that every `embedding_vec_*` virtual table
+is dim-scoped (`..._p<project>_d<dim>`, so a model swap can't roll back
+canonical embedding writes). The default `memopad doctor` runs these same
+checks first as a best-effort warning before the roundtrip; `--health` runs
+only them and exits non-zero if any issues are found.
 
 ## Optional: hybrid semantic search
 

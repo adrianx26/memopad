@@ -139,13 +139,20 @@ def app_config(config_home, db_backend, postgres_container, monkeypatch) -> Memo
 def config_manager(app_config: MemoPadConfig, config_home: Path, monkeypatch) -> ConfigManager:
     # Invalidate config cache to ensure clean state for each test
     from memopad import config as config_module
+    from memopad.config import DATA_DIR_NAME
 
-    config_module._CONFIG_CACHE = None
+    # The real cache is the module-level ``_config_cache`` instance; the old
+    # ``_CONFIG_CACHE`` attribute never existed, so assigning to it was a
+    # silent no-op that let stale configs leak across tests.
+    config_module.clear_config_cache()
 
     # Create a new ConfigManager that uses the test home directory
     config_manager = ConfigManager()
-    # Update its paths to use the test directory
-    config_manager.config_dir = config_home / ".memopad"
+    # Update its paths to use the test directory. Match production
+    # (``ConfigManager.__init__`` uses ``home / DATA_DIR_NAME``) so the fresh
+    # ``ConfigManager()`` constructed in e.g. ``WatchService.handle_changes``
+    # reads back the config we save below.
+    config_manager.config_dir = config_home / DATA_DIR_NAME
     config_manager.config_file = config_manager.config_dir / "config.json"
     config_manager.config_dir.mkdir(parents=True, exist_ok=True)
 

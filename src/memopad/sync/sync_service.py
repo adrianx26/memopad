@@ -760,7 +760,7 @@ class SyncService:
         file_contains_frontmatter = has_frontmatter(file_content)
 
         # Get file timestamps for tracking modification times
-        file_metadata = await self.file_service.get_file_metadata(path)
+        file_metadata = await self.file_service.get_file_metadata(path, use_cache=False)
         created = file_metadata.created_at
         modified = file_metadata.modified_at
 
@@ -846,7 +846,7 @@ class SyncService:
             await self.entity_service.resolve_permalink(path, skip_conflict_check=True)
 
             # get file timestamps
-            file_metadata = await self.file_service.get_file_metadata(path)
+            file_metadata = await self.file_service.get_file_metadata(path, use_cache=False)
             created = file_metadata.created_at
             modified = file_metadata.modified_at
 
@@ -888,7 +888,9 @@ class SyncService:
                         raise ValueError(f"Entity not found after constraint violation: {path}")
 
                     # Re-get file metadata since we're in update path
-                    file_metadata_for_update = await self.file_service.get_file_metadata(path)
+                    file_metadata_for_update = await self.file_service.get_file_metadata(
+                        path, use_cache=False
+                    )
                     updated = await self.entity_repository.update(
                         entity.id,
                         {
@@ -909,7 +911,7 @@ class SyncService:
                     raise  # pragma: no cover
         else:
             # Get file timestamps for updating modification time
-            file_metadata = await self.file_service.get_file_metadata(path)
+            file_metadata = await self.file_service.get_file_metadata(path, use_cache=False)
             modified = file_metadata.modified_at
 
             entity = await self.entity_repository.get_by_file_path(path)
@@ -942,6 +944,10 @@ class SyncService:
         # First get entity to get permalink before deletion
         entity = await self.entity_repository.get_by_file_path(file_path)
         if entity:
+            # Drop the cached permalink for this path so a future file created
+            # at the same path resolves its own permalink against the DB instead
+            # of inheriting the deleted entity's.
+            self.entity_service.invalidate_permalink_cache(file_path)
             logger.info(
                 f"Deleting entity with file_path={file_path}, entity_id={entity.id}, permalink={entity.permalink}"
             )
@@ -1016,6 +1022,10 @@ class SyncService:
                 and not self.app_config.disable_permalinks
                 and self.file_service.is_markdown(new_path)
             ):
+                # Drop any stale cache entry for new_path (a previously deleted
+                # file may have lived there) so resolve_permalink re-resolves
+                # against the DB instead of returning the predecessor's permalink.
+                self.entity_service.invalidate_permalink_cache(new_path)
                 # generate new permalink value - skip conflict checks during bulk sync
                 new_permalink = await self.entity_service.resolve_permalink(
                     new_path, skip_conflict_check=True
@@ -1075,6 +1085,11 @@ class SyncService:
 
             # update search index
             await self.search_service.index_entity(updated)
+
+            # The entity has left old_path; a future file created there must
+            # resolve its own permalink, not this moved entity's. Drop the stale
+            # cache entry (new_path was invalidated above before re-resolving).
+            self.entity_service.invalidate_permalink_cache(old_path)
 
     async def resolve_relations(self, entity_id: int | None = None):
         """Try to resolve unresolved relations.

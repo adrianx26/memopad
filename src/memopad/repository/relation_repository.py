@@ -69,6 +69,50 @@ class RelationRepository(Repository[Relation]):
         async with db.scoped_session(self.session_maker) as session:
             await session.execute(delete(Relation).where(Relation.from_id == entity_id))
 
+    async def replace_outgoing_relations(
+        self, entity_id: int, relations: List[Relation]
+    ) -> int:
+        """Atomically replace an entity's outgoing relations in one transaction.
+
+        Deletes existing outgoing relations (``from_id == entity_id``) and inserts
+        the new ones in a single session/commit, ignoring duplicates via ON
+        CONFLICT DO NOTHING. Returns the number of relations actually inserted.
+
+        Replaces the old separate-session ``delete_outgoing_relations_from_entity``
+        + ``add_all`` pair, which committed the delete before the add and could
+        leave the entity with zero outgoing relations if the add then raised.
+        """
+        values = [
+            {
+                "project_id": r.project_id if r.project_id else self.project_id,
+                "from_id": r.from_id,
+                "to_id": r.to_id,
+                "to_name": r.to_name,
+                "relation_type": r.relation_type,
+                "context": r.context,
+            }
+            for r in relations
+        ]
+        async with db.scoped_session(self.session_maker) as session:
+            await session.execute(delete(Relation).where(Relation.from_id == entity_id))
+            if not values:
+                return 0
+            dialect_name = session.bind.dialect.name if session.bind else "sqlite"
+            if dialect_name == "postgresql":  # pragma: no cover
+                stmt = (  # pragma: no cover
+                    pg_insert(Relation)
+                    .values(values)
+                    .on_conflict_do_nothing()
+                    .returning(Relation.id)
+                )
+                result = await session.execute(stmt)  # pragma: no cover
+                return len(result.fetchall())  # pragma: no cover
+            else:
+                stmt = sqlite_insert(Relation).values(values)
+                stmt = stmt.on_conflict_do_nothing()
+                result = cast(CursorResult[Any], await session.execute(stmt))
+                return result.rowcount if result.rowcount > 0 else 0
+
     async def find_unresolved_relations(self) -> Sequence[Relation]:
         """Find all unresolved relations, where to_id is null."""
         query = select(Relation).filter(Relation.to_id.is_(None))

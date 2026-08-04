@@ -383,6 +383,10 @@ async def edit_entity_by_id(
 
         return result
 
+    except HTTPException:
+        # Preserve intentional HTTP status codes (e.g. 404) instead of
+        # collapsing them into a generic 400.
+        raise
     except Exception as e:
         logger.error(f"Error editing entity {entity_id}: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -398,7 +402,6 @@ async def delete_entity_by_id(
     entity_service: EntityServiceV2ExternalDep,
     entity_repository: EntityRepositoryV2ExternalDep,
     entity_id: str = Path(..., description="Entity external ID (UUID)"),
-    search_service=Depends(lambda: None),  # Optional for now
 ) -> DeleteEntitiesResponse:
     """Delete an entity by external ID.
 
@@ -408,7 +411,10 @@ async def delete_entity_by_id(
     Returns:
         Deletion status
 
-    Note: Returns deleted=False if entity doesn't exist (idempotent)
+    Note: Returns deleted=False if entity doesn't exist (idempotent).
+        Search-index cleanup is handled inside ``entity_service.delete_entity``
+        (it calls ``search_service.handle_delete``), so no separate search
+        service parameter is needed here.
     """
     logger.info(f"API v2 request: delete_entity_by_id entity_id={entity_id}")
 
@@ -417,12 +423,10 @@ async def delete_entity_by_id(
         logger.info(f"API v2 response: external_id={entity_id} not found, deleted=False")
         return DeleteEntitiesResponse(deleted=False)
 
-    # Delete the entity using internal ID
+    # Delete the entity using internal ID. ``delete_entity`` also removes the
+    # entity from the search index internally, so no separate background task
+    # is required here.
     deleted = await entity_service.delete_entity(entity.id)
-
-    # Remove from search index if search service available
-    if search_service:
-        background_tasks.add_task(search_service.handle_delete, entity)  # pragma: no cover
 
     logger.info(f"API v2 response: external_id={entity_id}, deleted={deleted}")
 
@@ -546,6 +550,8 @@ async def move_directory(
         )
         return result
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error moving directory: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -587,6 +593,8 @@ async def delete_directory(
         )
         return result
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error deleting directory: {e}")
         raise HTTPException(status_code=400, detail=str(e))

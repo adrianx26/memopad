@@ -138,6 +138,9 @@ async def import_memory_json(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=result.error_message or "Import failed",
             )
+    except HTTPException:
+        # Preserve the intentional status/detail above instead of re-wrapping.
+        raise
     except Exception as e:
         logger.exception("V2 Import failed")
         raise HTTPException(
@@ -173,6 +176,9 @@ async def import_file(importer: Importer, file: UploadFile, destination_director
 
         return result
 
+    except HTTPException:
+        # Preserve the intentional status/detail above instead of re-wrapping.
+        raise
     except Exception as e:
         logger.exception("V2 Import failed")
         raise HTTPException(

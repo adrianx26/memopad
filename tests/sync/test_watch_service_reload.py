@@ -105,7 +105,10 @@ async def test_run_handles_no_projects(monkeypatch):
 
     await watch_service.run()
 
-    assert slept and slept[-1] == config.watch_project_reload_interval
+    # Membership (not last-element) so the reload-interval sleep is recognised
+    # regardless of which concurrent task (the _schedule_restart timer vs. the
+    # cycle body) happens to call ``asyncio.sleep`` first.
+    assert config.watch_project_reload_interval in slept
 
 
 @pytest.mark.asyncio
