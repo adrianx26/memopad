@@ -21,10 +21,14 @@ def isolated_home(tmp_path, monkeypatch) -> Path:
     Sets MEMOPAD_HOME to tmp_path directly so the default project
     writes files to tmp_path, which is where tests expect to find them.
     """
-    # Clear config cache to ensure fresh config for each test
+    # Clear config cache to ensure fresh config for each test. The real cache
+    # is the module-level ``_config_cache`` instance; the old
+    # ``_CONFIG_CACHE = None`` assignment was a no-op that let a prior test's
+    # cached config (with its tmp_path) leak into later tests, so importer
+    # writes landed in the wrong tmp_path and the import tests failed in-suite.
     from memopad import config as config_module
 
-    config_module._CONFIG_CACHE = None
+    config_module.clear_config_cache()
 
     monkeypatch.setenv("HOME", str(tmp_path))
     if os.name == "nt":

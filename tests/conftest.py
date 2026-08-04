@@ -378,6 +378,7 @@ async def entity_service(
         entity_parser=entity_parser,
         entity_repository=entity_repository,
         observation_repository=observation_repository,
+        alias_repository=entity_alias_repository,
         relation_repository=relation_repository,
         file_service=file_service,
         link_resolver=link_resolver,

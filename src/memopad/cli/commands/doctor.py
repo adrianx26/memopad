@@ -59,9 +59,15 @@ async def run_health_checks() -> int:
     mutate anything. Returns the number of issues found.
 
     Checks:
-      1. ``reindex_state`` table exists and has a ``content_hash`` column —
-         the per-entity SHA-256 fingerprint that makes incremental reindex
-         skip unchanged entities. Missing ⇒ incremental reindex is disabled.
+      1a. ``reindex_state`` table exists with a ``fingerprint`` column — the
+          per-entity SHA-256 fingerprint that makes incremental reindex skip
+          unchanged entities. Missing ⇒ incremental reindex is disabled.
+      1b. ``embedding`` table has a ``content_hash`` column — the per-item
+          SHA-256 that lets the embedding service skip re-embedding unchanged
+          text. Missing ⇒ embedding dedup is disabled. (The ``content_hash``
+          column lives on the ``embedding`` table, added by migration
+          ``p9d1e2f3a4b5``; it is NOT on ``reindex_state``, whose own
+          per-entity fingerprint column is ``fingerprint``.)
       2. Every ``embedding_vec_*`` virtual table is dim-scoped
          (``..._p<project>_d<dim>``). Non-scoped leftovers break model swaps.
 
@@ -80,7 +86,9 @@ async def run_health_checks() -> int:
 
     issues = 0
     async with aiosqlite.connect(str(db_path)) as conn:
-        # --- Check 1: reindex_state + content_hash ---
+        # --- Check 1a: reindex_state + fingerprint (incremental reindex) ---
+        # reindex_state.fingerprint is the per-entity SHA-256 that lets
+        # reindex_all skip unchanged entities (migration o9c0d1e2f3a4).
         cur = await conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='reindex_state'"
         )
@@ -93,16 +101,45 @@ async def run_health_checks() -> int:
         else:
             cur = await conn.execute("PRAGMA table_info(reindex_state)")
             columns = {row[1] for row in await cur.fetchall()}
-            if "content_hash" not in columns:
+            if "fingerprint" not in columns:
                 console.print(
-                    "[yellow]reindex_state.content_hash missing — per-entity "
+                    "[yellow]reindex_state.fingerprint missing — per-entity "
                     "fingerprint absent, reindex can't skip unchanged rows.[/yellow]"
                 )
                 issues += 1
             else:
                 console.print(
-                    "[green]OK[/green] reindex_state.content_hash present "
+                    "[green]OK[/green] reindex_state.fingerprint present "
                     "(incremental reindex enabled)"
+                )
+
+        # --- Check 1b: embedding.content_hash (embedding dedup) ---
+        # content_hash lives on the embedding table (migration p9d1e2f3a4b5),
+        # NOT on reindex_state. It lets upsert_batch skip re-embedding
+        # unchanged text+model items.
+        cur = await conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='embedding'"
+        )
+        if await cur.fetchone() is None:
+            # Embedding table is created lazily on first embedding index, so its
+            # absence is not an error — just means embeddings never ran.
+            console.print(
+                "[green]OK[/green] embedding table not yet created "
+                "(created on first embedding index)"
+            )
+        else:
+            cur = await conn.execute("PRAGMA table_info(embedding)")
+            columns = {row[1] for row in await cur.fetchall()}
+            if "content_hash" not in columns:
+                console.print(
+                    "[yellow]embedding.content_hash missing — embedding dedup "
+                    "disabled (run migrations).[/yellow]"
+                )
+                issues += 1
+            else:
+                console.print(
+                    "[green]OK[/green] embedding.content_hash present "
+                    "(embedding dedup enabled)"
                 )
 
         # --- Check 2: vec0 table dim-scoping ---
@@ -355,8 +392,9 @@ def doctor(
     health: bool = typer.Option(
         False,
         "--health",
-        help="Only run local schema health checks (reindex_state content_hash, "
-        "vec0 dim-scoping) against the app DB; skip the roundtrip.",
+        help="Only run local schema health checks (reindex_state fingerprint, "
+        "embedding content_hash, vec0 dim-scoping) against the app DB; skip "
+        "the roundtrip.",
     ),
 ) -> None:
     """Run local consistency checks to verify file/database sync."""
