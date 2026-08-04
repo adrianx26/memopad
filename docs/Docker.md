@@ -15,7 +15,7 @@ MemoPad provides pre-built Docker images on GitHub Container Registry that are a
      --name memopad-server \
      -p 8000:8000 \
      -v /path/to/your/obsidian-vault:/app/data:rw \
-     -v memopad-config:/app/.memopad:rw \
+     -v memopad-config:/app/memopad:rw \
      ghcr.io/basicmachines-co/memopad:latest
    ```
 
@@ -30,7 +30,7 @@ MemoPad provides pre-built Docker images on GitHub Container Registry that are a
          - "8000:8000"
        volumes:
          - /path/to/your/obsidian-vault:/app/data:rw
-         - memopad-config:/app/.memopad:rw
+         - memopad-config:/app/memopad:rw
        environment:
          - MEMOPAD_DEFAULT_PROJECT=main
        restart: unless-stopped
@@ -67,7 +67,7 @@ docker build -t memopad .
 docker run -d \
   --name memopad-server \
   -v /path/to/your/obsidian-vault:/app/data:rw \
-  -v memopad-config:/app/.memopad:rw \
+  -v memopad-config:/app/memopad:rw \
   -e MEMOPAD_DEFAULT_PROJECT=main \
   memopad
 ```
@@ -86,11 +86,11 @@ MemoPad requires several volume mounts for proper operation:
 
 2. **Configuration and Database** (Recommended):
    ```yaml
-   - memopad-config:/app/.memopad:rw
+   - memopad-config:/app/memopad:rw
    ```
    Persistent storage for configuration and SQLite database.
 
-You can edit the memopad config.json file located in the /app/.memopad/config.json after MemoPad starts.
+You can edit the memopad config.json file located in the /app/memopad/config.json after MemoPad starts.
 
 3. **Multiple Projects** (Optional):
    ```yaml
@@ -98,7 +98,7 @@ You can edit the memopad config.json file located in the /app/.memopad/config.js
    - /path/to/project2:/app/data/project2:rw
    ```
 
-You can edit the memopad config.json file located in the /app/.memopad/config.json
+You can edit the memopad config.json file located in the /app/memopad/config.json
 
 ## CLI Commands via Docker
 
@@ -123,7 +123,7 @@ When using Docker volumes, you'll need to configure projects to point to your mo
 
 1. **Check current configuration:**
    ```bash
-   docker exec memopad-server cat /app/.memopad/config.json
+   docker exec memopad-server cat /app/memopad/config.json
    ```
 
 2. **Add a project for your mounted volume:**
@@ -209,7 +209,7 @@ services:
       - "8000:8000"
     volumes:
       - /path/to/your/obsidian-vault:/app/data:rw
-      - memopad-config:/app/.memopad:rw
+      - memopad-config:/app/memopad:rw
     environment:
       - MEMOPAD_DEFAULT_PROJECT=main
     restart: unless-stopped
@@ -248,7 +248,7 @@ When using Docker Desktop on Windows, ensure the directories are shared:
       ```
 
 2. **Configuration Not Persisting:**
-    - Use named volumes for `/app/.memopad`
+    - Use named volumes for `/app/memopad`
     - Check volume mount permissions
 
 3. **Network Connectivity:**

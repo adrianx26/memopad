@@ -122,7 +122,7 @@ If you encounter issues:
 
 4. Check log output:
    ```bash
-   cat ~/.memopad/memopad.log
+   cat ~/memopad/memopad.log
    ```
 
 For more detailed information, refer to the [full documentation](https://memory.xxx/).

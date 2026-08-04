@@ -449,7 +449,7 @@ MemoPad uses [Loguru](https://github.com/Delgan/loguru) for logging. The logging
 | MCP server | File only | Stdout would corrupt the JSON-RPC protocol |
 | API server | File (local) or stdout (cloud) | Docker/cloud deployments use stdout |
 
-**Log file location:** `~/.memopad/memopad.log` (10MB rotation, 10 days retention)
+**Log file location:** `~/memopad/memopad.log` (10MB rotation, 10 days retention)
 
 ### Environment Variables
 
@@ -467,7 +467,7 @@ MemoPad uses [Loguru](https://github.com/Delgan/loguru) for logging. The logging
 MEMOPAD_LOG_LEVEL=DEBUG memopad sync
 
 # View logs
-tail -f ~/.memopad/memopad.log
+tail -f ~/memopad/memopad.log
 
 # Cloud/Docker mode (stdout logging with structured context)
 MEMOPAD_CLOUD_MODE=true uvicorn basic_memory.api.app:app

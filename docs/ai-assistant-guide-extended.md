@@ -122,7 +122,7 @@ projects = await list_memory_projects()
 
 ```python
 # Enable default_project_mode in config
-# ~/.memopad/config.json
+# ~/memopad/config.json
 {
   "default_project": "main",
   "default_project_mode": true
