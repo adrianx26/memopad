@@ -33,9 +33,12 @@ dataset.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import math
 import os
 import struct
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Hashable, Iterable, Optional, Protocol, Sequence, TypeVar
 
@@ -51,6 +54,20 @@ from memopad import db
 EMBEDDINGS_ENABLED_ENV = "MEMOPAD_EMBEDDINGS_ENABLED"
 DEFAULT_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 EMBEDDING_DIM_DEFAULT = 384  # bge-small-en-v1.5 produces 384-d vectors
+
+# ONNX intra-op thread cap for the embedding model. fastembed/onnxruntime defaults
+# to one thread per logical CPU, so a single embed() call saturates every core
+# and — because it runs sync on the event loop (see _embed) — freezes the server
+# while it does. Capping to a small default keeps the server responsive during
+# indexing/search and bounds CPU spikes; override with the env var (0 = let
+# onnxruntime decide, i.e. all cores).
+EMBEDDING_THREADS_ENV = "MEMOPAD_EMBEDDING_THREADS"
+DEFAULT_NUM_THREADS = min(4, os.cpu_count() or 1)
+
+# Bound on the LRU query-embedding cache (Fix 5). Repeat identical queries are
+# served from cache without a model call; bounded so a query-flood can't grow
+# memory unbounded. Keyed by (model_name, query).
+QUERY_CACHE_MAX = 256
 
 # Item types stored in the embedding table. Each maps to its own vec0 table on the
 # ANN path so the integer `id` (= the item's table PK) is unique within a table.
@@ -125,12 +142,22 @@ class FastEmbedProvider:
     pulling in torch/transformers, which would more than double the install size.
     """
 
-    def __init__(self, model_name: str = DEFAULT_MODEL_NAME):
+    def __init__(
+        self,
+        model_name: str = DEFAULT_MODEL_NAME,
+        num_threads: Optional[int] = None,
+    ):
         from fastembed import TextEmbedding  # type: ignore[import-not-found]
 
         self.model_name = model_name
+        # Cap ONNX intra-op threads so a single embed() call doesn't peg every
+        # core (fastembed defaults to cpu_count threads). `threads=None` leaves
+        # the decision to fastembed (the legacy behavior).
+        kwargs: dict[str, Any] = {}
+        if num_threads is not None:
+            kwargs["threads"] = num_threads
         # The first call downloads the model (~30MB for bge-small) and caches it.
-        self._model = TextEmbedding(model_name=model_name)
+        self._model = TextEmbedding(model_name=model_name, **kwargs)
         # We only learn the true dim after the first inference; assume default
         # for the canonical model and validate once on first use.
         self.dim = EMBEDDING_DIM_DEFAULT
@@ -157,18 +184,39 @@ class FastEmbedProvider:
 _PROVIDER_CACHE: dict[str, EmbeddingProvider] = {}
 
 
+def _resolve_num_threads() -> Optional[int]:
+    """Resolve the ONNX thread cap from the env, or the small default.
+
+    ``MEMOPAD_EMBEDDING_THREADS=0`` explicitly restores the legacy "let
+    onnxruntime use all cores" behavior; an unset var yields the capped default
+    that keeps the server responsive.
+    """
+    raw = os.environ.get(EMBEDDING_THREADS_ENV)
+    if raw is None or raw == "":
+        return DEFAULT_NUM_THREADS
+    try:
+        val = int(raw)
+    except ValueError:
+        logger.warning(
+            f"Invalid {EMBEDDING_THREADS_ENV}={raw!r}; using default {DEFAULT_NUM_THREADS}"
+        )
+        return DEFAULT_NUM_THREADS
+    return None if val <= 0 else val
+
+
 def _get_provider(model_name: str = DEFAULT_MODEL_NAME) -> EmbeddingProvider:
     """Return a process-cached provider, loading the model only on first use."""
     cached = _PROVIDER_CACHE.get(model_name)
     if cached is None:
-        cached = FastEmbedProvider(model_name)
+        cached = FastEmbedProvider(model_name, num_threads=_resolve_num_threads())
         _PROVIDER_CACHE[model_name] = cached
     return cached
 
 
 def reset_provider_cache() -> None:
-    """Drop cached providers. Used by tests and forced reloads."""
+    """Drop cached providers and the query-embedding cache. Used by tests/reloads."""
     _PROVIDER_CACHE.clear()
+    _QUERY_EMBED_CACHE.clear()
 
 
 # --- Storage helpers ---
@@ -181,6 +229,45 @@ class EmbeddingHit:
     item_type: str
     item_id: int
     score: float
+
+
+def _content_hash(text: str) -> str:
+    """Stable SHA-256 of the embedded text, used to skip re-embedding unchanged items.
+
+    Stored alongside each vector so ``upsert_batch`` can compare the text we're
+    about to embed against the text already embedded for that (item_type,
+    item_id) key. A match means the vector is still valid and the expensive
+    model call is skipped. The hash also covers the ``model`` column check
+    (handled in ``upsert_batch``) so a model swap re-embeds even if the text is
+    unchanged.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# Bounded LRU cache of query → query embedding (Fix 5). ``similar`` embeds the
+# query string on every call; repeated identical queries (common in UIs/MCP)
+# pay full inference each time. Keyed by (model_name, query) so a model swap
+# can't serve a stale vector. asyncio is single-threaded, so the OrderedDict
+# needs no locking.
+_QUERY_EMBED_CACHE: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
+
+
+def _cached_query_vec(model: str, query: str) -> Optional[list[float]]:
+    """Return the cached query embedding, or None on a miss."""
+    key = (model, query)
+    vec = _QUERY_EMBED_CACHE.get(key)
+    if vec is not None:
+        _QUERY_EMBED_CACHE.move_to_end(key)
+    return vec
+
+
+def _store_query_vec(model: str, query: str, vec: list[float]) -> None:
+    """Cache a query embedding, evicting the least-recently-used above the cap."""
+    key = (model, query)
+    _QUERY_EMBED_CACHE[key] = vec
+    _QUERY_EMBED_CACHE.move_to_end(key)
+    while len(_QUERY_EMBED_CACHE) > QUERY_CACHE_MAX:
+        _QUERY_EMBED_CACHE.popitem(last=False)
 
 
 def _pack_vector(vec: Sequence[float]) -> bytes:
@@ -217,10 +304,12 @@ class EmbeddingService:
     Canonical store (all backends):
 
         embedding(item_type TEXT, item_id INTEGER, project_id INTEGER, model TEXT,
-                  dim INTEGER, vector BLOB, updated_at TEXT,
+                  dim INTEGER, vector BLOB, content_hash TEXT, updated_at TEXT,
                   PRIMARY KEY (item_type, item_id))
 
-    An index on (project_id, model) scopes BLOB-path queries cheaply.
+    ``content_hash`` (SHA-256 of the embedded text) lets ``upsert_batch`` skip
+    re-embedding items whose text is unchanged. An index on (project_id, model)
+    scopes BLOB-path queries cheaply.
 
     ANN index (SQLite + sqlite-vec only): one ``vec0`` virtual table per item type
     per project, ``embedding_vec_{item_type}_p{project_id}``, with ``id = item_id``
@@ -291,7 +380,14 @@ class EmbeddingService:
             )
 
     async def _init_blob_store(self) -> None:
-        """Create the canonical embedding BLOB table and its project/model index."""
+        """Create the canonical embedding BLOB table and its project/model index.
+
+        ``content_hash`` (Fix 2) stores the SHA-256 of the embedded text so
+        ``upsert_batch`` can skip re-embedding items whose text is unchanged.
+        Added by the ``p9d1e2f3a4b5`` migration; included in the CREATE here so
+        fresh databases (and test fixtures that skip Alembic) get the column
+        without the migration.
+        """
         async with db.scoped_session(self.session_maker) as session:
             await session.execute(
                 text(
@@ -303,6 +399,7 @@ class EmbeddingService:
                         model TEXT NOT NULL,
                         dim INTEGER NOT NULL,
                         vector BLOB NOT NULL,
+                        content_hash TEXT,
                         updated_at TEXT NOT NULL DEFAULT (datetime('now')),
                         PRIMARY KEY (item_type, item_id)
                     )
@@ -316,6 +413,41 @@ class EmbeddingService:
                 )
             )
             await session.commit()
+        await self._ensure_content_hash_column()
+
+    async def _ensure_content_hash_column(self) -> None:
+        """Add ``content_hash`` to an existing ``embedding`` table if absent.
+
+        For databases created before the column was added that then skip the
+        migration (some test fixtures), the CREATE TABLE IF NOT EXISTS above is
+        a no-op and the column stays missing. This backfills it. Run in its own
+        session/transaction so a "duplicate column" error can't roll back the
+        table creation above. The migration is the primary path; this is the
+        lazy fallback.
+        """
+        if await self._has_content_hash_column():
+            return
+        async with db.scoped_session(self.session_maker) as session:
+            await session.execute(
+                text("ALTER TABLE embedding ADD COLUMN content_hash TEXT")
+            )
+            await session.commit()
+
+    async def _has_content_hash_column(self) -> bool:
+        """Return True iff the ``embedding`` table has a ``content_hash`` column."""
+        async with db.scoped_session(self.session_maker) as session:
+            bind = session.get_bind()
+            if bind.dialect.name == "postgresql":
+                result = await session.execute(
+                    text(
+                        "SELECT 1 FROM information_schema.columns "
+                        "WHERE table_name = 'embedding' AND column_name = 'content_hash'"
+                    )
+                )
+                return result.fetchone() is not None
+            # SQLite: column name is the 2nd field of PRAGMA table_info.
+            result = await session.execute(text("PRAGMA table_info(embedding)"))
+            return any(row[1] == "content_hash" for row in result.fetchall())
 
     def _vec_table(self, item_type: str) -> str:
         """Name of the vec0 table for a given item type in this project."""
@@ -343,12 +475,59 @@ class EmbeddingService:
 
     # --- writes ---
 
+    async def _embed(self, texts: Sequence[str]) -> list[list[float]]:
+        """Run ONNX inference on a worker thread so it can't block the event loop.
+
+        ``provider.embed`` is a synchronous, CPU-heavy ONNX call; calling it
+        directly inside an ``async def`` stalls the whole asyncio loop for the
+        duration of inference (and, with onnxruntime's default thread count,
+        pegs every core). ``asyncio.to_thread`` moves the work to the default
+        executor so the loop keeps serving other requests while a batch embeds.
+        """
+        if not self.provider or not texts:
+            return []
+        return await asyncio.to_thread(self.provider.embed, list(texts))
+
+    async def _fetch_hashes(
+        self, keys: Sequence[tuple[str, int]]
+    ) -> dict[tuple[str, int], tuple[Optional[str], Optional[str]]]:
+        """Return ``{(item_type, item_id): (content_hash, model)}`` for existing rows.
+
+        Missing keys are absent from the result. Used by ``upsert_batch`` to
+        decide which items still need embedding: a key needs (re-)embedding iff
+        it is new, or its stored ``content_hash``/``model`` differs from the
+        current text/model.
+        """
+        by_type: dict[str, list[int]] = {}
+        for item_type, item_id in keys:
+            by_type.setdefault(item_type, []).append(item_id)
+        out: dict[tuple[str, int], tuple[Optional[str], Optional[str]]] = {}
+        async with db.scoped_session(self.session_maker) as session:
+            for item_type, ids in by_type.items():
+                result = await session.execute(
+                    text(
+                        "SELECT item_id, content_hash, model FROM embedding "
+                        "WHERE item_type = :t AND item_id IN :ids"
+                    ).bindparams(bindparam("ids", expanding=True)),
+                    {"t": item_type, "ids": ids},
+                )
+                for row in result.fetchall():
+                    out[(item_type, row[0])] = (row[1], row[2])
+        return out
+
     async def upsert(self, item_type: str, item_id: int, content: str) -> None:
         """Embed `content` and write it, replacing any prior vector for this item."""
         await self.upsert_batch([(item_type, item_id, content)])
 
     async def upsert_batch(self, items: Sequence[tuple[str, int, str]]) -> None:
         """Embed a batch of items in one model call and write all vectors.
+
+        Skips items whose embedded text is unchanged since the last write
+        (Fix 2): the SHA-256 of each text is compared against the stored
+        ``content_hash`` (and the stored ``model``), so a re-index of unchanged
+        content does zero model work. Only new/changed items are embedded.
+
+        Inference runs off the event loop via ``_embed`` (Fix 1).
 
         Args:
             items: sequence of (item_type, item_id, text). Order preserved through
@@ -358,8 +537,21 @@ class EmbeddingService:
             return
         await self._ensure_store()
 
-        texts = [text for _, _, text in items]
-        vectors = self.provider.embed(texts)
+        # Pre-compute the content hash for every item and look up what's stored.
+        hashed = [(t, iid, txt, _content_hash(txt)) for (t, iid, txt) in items]
+        existing = await self._fetch_hashes([(t, iid) for (t, iid, _txt, _h) in hashed])
+        cur_model = self.provider.model_name
+        to_embed: list[tuple[str, int, str]] = []
+        for item_type, item_id, txt, h in hashed:
+            prev = existing.get((item_type, item_id))
+            if prev is None or prev[0] != h or prev[1] != cur_model:
+                to_embed.append((item_type, item_id, txt))
+        if not to_embed:
+            # Everything in the batch is already current — no model call needed.
+            return
+
+        vectors = await self._embed([txt for _, _, txt in to_embed])
+        hash_of = {(t, iid): h for (t, iid, _txt, h) in hashed}
 
         # Canonical BLOB rows (always written, all backends).
         blob_rows = [
@@ -370,8 +562,9 @@ class EmbeddingService:
                 "model": self.provider.model_name,
                 "dim": self.provider.dim,
                 "vec": _pack_vector(vector),
+                "ch": hash_of[(item_type, item_id)],
             }
-            for (item_type, item_id, _), vector in zip(items, vectors)
+            for (item_type, item_id, _), vector in zip(to_embed, vectors)
         ]
 
         async with db.scoped_session(self.session_maker) as session:
@@ -379,13 +572,15 @@ class EmbeddingService:
                 text(
                     """
                     INSERT INTO embedding
-                        (item_type, item_id, project_id, model, dim, vector, updated_at)
-                    VALUES (:t, :iid, :pid, :model, :dim, :vec, datetime('now'))
+                        (item_type, item_id, project_id, model, dim, vector,
+                         content_hash, updated_at)
+                    VALUES (:t, :iid, :pid, :model, :dim, :vec, :ch, datetime('now'))
                     ON CONFLICT(item_type, item_id) DO UPDATE SET
                         project_id = excluded.project_id,
                         model = excluded.model,
                         dim = excluded.dim,
                         vector = excluded.vector,
+                        content_hash = excluded.content_hash,
                         updated_at = excluded.updated_at
                     """
                 ),
@@ -395,7 +590,7 @@ class EmbeddingService:
             # vec0 has no UPSERT/REPLACE support, so re-embedding an item is a
             # delete-then-insert against its integer id.
             if self._use_vec0:  # pragma: no cover - requires sqlite-vec extension
-                for (item_type, item_id, _), vector in zip(items, vectors):
+                for (item_type, item_id, _), vector in zip(to_embed, vectors):
                     await session.execute(
                         text(f"DELETE FROM {self._vec_table(item_type)} WHERE id = :id"),
                         {"id": item_id},
@@ -505,11 +700,19 @@ class EmbeddingService:
         Primary path: vec0 KNN (sublinear, scans only this project+type's vectors).
         Fallback: numpy matmul over the BLOB store (fast to ~100k+ vectors), or a
         pure-Python cosine loop if numpy is somehow absent.
+
+        The query is embedded off the event loop via ``_embed`` (Fix 1), and
+        repeat queries are served from a bounded LRU cache so identical searches
+        skip the model call entirely (Fix 5).
         """
         if not self.provider:
             return []
         await self._ensure_store()
-        q_vec = self.provider.embed([query])[0]
+        model = self.provider.model_name
+        q_vec = _cached_query_vec(model, query)
+        if q_vec is None:
+            q_vec = (await self._embed([query]))[0]
+            _store_query_vec(model, query, q_vec)
 
         if self._use_vec0:  # pragma: no cover - requires sqlite-vec extension
             return await self._similar_vec0(q_vec, limit, item_type)

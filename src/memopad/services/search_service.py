@@ -79,6 +79,15 @@ class SearchService:
         self.session_maker = session_maker
         self.project_id = project_id
         self._embedding_service = None  # lazy, cached on first use
+        # Buffered embedding writer (Fix 4). When batch mode is active, per-entity
+        # embedding items accumulate here and flush in BACKFILL_BATCH_DEFAULT-sized
+        # chunks, so a sync sweep that touches N files makes ceil(total_items /
+        # batch_size) model calls instead of one per file. Outside batch mode
+        # (single-file updates, API writes) each upsert embeds immediately as
+        # before. asyncio is single-threaded, so the list needs no locking even
+        # though sync_file coroutines feed it concurrently during a parallel scan.
+        self._embedding_batch_mode = False
+        self._embedding_buffer: list[tuple[str, int, str]] = []
 
     async def _get_embedding_service(self):
         """Return a cached EmbeddingService, or None when embeddings are off.
@@ -157,6 +166,11 @@ class SearchService:
         Embeddings are optional; when disabled this is a no-op. A failure here
         must NOT break FTS indexing — we log and move on so a model/IO hiccup
         can't corrupt the keyword index that everything else depends on.
+
+        In batch mode (Fix 4) the items are appended to ``_embedding_buffer`` and
+        flushed in ``BACKFILL_BATCH_DEFAULT`` chunks instead of embedding
+        immediately — this batches model calls across many files during a sync
+        sweep. Outside batch mode each call embeds immediately.
         """
         try:
             svc = await self._get_embedding_service()
@@ -168,9 +182,58 @@ class SearchService:
         try:
             if content is None and entity.is_markdown:
                 content = await self.file_service.read_entity_content(entity)
-            await svc.upsert_batch(self._entity_embedding_items(entity, content))
+            items = self._entity_embedding_items(entity, content)
+            if self._embedding_batch_mode:
+                self._embedding_buffer.extend(items)
+                if len(self._embedding_buffer) >= BACKFILL_BATCH_DEFAULT:
+                    await self._flush_embedding_buffer(svc)
+            else:
+                await svc.upsert_batch(items)
         except Exception as e:  # pragma: no cover
             logger.warning(f"Embedding upsert failed for entity_id={entity.id}: {e}")
+
+    def begin_embedding_batch(self) -> None:
+        """Activate buffered embedding writes for the duration of a bulk operation.
+
+        Call ``flush_embedding_buffer`` when the bulk work is done so the
+        remainder is written. Idempotent: safe to call when already batching.
+        """
+        self._embedding_batch_mode = True
+
+    async def flush_embedding_buffer(self) -> None:
+        """Flush any buffered embedding items and leave batch mode.
+
+        Writes the remaining buffer in one ``upsert_batch`` call (which itself
+        skips unchanged items via content-hash dedup) and turns batch mode off
+        so subsequent single-entity writes embed immediately again.
+        """
+        if not self._embedding_batch_mode and not self._embedding_buffer:
+            return
+        self._embedding_batch_mode = False
+        if not self._embedding_buffer:
+            return
+        try:
+            svc = await self._get_embedding_service()
+        except Exception as e:  # pragma: no cover
+            logger.warning(f"Embedding service unavailable during flush: {e}")
+            self._embedding_buffer.clear()
+            return
+        if svc is None:
+            self._embedding_buffer.clear()
+            return
+        await self._flush_embedding_buffer(svc)
+
+    async def _flush_embedding_buffer(self, svc: "EmbeddingService") -> None:
+        """Drain ``_embedding_buffer`` into ``svc`` in batch-sized chunks."""
+        if not self._embedding_buffer:
+            return
+        buffer = self._embedding_buffer
+        self._embedding_buffer = []
+        try:
+            for i in range(0, len(buffer), BACKFILL_BATCH_DEFAULT):
+                await svc.upsert_batch(buffer[i : i + BACKFILL_BATCH_DEFAULT])
+        except Exception as e:  # pragma: no cover
+            logger.warning(f"Embedding buffer flush failed ({len(buffer)} items): {e}")
 
     async def delete_entity_embeddings(self, entity: Entity) -> None:
         """Best-effort: drop an entity's vectors (entity + observations + relations).

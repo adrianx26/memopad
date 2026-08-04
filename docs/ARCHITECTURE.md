@@ -423,3 +423,67 @@ src/memopad/
 ├── project_resolver.py       # Unified project selection
 └── config.py                 # Configuration management
 ```
+
+## Embeddings & Semantic Search
+
+Semantic/hybrid search is an opt-in feature (`MEMOPAD_EMBEDDINGS_ENABLED`)
+layered on top of the FTS5 keyword index. `EmbeddingService`
+(`services/embedding_service.py`) owns a two-tier vector store and is reached
+only through `SearchService` — entity/observation/relation services never touch
+it directly.
+
+**Two-tier store**
+
+- **Canonical BLOB store** (`embedding` table, every backend): `item_type`
+  (`entity`/`observation`/`relation`) + `item_id` composite key, packed
+  float32 `vector`, and a `content_hash` (SHA-256 of the embedded text). Source
+  of truth; created by the `p9d1e2f3a4b5` migration (and lazily by
+  `_init_blob_store`).
+- **Optional `sqlite-vec` ANN index**: one `vec0` virtual table per item type
+  per project mirrors the BLOB store for sublinear KNN. When the extension
+  can't load, search falls back to a numpy matmul over the BLOB store. `db.py`
+  loads the extension per connection (gated on the env var) and logs the
+  outcome once.
+
+**Hybrid search** fuses BM25 (FTS5) and cosine rankings via Reciprocal Rank
+Fusion (RRF), keyed by `(item_type, item_id)` so entities, facts, and
+relations fuse on equal footing.
+
+**Performance design** (see `docs/CHANGES-embedding-perf.md`):
+
+```mermaid
+flowchart LR
+  subgraph Write["Index / re-index / sync"]
+    Items["(item_type, item_id, text) batch"]
+    Items --> Hash{"content_hash\n== stored?"}
+    Hash -- "unchanged" --> Skip["skip (no model call)"]
+    Hash -- "new/changed" --> Off["_embed()\nasyncio.to_thread\n(threads capped)"]
+    Off --> Blob[("embedding BLOB\n+ content_hash")]
+    Off --> Vec0[("vec0 mirror\n(optional)")]
+  end
+
+  subgraph Search["hybrid_search"]
+    Q["query"] --> QCache{"LRU cache\nhit?"}
+    QCache -- hit --> QVec["cached q_vec"]
+    QCache -- miss --> Off2["_embed()\noff-loop + cache"]
+    Off2 --> QVec
+    QVec --> KNN{"vec0\navailable?"}
+    KNN -- yes --> V0["vec0 KNN\n(sublinear)"]
+    KNN -- no --> Np["numpy matmul\nover BLOBs"]
+    V0 --> RRF["RRF fuse with FTS5"]
+    Np --> RRF
+  end
+```
+
+- **Off-loop inference (Fix 1):** `provider.embed` runs via `asyncio.to_thread`;
+  ONNX threads capped to `MEMOPAD_EMBEDDING_THREADS` (default `min(4, cpu_count)`).
+- **Content-hash dedup (Fix 2):** `upsert_batch` skips items whose text+model
+  are unchanged — re-indexing unchanged content costs nothing.
+- **sqlite-vec loading (Fix 3a):** aiosqlite connections drive the extension via
+  `run_async`; vec0 actually loads instead of silently falling back to the
+  O(N) scorer.
+- **Batched sync (Fix 4):** `SearchService.begin_embedding_batch` /
+  `flush_embedding_buffer` accumulate items across a sync sweep and flush in
+  128-item chunks (one model call per chunk, not per file).
+- **Query cache (Fix 5):** a bounded LRU (256, keyed by `(model, query)`)
+  serves repeat queries without a model call.

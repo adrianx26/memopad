@@ -526,6 +526,42 @@ tags: [coffee, brewing]
   </div>
 </div>
 
+<h2>5. Embeddings &amp; Semantic Search</h2>
+<p class="section-intro">
+  Opt-in semantic/hybrid search (BM25 + embeddings) layered on the FTS5 index.
+  <code>EmbeddingService</code> owns a two-tier vector store (canonical BLOB
+  table + optional sqlite-vec ANN index) reached only through
+  <code>SearchService</code>. Tuned to stay light on CPU: inference runs off the
+  event loop, unchanged content is never re-embedded, and repeat queries are
+  cached. See <code>docs/CHANGES-embedding-perf.md</code>.
+</p>
+
+<div class="diagram-container">
+  <pre class="mermaid">
+    flowchart LR
+      subgraph Write["Index / re-index / sync (Fix 1, 2, 4)"]
+        Items["(item_type, item_id, text) batch"]
+        Items --> Hash{"content_hash == stored?"}
+        Hash -- "unchanged" --> Skip["skip — no model call"]
+        Hash -- "new / changed" --> Off["_embed()\nasyncio.to_thread\nthreads capped"]
+        Off --> Blob[("embedding BLOB\n+ content_hash")]
+        Off --> Vec0[("vec0 mirror\n(optional)")]
+      end
+
+      subgraph Search["hybrid_search (Fix 3a, 5)"]
+        Q["query"] --> QCache{"LRU cache hit?"}
+        QCache -- hit --> QVec["cached q_vec"]
+        QCache -- miss --> Off2["_embed() off-loop + cache"]
+        Off2 --> QVec
+        QVec --> KNN{"vec0 available?"}
+        KNN -- yes --> V0["vec0 KNN\n(sublinear)"]
+        KNN -- no --> Np["numpy matmul\nover BLOBs"]
+        V0 --> RRF["RRF fuse with FTS5"]
+        Np --> RRF
+      end
+  </pre>
+</div>
+
 </div>
 
 <script type="module">

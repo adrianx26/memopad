@@ -335,3 +335,51 @@ under `docs/`.
   Each is high-risk / marginal-payoff in a codebase that already carries pre-existing
   failures (the two `test_entity_service` permalink-desync tests and the
   missing-`freezegun` collection error are pre-existing, not caused by this work).
+
+---
+
+## Phase 7 — Embedding service CPU/perf fixes
+
+Driven by `embedding_service.py` consuming large amounts of CPU during indexing
+and search. Five fixes; full detail in [`CHANGES-embedding-perf.md`](CHANGES-embedding-perf.md).
+
+### `src/memopad/services/embedding_service.py` (Fix 1, 2, 5)
+- **Fix 1 — off-loop inference + thread cap:** `FastEmbedProvider` accepts
+  `num_threads` (passed to `fastembed.TextEmbedding(threads=...)`), default
+  `min(4, cpu_count)` via `MEMOPAD_EMBEDDING_THREADS` (`0` = all cores). New
+  `_embed()` runs `provider.embed` through `asyncio.to_thread`; `upsert_batch`
+  and `similar` await it instead of calling ONNX sync on the event loop.
+- **Fix 2 — content-hash dedup:** new `content_hash` column (SHA-256 of embedded
+  text); `upsert_batch` skips re-embedding items whose text+model are unchanged
+  (`_fetch_hashes` / `_content_hash`). Lazy `_ensure_content_hash_column`
+  backfills the column on migration-skipping DBs.
+- **Fix 5 — query cache:** bounded LRU `_QUERY_EMBED_CACHE` (256, keyed by
+  `(model, query)`); `similar` serves repeat queries from cache.
+  `reset_provider_cache()` clears it too.
+
+### `src/memopad/alembic/versions/p9d1e2f3a4b5_add_embedding_content_hash.py` (new, Fix 2)
+- Adds nullable `content_hash` to `embedding` (dialect-aware, idempotent).
+  `down_revision = "o9c0d1e2f3a4"`; new single head.
+
+### `src/memopad/db.py` (Fix 3a)
+- `_load_sqlite_vec` now detects aiosqlite (coroutine `enable_load_extension`)
+  and drives the load via `run_async` — vec0 was silently never loading on the
+  async SQLite path (the sync branch was taken, the awaitable dropped). Outcome
+  logged once (info on success, warning + install hint on failure) instead of a
+  silent debug line.
+
+### `src/memopad/services/search_service.py` (Fix 4)
+- `SearchService` gains an opt-in embedding buffer
+  (`begin_embedding_batch` / `flush_embedding_buffer`); `_upsert_entity_embeddings`
+  buffers in batch mode (auto-flush at `BACKFILL_BATCH_DEFAULT`), embeds
+  immediately otherwise.
+
+### `src/memopad/sync/sync_service.py` (Fix 4)
+- `sync()` wraps the parallel new+modified file sync in begin/flush (in a
+  `finally`) so a sweep makes `ceil(total_items / 128)` model calls instead of
+  one per file.
+
+### `tests/services/test_embedding_service.py`
+- `TestContentHashDedup` (4) + `TestQueryCache` (1) using a `_CountingProvider`.
+  Embedding/search/reindex suites green (76 passed, 1 skipped). The 17
+  `tests/sync/` failures are pre-existing (reproduce without these changes).

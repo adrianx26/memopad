@@ -558,6 +558,9 @@ keyword FTS5. It's **opt-in** so existing installs see no behavior change.
 # Install the optional dependency (CPU-only ONNX runtime, ~30MB model)
 pip install 'memopad[embeddings]'
 
+# Optional but recommended: ANN index for sublinear KNN search (Linux/macOS/Win)
+pip install sqlite-vec
+
 # Enable for the current session
 export MEMOPAD_EMBEDDINGS_ENABLED=true
 ```
@@ -567,7 +570,29 @@ Hybrid mode fuses keyword and embedding rankings via Reciprocal Rank Fusion
 (RRF) — robust across precise term lookups and conceptual queries without
 weight tuning.
 
-See [plans/PLAN.md](plans/PLAN.md) §2.4 for the full integration roadmap.
+### Performance & CPU
+
+The embedding service is tuned to stay light on CPU:
+
+- **Inference runs off the event loop.** ONNX inference executes on a worker
+  thread (`asyncio.to_thread`) so the API/MCP server stays responsive while a
+  batch embeds.
+- **Thread cap.** onnxruntime is capped to `min(4, cpu_count)` threads by
+  default so a single embed no longer saturates every core. Override with
+  `MEMOPAD_EMBEDDING_THREADS` (set `0` to let onnxruntime use all cores).
+- **No re-embedding of unchanged content.** Each vector stores a SHA-256 of its
+  text; re-indexing unchanged notes (or unchanged facts/relations inside a
+  changed note) does zero model work.
+- **Batched sync.** A sync sweep batches embedding calls across files (one
+  model call per 128 items instead of one per file).
+- **Cached queries.** Repeat identical searches reuse the query embedding
+  (bounded LRU, 256 entries).
+- **sqlite-vec ANN.** When `sqlite-vec` is installed, KNN search is sublinear
+  (vec0 virtual tables). Without it, search falls back to a numpy scorer over
+  the BLOB store — the startup log reports which path is active.
+
+See [`docs/CHANGES-embedding-perf.md`](docs/CHANGES-embedding-perf.md) for the
+full breakdown of the embedding performance fixes.
 
 See the [justfile](justfile) for the complete list of development commands.
 

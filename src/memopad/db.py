@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import os
 from contextlib import asynccontextmanager
 from enum import Enum, auto
@@ -128,21 +129,38 @@ async def scoped_session(
         await factory.remove()
 
 
+_SQLITE_VEC_STATUS_LOGGED = False  # module-level guard so we log vec0 status once
+
+
 def _load_sqlite_vec(dbapi_conn, sqlite_vec) -> None:  # pragma: no cover - requires the extra
     """Load the sqlite-vec extension on a SQLite connection.
 
     Handles both a plain ``sqlite3`` connection (sync engines) and SQLAlchemy's
-    aiosqlite adapter. The adapter does not expose ``enable_load_extension``
-    directly, so we drive the async ``aiosqlite.Connection`` via the adapter's
-    ``run_async`` — which dispatches the load onto aiosqlite's worker thread (the
-    only thread allowed to touch the underlying sqlite3 connection).
+    aiosqlite adapter. The two expose extension loading differently:
+
+    * a plain ``sqlite3.Connection`` has synchronous ``enable_load_extension``
+      / ``load_extension`` and ``sqlite_vec.load`` works directly;
+    * an ``aiosqlite.Connection`` exposes those as *coroutine* methods, so
+      ``sqlite_vec.load(conn)`` would return a coroutine that's never awaited
+      and silently fail to load. We detect that case (the method is a coroutine
+      function) and instead drive the underlying sqlite3 connection on
+      aiosqlite's worker thread via ``run_async``, the only thread allowed to
+      touch it.
+
+    The earlier ``hasattr(dbapi_conn, "enable_load_extension")`` check was true
+    for aiosqlite too (the async method exists), so the sync branch was taken,
+    the awaitable was dropped, and vec0 never loaded on the async path — which
+    is why semantic search silently fell back to the O(N) BLOB+numpy scorer.
     """
-    if hasattr(dbapi_conn, "enable_load_extension"):
+    enable = getattr(dbapi_conn, "enable_load_extension", None)
+    if enable is not None and not inspect.iscoroutinefunction(enable):
         dbapi_conn.enable_load_extension(True)
         sqlite_vec.load(dbapi_conn)
-    else:
-        dbapi_conn.run_async(lambda c: c.enable_load_extension(True))
-        dbapi_conn.run_async(lambda c: c.load_extension(sqlite_vec.loadable_path()))
+        return
+    # aiosqlite adapter: dispatch onto its worker thread, where the callback
+    # receives the real (sync) sqlite3 connection.
+    dbapi_conn.run_async(lambda c: c.enable_load_extension(True))
+    dbapi_conn.run_async(lambda c: c.load_extension(sqlite_vec.loadable_path()))
 
 
 def _configure_sqlite_connection(dbapi_conn, enable_wal: bool = True) -> None:
@@ -178,14 +196,29 @@ def _configure_sqlite_connection(dbapi_conn, enable_wal: bool = True) -> None:
         # here is non-fatal — EmbeddingService falls back to the BLOB + numpy path.
         # Trigger: MEMOPAD_EMBEDDINGS_ENABLED is set and sqlite_vec is importable
         # Why: vec0 KNN needs the extension loaded on the connection that runs it
-        # Outcome: vec0 available; or silently skipped (numpy fallback used)
+        # Outcome: vec0 available; or skipped (numpy fallback used) — logged once
         if os.environ.get("MEMOPAD_EMBEDDINGS_ENABLED", "").lower() in ("1", "true", "yes"):
+            global _SQLITE_VEC_STATUS_LOGGED
+            loaded = False
             try:
                 import sqlite_vec  # type: ignore[import-not-found]
 
                 _load_sqlite_vec(dbapi_conn, sqlite_vec)  # pragma: no cover - requires the extra
+                loaded = True
             except Exception as e:  # pragma: no cover - environment-gated
-                logger.debug(f"sqlite-vec extension not loaded (fallback will be used): {e}")
+                if not _SQLITE_VEC_STATUS_LOGGED:
+                    logger.warning(
+                        "sqlite-vec extension not loaded — semantic search will use "
+                        "the slower BLOB+numpy fallback (scores every vector per query). "
+                        f"Install with: pip install sqlite-vec. Reason: {e}"
+                    )
+            if not _SQLITE_VEC_STATUS_LOGGED:
+                _SQLITE_VEC_STATUS_LOGGED = True
+                if loaded:  # pragma: no cover - requires sqlite-vec extension
+                    logger.info(
+                        "sqlite-vec extension loaded — semantic search uses vec0 ANN "
+                        "indexes for sublinear KNN."
+                    )
     except Exception as e:
         # Log but don't fail - some PRAGMAs may not be supported
         logger.warning(f"Failed to configure SQLite connection: {e}")

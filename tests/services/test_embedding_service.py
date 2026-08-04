@@ -13,6 +13,7 @@ from memopad.services.embedding_service import (
     _pack_vector,
     _unpack_vector,
     is_enabled,
+    reset_provider_cache,
 )
 
 
@@ -233,3 +234,102 @@ class TestEmbeddingStore:
         hits = await svc.similar("python web", limit=5, item_type=ITEM_TYPE_OBSERVATION)
         assert hits
         assert {h.item_type for h in hits} == {ITEM_TYPE_OBSERVATION}
+
+
+class _CountingProvider(_FakeProvider):
+    """``_FakeProvider`` that records how many times ``embed`` is called.
+
+    Used to verify content-hash dedup (Fix 2) skips the model call for
+    unchanged items and the query cache (Fix 5) skips re-embedding repeat
+    queries.
+    """
+
+    def __init__(self, model_name: str = "fake/deterministic"):
+        self.model_name = model_name
+        self.embed_calls = 0
+
+    def embed(self, texts):
+        self.embed_calls += 1
+        return super().embed(texts)
+
+
+class TestContentHashDedup:
+    """Fix 2: upsert_batch skips re-embedding items whose text is unchanged."""
+
+    async def _service(self, session_maker, project_id, provider):
+        svc = EmbeddingService(session_maker, project_id, provider=provider)
+        await svc.init_store()
+        return svc
+
+    @pytest.mark.asyncio
+    async def test_unchanged_items_skip_embed(self, session_maker, test_project):
+        provider = _CountingProvider()
+        svc = await self._service(session_maker, test_project.id, provider)
+        await svc.upsert_batch([(ITEM_TYPE_ENTITY, 1, "alpha content")])
+        first = provider.embed_calls
+        assert first == 1
+        # Same text again → no model call.
+        await svc.upsert_batch([(ITEM_TYPE_ENTITY, 1, "alpha content")])
+        assert provider.embed_calls == first
+
+    @pytest.mark.asyncio
+    async def test_changed_text_reembeds(self, session_maker, test_project):
+        provider = _CountingProvider()
+        svc = await self._service(session_maker, test_project.id, provider)
+        await svc.upsert_batch([(ITEM_TYPE_ENTITY, 1, "alpha content")])
+        before = provider.embed_calls
+        await svc.upsert_batch([(ITEM_TYPE_ENTITY, 1, "completely different text")])
+        assert provider.embed_calls == before + 1
+
+    @pytest.mark.asyncio
+    async def test_model_change_reembeds_same_text(self, session_maker, test_project):
+        provider_a = _CountingProvider(model_name="fake/v1")
+        svc = await self._service(session_maker, test_project.id, provider_a)
+        await svc.upsert_batch([(ITEM_TYPE_ENTITY, 1, "alpha content")])
+        # Swap provider model, same text → must re-embed (vector is from old model).
+        provider_b = _CountingProvider(model_name="fake/v2")
+        svc.provider = provider_b
+        await svc.upsert_batch([(ITEM_TYPE_ENTITY, 1, "alpha content")])
+        assert provider_b.embed_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_partial_batch_only_embeds_changed(self, session_maker, test_project):
+        provider = _CountingProvider()
+        svc = await self._service(session_maker, test_project.id, provider)
+        await svc.upsert_batch(
+            [
+                (ITEM_TYPE_ENTITY, 1, "alpha"),
+                (ITEM_TYPE_ENTITY, 2, "beta"),
+                (ITEM_TYPE_OBSERVATION, 3, "gamma"),
+            ]
+        )
+        # Only entity 2 changed; the other two are unchanged → one embed call.
+        await svc.upsert_batch(
+            [
+                (ITEM_TYPE_ENTITY, 1, "alpha"),
+                (ITEM_TYPE_ENTITY, 2, "beta CHANGED"),
+                (ITEM_TYPE_OBSERVATION, 3, "gamma"),
+            ]
+        )
+        assert provider.embed_calls == 2  # initial + one for the changed item
+
+
+class TestQueryCache:
+    """Fix 5: repeat queries reuse a cached query embedding."""
+
+    @pytest.mark.asyncio
+    async def test_repeat_query_skips_embed(self, session_maker, test_project):
+        reset_provider_cache()  # isolate from other tests' cache state
+        provider = _CountingProvider()
+        svc = EmbeddingService(session_maker, test_project.id, provider=provider)
+        await svc.init_store()
+        await svc.upsert_batch([(ITEM_TYPE_ENTITY, 1, "python web framework")])
+        await svc.similar("python web", limit=5)
+        after_first = provider.embed_calls
+        # Same query again → served from cache, no extra embed.
+        await svc.similar("python web", limit=5)
+        assert provider.embed_calls == after_first
+        # A different query does embed.
+        await svc.similar("rust async runtime", limit=5)
+        assert provider.embed_calls == after_first + 1
+        reset_provider_cache()

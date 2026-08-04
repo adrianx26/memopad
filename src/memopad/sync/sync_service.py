@@ -359,46 +359,57 @@ class SyncService:
             for path in report.modified
         ]
 
-        # Execute all tasks in parallel (respecting semaphore limit)
-        if new_tasks or modified_tasks:
-            logger.info(
-                f"Starting parallel sync: {len(new_tasks)} new files, "
-                f"{len(modified_tasks)} modified files "
-                f"(max {MAX_CONCURRENT_SYNCS} concurrent)"
-            )
+        # Buffer embedding writes across the parallel file sync so the sweep makes
+        # ceil(total_items / batch_size) model calls instead of one per file
+        # (Fix 4). Combined with content-hash dedup (Fix 2) and off-loop inference
+        # (Fix 1), this is what keeps a large first-time sync from pegging the
+        # CPU. Flushed in the finally so a task failure can't strand the buffer.
+        self.search_service.begin_embedding_batch()
+        try:
+            # Execute all tasks in parallel (respecting semaphore limit)
+            if new_tasks or modified_tasks:
+                logger.info(
+                    f"Starting parallel sync: {len(new_tasks)} new files, "
+                    f"{len(modified_tasks)} modified files "
+                    f"(max {MAX_CONCURRENT_SYNCS} concurrent)"
+                )
 
-            all_tasks = new_tasks + modified_tasks
-            results = await asyncio.gather(*all_tasks, return_exceptions=True)
+                all_tasks = new_tasks + modified_tasks
+                results = await asyncio.gather(*all_tasks, return_exceptions=True)
 
-            # Process results and track skipped files
-            all_paths = list(report.new) + list(report.modified)
-            for path, result in zip(all_paths, results):
-                if isinstance(result, Exception):
-                    # Task raised an exception — record it on the report so callers
-                    # can tell the sync did not fully succeed (previously only logged).
-                    logger.error(f"Sync task failed for {path}: {result}")
-                    report.failed.append(
-                        SyncFailure(
-                            path=path,
-                            error_class=type(result).__name__,
-                            message=str(result),
+                # Process results and track skipped files
+                all_paths = list(report.new) + list(report.modified)
+                for path, result in zip(all_paths, results):
+                    if isinstance(result, Exception):
+                        # Task raised an exception — record it on the report so callers
+                        # can tell the sync did not fully succeed (previously only logged).
+                        logger.error(f"Sync task failed for {path}: {result}")
+                        report.failed.append(
+                            SyncFailure(
+                                path=path,
+                                error_class=type(result).__name__,
+                                message=str(result),
+                            )
                         )
-                    )
-                    continue
+                        continue
 
-                entity, checksum = result
+                    entity, checksum = result
 
-                # Track if file was skipped
-                if entity is None and await self._should_skip_file(path):
-                    failure_info = self._file_failures[path]
-                    report.skipped_files.append(
-                        SkippedFile(
-                            path=path,
-                            reason=failure_info.last_error,
-                            failure_count=failure_info.count,
-                            first_failed=failure_info.first_failure,
+                    # Track if file was skipped
+                    if entity is None and await self._should_skip_file(path):
+                        failure_info = self._file_failures[path]
+                        report.skipped_files.append(
+                            SkippedFile(
+                                path=path,
+                                reason=failure_info.last_error,
+                                failure_count=failure_info.count,
+                                first_failed=failure_info.first_failure,
+                            )
                         )
-                    )
+        finally:
+            # Drain any buffered embeddings even if a sync task raised, so changed
+            # files that did complete still get their vectors.
+            await self.search_service.flush_embedding_buffer()
 
         # Only resolve relations if there were actual changes
         # If no files changed, no new unresolved relations could have been created
