@@ -1,5 +1,39 @@
 ﻿# CHANGELOG
 
+## [0.20.2] - 2026-08-06
+
+### Changed
+
+- **G6 short-term layering is now ON by default** (`shortterm_enabled` default
+  `False` → `True`). Rationale: G6 is file-backed only (session state under
+  `<data_dir>/sessions/<id>/`), with no DB writes, no sync coupling, and no L0–L3
+  interaction, so shipping it enabled is safe — the 5 MCP tools
+  (`add_session_ref`, `add_session_step`, `get_session_context`,
+  `drill_down_session`, `finalize_session`) become usable without an env
+  override. The other Tb-borrow flags (G1 skills, G2 codegraph, G3, G4, G5, G7)
+  remain default off.
+- **Important caveat — "ON" ≠ "auto-compressing":** the offload/compression
+  policy (`mild`/`aggressive` thresholds, canvas regeneration) stays inert until
+  `shortterm_context_token_budget` is set > 0 (default 0 = store layers + drill-down
+  only, no compression). No default budget was invented — the budget is the
+  agent's context window and varies per deployment; setting it would be guessing,
+  which the project forbids. Set `MEMOPAD_SHORTTERM_CONTEXT_TOKEN_BUDGET` to your
+  agent's window to activate the offload policy. Also note: ON un-gates the
+  tools but does not auto-call them — the agent still invokes the tools
+  explicitly (there is no tool-call interception layer, and the step summarizer is
+  a deliberately-deferred LLM seam).
+- `memopad doctor` now reports G6 as `on` by default in the capability status
+  block; the `--project` G6 filesystem probe runs whenever the flag is on.
+- Updated docs: `AGENTS.md` (G6 section), `shortterm.py` module docstring +
+  `_disabled_error` message, `tb-borrow-progress.md`.
+
+### Tests
+
+- No new tests; existing G6 tests set the flag explicitly (`_enabled_cfg` /
+  `_disabled_cfg`), so the default flip does not affect them. Regression test
+  `test_sessions_root_uses_data_dir_path_property_without_parens` unaffected
+  (it builds the path without consulting the flag).
+
 ## [0.20.1] - 2026-08-06
 
 ### Fixed — from the full-code review (5 parallel review agents)

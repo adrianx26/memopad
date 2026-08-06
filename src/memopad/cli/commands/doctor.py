@@ -41,7 +41,8 @@ console = Console()
 
 
 # --- Tb-borrowed capability status (G1–G7) ---
-# The 7 borrowed capabilities live behind feature flags (default off). Doctor is
+# The 7 borrowed capabilities live behind feature flags (default off, except G6
+# short-term which is default ON since 0.20.2 — it is file-backed only). Doctor is
 # a consistency/health tool, so it reports their state and — in --project mode —
 # probes the enabled ones. This block is purely informational: it must never
 # change the exit code or break the existing file ↔ DB checks.
@@ -63,7 +64,7 @@ def print_capability_status(config: MemoPadConfig) -> None:
     it can be unit-tested without standing up a server. Called at the start of
     both doctor modes so the user always sees which new capabilities are active.
     """
-    console.print("[blue]Tb-borrowed capabilities[/blue] (feature flags, default off):")
+    console.print("[blue]Tb-borrowed capabilities[/blue] (feature flags; default off except G6 short-term, on since 0.20.2):")
 
     for attr, label, hint in _CAPABILITY_FLAGS:
         # Trigger: getattr over a fixed, declared attribute list (no guessing).

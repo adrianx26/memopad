@@ -260,8 +260,11 @@ G5 → G4 → G7 → G1 → G3 → G6 → G2 → Final (docs+diagrame+MCP regist
     `drill_down(node_id)` îl recuperează (principiul Tb "top symbol → raw
     text").
   - **Budget 0 = store-only.** Config default `shortterm_context_token_budget=0`
-    → offload e no-op (layer-ele se stochează, nu se comprimă). Împreună cu
-    `shortterm_enabled=false` (default) → zero impact pe flow-urile existente.
+    → offload e no-op (layer-ele se stochează, nu se comprimă). `shortterm_enabled`
+    e **default ON din 0.20.2** (G6 e file-backed only, fără DB/sync coupling, deci
+    e sigur să pornească by default; tool-urile MCP devin utilizabile fără env
+    override). Comprimarea efectivă cere totuși `shortterm_context_token_budget > 0`
+    (fără el: store + drill-down, fără offload).
   - **Sumarele steps sunt caller-supplied**, nu generate de LLM aici. Planul
     cere un LLM să rezume fiecare tool-call; acel summarizer e un seam viitor
     (simetric cu distiller-ul G3) — a-l construi acum ar însemna să inventez

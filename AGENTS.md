@@ -313,7 +313,9 @@ See SPEC-16 for full context manager refactor details.
     - *G6 short-term layering:* `add_session_ref`, `add_session_step`,
       `get_session_context`, `drill_down_session`, `finalize_session` - Per-session
       3-layer context (refs -> steps -> Mermaid canvas) with token-budget offload.
-      Gated by `shortterm_enabled`.
+      Gated by `shortterm_enabled` (**default ON since 0.20.2** — G6 is file-backed
+      only, no DB/sync coupling, so it ships enabled; the offload/compression policy
+      additionally needs `shortterm_context_token_budget > 0`).
     - *G2 CodeGraph:* `index_code`, `find_symbol`, `impact_path`, `code_context` -
       Index source code into the graph (file/function/class/module + calls/
       defined_in/imports) and query impact paths. Gated by `codegraph_enabled`.

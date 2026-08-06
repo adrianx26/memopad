@@ -201,9 +201,12 @@ class MemoPadConfig(BaseSettings):
         "the knowledge graph. Off = code files are not indexed as entities.",
     )
     shortterm_enabled: bool = Field(
-        default=False,
+        default=True,
         description="Enable in-task short-term context layering (refs -> steps -> Mermaid canvas). "
-        "Off = no per-session context offload.",
+        "Default ON (G6 is file-backed only — no DB, no sync coupling, so it is safe to ship "
+        "enabled; the MCP tools become usable without an env override). Note: the offload/"
+        "compression policy stays inert until `shortterm_context_token_budget` is set > 0 "
+        "(0 = store layers + drill-down, no compression).",
     )
     # --- Short-term layering ratios (Tb G6) ---
     # Only consulted when shortterm_enabled is on. The budget is the agent's

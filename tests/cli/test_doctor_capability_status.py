@@ -23,27 +23,49 @@ def _capture_console(monkeypatch) -> io.StringIO:
     return buf
 
 
-def test_capability_status_all_off_by_default(monkeypatch):
-    """Default config: every capability reports off, G4 params show 0."""
+def _state_of(label: str, lines: list[str]) -> str:
+    """Return the on/off state token for the capability line starting with `label:`.
+
+    Each capability prints on its own line: `  <label>:<padded> <state>  (hint)`.
+    We locate that line and read the state token after the label. This avoids
+    counting the header text (which, since 0.20.2, contains the word "on" in
+    "...on since 0.20.2") or hint substrings.
+    """
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(label + ":"):
+            # state is the first token after the label (after the padded colon).
+            tail = stripped[len(label) + 1 :].strip()
+            return tail.split()[0]
+    raise AssertionError(f"no capability line for {label!r}; lines were:\n{lines!r}")
+
+
+def test_capability_status_default_state(monkeypatch):
+    """Default config: G6 short-term reports ON (default on since 0.20.2),
+    every other capability reports off, G4 params show 0."""
     buf = _capture_console(monkeypatch)
-    config = MemoPadConfig()  # all flags default off
+    config = MemoPadConfig()  # G6 on by default; all others off
 
     doctor.print_capability_status(config)
 
-    out = buf.getvalue()
+    lines = buf.getvalue().splitlines()
     # Header present.
-    assert "Tb-borrowed capabilities" in out
-    # Every boolean flag reported off.
+    assert any("Tb-borrowed capabilities" in ln for ln in lines)
+    # Every boolean flag label + hint present.
+    out = "\n".join(lines)
     for _, label, hint in doctor._CAPABILITY_FLAGS:
         assert label in out
         assert hint in out
     # G4 params present with their disabled value (0).
     assert "recall_max_chars_per_memory" in out
     assert "recall_timeout_ms" in out
-    assert " off " in out
-    # Nothing is reported as on under the default config. Use the space-padded
-    # state token so "on" inside a hint word like "context" doesn't false-match.
-    assert " on " not in out
+    # Per-flag state: G6 on, every other capability flag off.
+    for attr, label, _ in doctor._CAPABILITY_FLAGS:
+        state = _state_of(label, lines)
+        if attr == "shortterm_enabled":
+            assert state == "on", f"{label} should be ON by default, got {state!r}"
+        else:
+            assert state == "off", f"{label} should be off by default, got {state!r}"
 
 
 def test_capability_status_reflects_enabled_flags(monkeypatch):

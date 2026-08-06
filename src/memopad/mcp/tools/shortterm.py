@@ -2,8 +2,11 @@
 
 These tools expose the session-scoped 3-layer stack (refs -> steps -> Mermaid
 canvas) implemented in ``shortterm_context.py``. The whole feature is gated by
-``shortterm_enabled`` (default off): when off, every tool fails fast with a clear
-message instead of silently doing nothing.
+``shortterm_enabled`` (default ON as of 0.20.2 — G6 is file-backed only, no DB /
+sync coupling, so shipping it enabled is safe): when off, every tool fails fast
+with a clear message instead of silently doing nothing. The offload/compression
+policy additionally needs ``shortterm_context_token_budget > 0`` to fire (0 =
+store + drill-down only, no compression).
 
 Session state is filesystem-only, under ``<data_dir>/sessions/<session_id>/`` —
 no HTTP, no DB, no L0–L3 coupling. ``session_id`` is caller-supplied (the agent
@@ -35,9 +38,10 @@ from memopad.services.shortterm_context import (
 
 def _disabled_error() -> ToolError:
     return ToolError(
-        "Short-term context layering is disabled. Set "
-        "'shortterm_enabled=true' (and a non-zero 'shortterm_context_token_budget') "
-        "in the MemoPad config to enable the in-task session context stack."
+        "Short-term context layering is disabled (shortterm_enabled=false). "
+        "It is ON by default; if you turned it off, set 'shortterm_enabled=true' "
+        "(and a non-zero 'shortterm_context_token_budget' for the offload policy) "
+        "in the MemoPad config to re-enable the in-task session context stack."
     )
 
 
