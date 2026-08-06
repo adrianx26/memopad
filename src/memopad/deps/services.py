@@ -14,14 +14,11 @@ from fastapi import Depends
 from loguru import logger
 
 from memopad.deps.config import AppConfigDep
-from memopad.deps.db import SessionMakerDep
 from memopad.deps.projects import (
     ProjectConfigDep,
     ProjectConfigV2Dep,
     ProjectConfigV2ExternalDep,
     ProjectExternalIdPathDep,
-    ProjectIdDep,
-    ProjectIdPathDep,
     ProjectRepositoryDep,
 )
 from memopad.deps.repositories import (
@@ -53,6 +50,7 @@ from memopad.services.file_service import FileService
 from memopad.services.link_resolver import LinkResolver
 from memopad.services.search_service import SearchService
 from memopad.services.conflict_service import ConflictService
+from memopad.services.codegraph_service import CodeGraphService
 from memopad.services.schema_service import SchemaService
 from memopad.sync import SyncService
 
@@ -169,17 +167,9 @@ async def get_search_service(
     search_repository: SearchRepositoryDep,
     entity_repository: EntityRepositoryDep,
     file_service: FileServiceDep,
-    session_maker: SessionMakerDep,
-    project_id: ProjectIdDep,
 ) -> SearchService:
-    """Create SearchService with dependencies.
-
-    session_maker + project_id are injected so the service can lazily build an
-    EmbeddingService and write semantic vectors during indexing (Phase 3).
-    """
-    return SearchService(
-        search_repository, entity_repository, file_service, session_maker, project_id
-    )
+    """Create SearchService with dependencies."""
+    return SearchService(search_repository, entity_repository, file_service)
 
 
 SearchServiceDep = Annotated[SearchService, Depends(get_search_service)]
@@ -189,13 +179,9 @@ async def get_search_service_v2(  # pragma: no cover
     search_repository: SearchRepositoryV2Dep,
     entity_repository: EntityRepositoryV2Dep,
     file_service: FileServiceV2Dep,
-    session_maker: SessionMakerDep,
-    project_id: ProjectIdPathDep,
 ) -> SearchService:
     """Create SearchService for v2 API."""
-    return SearchService(
-        search_repository, entity_repository, file_service, session_maker, project_id
-    )
+    return SearchService(search_repository, entity_repository, file_service)
 
 
 SearchServiceV2Dep = Annotated[SearchService, Depends(get_search_service_v2)]
@@ -205,13 +191,9 @@ async def get_search_service_v2_external(
     search_repository: SearchRepositoryV2ExternalDep,
     entity_repository: EntityRepositoryV2ExternalDep,
     file_service: FileServiceV2ExternalDep,
-    session_maker: SessionMakerDep,
-    project_id: ProjectExternalIdPathDep,
 ) -> SearchService:
     """Create SearchService for v2 API (uses external_id)."""
-    return SearchService(
-        search_repository, entity_repository, file_service, session_maker, project_id
-    )
+    return SearchService(search_repository, entity_repository, file_service)
 
 
 SearchServiceV2ExternalDep = Annotated[SearchService, Depends(get_search_service_v2_external)]
@@ -427,7 +409,6 @@ EntityServiceV2ExternalDep = Annotated[EntityService, Depends(get_entity_service
 
 
 async def get_context_service(
-    app_config: AppConfigDep,
     search_repository: SearchRepositoryDep,
     entity_repository: EntityRepositoryDep,
     observation_repository: ObservationRepositoryDep,
@@ -436,7 +417,6 @@ async def get_context_service(
         search_repository=search_repository,
         entity_repository=entity_repository,
         observation_repository=observation_repository,
-        app_config=app_config,
     )
 
 
@@ -444,7 +424,6 @@ ContextServiceDep = Annotated[ContextService, Depends(get_context_service)]
 
 
 async def get_context_service_v2(  # pragma: no cover
-    app_config: AppConfigDep,
     search_repository: SearchRepositoryV2Dep,
     entity_repository: EntityRepositoryV2Dep,
     observation_repository: ObservationRepositoryV2Dep,
@@ -454,7 +433,6 @@ async def get_context_service_v2(  # pragma: no cover
         search_repository=search_repository,
         entity_repository=entity_repository,
         observation_repository=observation_repository,
-        app_config=app_config,
     )
 
 
@@ -462,7 +440,6 @@ ContextServiceV2Dep = Annotated[ContextService, Depends(get_context_service_v2)]
 
 
 async def get_context_service_v2_external(
-    app_config: AppConfigDep,
     search_repository: SearchRepositoryV2ExternalDep,
     entity_repository: EntityRepositoryV2ExternalDep,
     observation_repository: ObservationRepositoryV2ExternalDep,
@@ -472,7 +449,6 @@ async def get_context_service_v2_external(
         search_repository=search_repository,
         entity_repository=entity_repository,
         observation_repository=observation_repository,
-        app_config=app_config,
     )
 
 
@@ -624,8 +600,8 @@ async def get_task_scheduler(
             force_full=force_full,
         )
 
-    async def _reindex_project(force: bool = False, **_: Any) -> None:
-        await search_service.reindex_all(force=force)
+    async def _reindex_project(**_: Any) -> None:
+        await search_service.reindex_all()
 
     return LocalTaskScheduler(
         {
@@ -691,4 +667,37 @@ async def get_directory_service_v2_external(
 
 DirectoryServiceV2ExternalDep = Annotated[
     DirectoryService, Depends(get_directory_service_v2_external)
+]
+
+
+# --- CodeGraph (Tb G2) ---
+
+
+async def get_codegraph_service_v2_external(
+    entity_repository: EntityRepositoryV2ExternalDep,
+    observation_repository: ObservationRepositoryV2ExternalDep,
+    relation_repository: RelationRepositoryV2ExternalDep,
+    search_repository: SearchRepositoryV2ExternalDep,
+    project_id: ProjectExternalIdPathDep,
+    project_config: ProjectConfigV2ExternalDep,
+    app_config: AppConfigDep,
+):
+    """Create CodeGraphService for v2 API (external_id project path).
+
+    The project name (from `ProjectConfigV2ExternalDep`) drives the `code://`
+    permalinks; the integer project_id scopes the repository queries.
+    """
+    return CodeGraphService(
+        entity_repository=entity_repository,
+        observation_repository=observation_repository,
+        relation_repository=relation_repository,
+        search_repository=search_repository,
+        project_id=project_id,
+        project_name=project_config.name,
+        app_config=app_config,
+    )
+
+
+CodeGraphServiceV2ExternalDep = Annotated[
+    CodeGraphService, Depends(get_codegraph_service_v2_external)
 ]

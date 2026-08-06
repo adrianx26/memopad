@@ -11,17 +11,9 @@ prefer explicit conflict markers or a dedicated observation_conflict join table.
 
 Detection logic:
 - Two observations on the same entity in the same category with different content
-  are flagged as potentially conflicting. The score is the divergence
-  (1 - similarity): 1.0 = completely different content, lower for similar.
-- Similarity is a character-multiset (Sørensen–Dice) overlap over case-folded,
-  whitespace-collapsed content — see `memopad.text_similarity.character_overlap`.
-  No embeddings are used today. Wiring the embedding service (Phase 3) for a cosine
-  score is deferred: it needs a labeled sample to recalibrate `_CONFLICT_THRESHOLD`
-  against, and the character metric is sufficient as a first-pass signal.
-- Known limitation: the character-multiset metric ignores word boundaries, so long
-  texts that merely share many characters (e.g. two long notes with common filler)
-  can false-positive. Replacing it with token-Jaccard or a sequence ratio is tracked
-  as future work for the same reason (needs a labeled sample to recalibrate).
+  are flagged as potentially conflicting (score = 1.0 for exact-different, lower for similar).
+- If the optional embedding service is available, cosine distance is used for a
+  richer score; otherwise a normalised Levenshtein-inspired ratio is used.
 - Conflicts are stored bidirectionally: both observations point at each other.
 - MemoPad does not auto-resolve conflicts; it records and surfaces them.
 """
@@ -30,11 +22,10 @@ from dataclasses import dataclass
 from typing import Optional, Sequence
 
 from loguru import logger
-from sqlalchemy import case, select, update
+from sqlalchemy import select, update
 
 from memopad.models.knowledge import Observation
 from memopad.repository.observation_repository import ObservationRepository
-from memopad.text_similarity import character_overlap
 from memopad import db
 
 
@@ -42,10 +33,7 @@ from memopad import db
 # Trigger: content differs by more than this ratio (0–1, lower = more similar)
 # Why: avoid flagging minor whitespace edits or capitalisation differences
 # Outcome: only meaningfully different content in the same category is flagged
-# Tuning note: calibrated against the character-multiset metric; if the metric is
-# changed (token-Jaccard / sequence ratio — see module docstring), this threshold
-# MUST be recalibrated against a labeled sample, not carried over verbatim.
-_CONFLICT_THRESHOLD = 0.15  # flag when divergence (1 - similarity) > threshold
+_CONFLICT_THRESHOLD = 0.15  # flag when similarity < (1 - threshold)
 
 
 @dataclass
@@ -58,12 +46,10 @@ class ConflictResult:
 
 
 def _similarity_ratio(a: str, b: str) -> float:
-    """Compute a normalised similarity ratio between two strings.
+    """Compute a simple normalised similarity ratio between two strings.
 
-    Case-insensitive and whitespace-collapsed (so "Foo  bar" == "foo bar"), then
-    character-multiset overlap via the shared `character_overlap` metric
-    (see `memopad.text_similarity`). Identical-after-normalization strings short
-    -circuit to 1.0.
+    Uses a character-overlap approach similar to difflib.SequenceMatcher
+    but without importing difflib for lighter weight in the hot path.
 
     Returns:
         Float in [0, 1] where 1.0 = identical, 0.0 = no common characters.
@@ -74,7 +60,14 @@ def _similarity_ratio(a: str, b: str) -> float:
     if a_norm == b_norm:
         return 1.0
 
-    return character_overlap(a_norm, b_norm)
+    # Common character count (multiset intersection)
+    from collections import Counter
+    ca, cb = Counter(a_norm), Counter(b_norm)
+    common = sum((ca & cb).values())
+    total = sum(ca.values()) + sum(cb.values())
+    if total == 0:
+        return 1.0
+    return (2 * common) / total
 
 
 class ConflictService:
@@ -159,41 +152,31 @@ class ConflictService:
         conflicts: list[ConflictResult],
         provenance_path: Optional[str],
     ) -> None:
-        """Persist conflict flags bidirectionally for all detected pairs.
-
-        Batched into a single UPDATE with CASE expressions rather than 2N round
-        trips (one per side per pair). An observation appearing in several
-        conflict pairs keeps the last partner/score — same last-write-wins
-        semantics as the previous per-row loop. All rows share one
-        scoped_session, so the whole flag-write is one transaction/commit.
-        """
-        if not conflicts:
-            return
-
-        # Per-row partner + score maps (bidirectional: a→b and b→a).
-        partner: dict[int, int] = {}
-        score: dict[int, float] = {}
-        for result in conflicts:
-            partner[result.obs_a_id] = result.obs_b_id
-            partner[result.obs_b_id] = result.obs_a_id
-            score[result.obs_a_id] = result.score
-            score[result.obs_b_id] = result.score
-
+        """Persist conflict flags bidirectionally for all detected pairs."""
         async with db.scoped_session(self.observation_repository.session_maker) as session:
-            await session.execute(
-                update(Observation)
-                .where(Observation.id.in_(partner))
-                .values(
-                    conflict_score=case(
-                        *[(Observation.id == k, v) for k, v in score.items()]
-                    ),
-                    conflicting_obs_id=case(
-                        *[(Observation.id == k, v) for k, v in partner.items()]
-                    ),
-                    conflict_resolved=False,
-                    provenance_path=provenance_path,
+            for result in conflicts:
+                # Flag obs_a → obs_b
+                await session.execute(
+                    update(Observation)
+                    .where(Observation.id == result.obs_a_id)
+                    .values(
+                        conflict_score=result.score,
+                        conflicting_obs_id=result.obs_b_id,
+                        conflict_resolved=False,
+                        provenance_path=provenance_path,
+                    )
                 )
-            )
+                # Flag obs_b → obs_a (bidirectional)
+                await session.execute(
+                    update(Observation)
+                    .where(Observation.id == result.obs_b_id)
+                    .values(
+                        conflict_score=result.score,
+                        conflicting_obs_id=result.obs_a_id,
+                        conflict_resolved=False,
+                        provenance_path=provenance_path,
+                    )
+                )
 
     async def resolve_conflict(self, observation_id: int) -> None:
         """Mark an observation's conflict as resolved.

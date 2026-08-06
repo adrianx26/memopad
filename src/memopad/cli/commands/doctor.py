@@ -4,16 +4,20 @@ Two modes:
   - default: roundtrip test against a throwaway temp project (proves the
     file ↔ DB pipeline works in isolation).
   - --project NAME: run drift checks on a real project (--fix to repair).
+
+Both modes also print a status report for the Tb-borrowed, feature-flagged
+capabilities (G1–G7), and `--project` mode runs lightweight health probes for any
+that are enabled. The capability report is informational only — it never changes
+the doctor's exit code (that stays bound to file ↔ DB drift + unresolved
+relations, as before).
 """
 
 from __future__ import annotations
 
-import re
 import tempfile
 import uuid
 from pathlib import Path
 
-import aiosqlite
 from loguru import logger
 from mcp.server.fastmcp.exceptions import ToolError
 from rich.console import Console
@@ -21,7 +25,7 @@ import typer
 
 from memopad.cli.app import app
 from memopad.cli.commands.command_utils import run_with_cleanup
-from memopad.config import APP_DATABASE_NAME, DATA_DIR_NAME
+from memopad.config import ConfigManager, MemoPadConfig
 from memopad.markdown.entity_parser import EntityParser
 from memopad.markdown.markdown_processor import MarkdownProcessor
 from memopad.markdown.schemas import EntityFrontmatter, EntityMarkdown
@@ -35,159 +39,160 @@ from memopad.schemas import SyncReportResponse
 
 console = Console()
 
-# Dim-scoped vec0 table names look like ``embedding_vec_<item_type>_p<project>_d<dim>``
-# (see EmbeddingService._vec_table). Any vec0 *main* virtual table that does
-# NOT match this pattern is a leftover from before dim-scoping and would
-# cause wrong-dim inserts to roll back canonical BLOB writes on a model swap.
-#
-# sqlite-vec creates shadow tables for each virtual table (``_info``,
-# ``_chunks``, ``_rowids``, ``_vector_chunksNN``); those carry an extra suffix
-# after the project/dim segment, so they are excluded by anchoring the
-# main-table patterns at the end of the name.
-_VEC_TABLE_DIM_SCOPED = re.compile(r"^embedding_vec_[a-z]+_p\d+_d\d+$")
-# A main vec0 table is either dim-scoped (above) or legacy ``..._p<project>``
-# with nothing after the project id. Shadow tables have a trailing suffix and
-# match neither pattern, so they're filtered out before the legacy check.
-_VEC_TABLE_MAIN = re.compile(r"^embedding_vec_[a-z]+_p\d+(_d\d+)?$")
+
+# --- Tb-borrowed capability status (G1–G7) ---
+# The 7 borrowed capabilities live behind feature flags (default off). Doctor is
+# a consistency/health tool, so it reports their state and — in --project mode —
+# probes the enabled ones. This block is purely informational: it must never
+# change the exit code or break the existing file ↔ DB checks.
+
+# (flag attribute, label, hint) for the boolean capability flags.
+_CAPABILITY_FLAGS: tuple[tuple[str, str, str], ...] = (
+    ("levels_enabled", "levels_enabled", "L0-L3 levels + provenance (G5)"),
+    ("levels_pipeline_automatic", "levels_pipeline_automatic", "reactive distillation scheduler (G3)"),
+    ("skills_enabled", "skills_enabled", "versioned skill assets (G1)"),
+    ("codegraph_enabled", "codegraph_enabled", "code indexing in the graph (G2)"),
+    ("shortterm_enabled", "shortterm_enabled", "in-task session context layering (G6)"),
+)
 
 
-async def run_health_checks() -> int:
-    """Inspect the local app DB schema for invariants introduced recently.
+def print_capability_status(config: MemoPadConfig) -> None:
+    """Print the on/off state of the Tb-borrowed feature flags + G4 params.
 
-    These are read-only checks against the app-level SQLite database
-    (``~/memopad/memory.db``). They do not talk to the MCP server and do not
-    mutate anything. Returns the number of issues found.
-
-    Checks:
-      1a. ``reindex_state`` table exists with a ``fingerprint`` column — the
-          per-entity SHA-256 fingerprint that makes incremental reindex skip
-          unchanged entities. Missing ⇒ incremental reindex is disabled.
-      1b. ``embedding`` table has a ``content_hash`` column — the per-item
-          SHA-256 that lets the embedding service skip re-embedding unchanged
-          text. Missing ⇒ embedding dedup is disabled. (The ``content_hash``
-          column lives on the ``embedding`` table, added by migration
-          ``p9d1e2f3a4b5``; it is NOT on ``reindex_state``, whose own
-          per-entity fingerprint column is ``fingerprint``.)
-      2. Every ``embedding_vec_*`` virtual table is dim-scoped
-         (``..._p<project>_d<dim>``). Non-scoped leftovers break model swaps.
-
-    Cache invalidation (permalink/metadata caches) is a behavioural
-    invariant exercised by the roundtrip below, not a schema one, so it is
-    not checked here.
+    Pure function (no HTTP, no server): reads values straight off the config so
+    it can be unit-tested without standing up a server. Called at the start of
+    both doctor modes so the user always sees which new capabilities are active.
     """
-    console.print("[blue]Running schema health checks...[/blue]")
-    db_path = Path.home() / DATA_DIR_NAME / APP_DATABASE_NAME
-    if not db_path.exists():
+    console.print("[blue]Tb-borrowed capabilities[/blue] (feature flags, default off):")
+
+    for attr, label, hint in _CAPABILITY_FLAGS:
+        # Trigger: getattr over a fixed, declared attribute list (no guessing).
+        # Why: the flags are real MemoPadConfig fields; the indirection keeps the
+        #      table data-driven instead of 5 copy-pasted branches.
+        # Outcome: a single on/off line per capability with its one-line hint.
+        enabled = bool(getattr(config, attr))
+        state = "[green]on[/green]" if enabled else "[dim]off[/dim]"
+        console.print(f"  {label + ':':34} {state}  [dim]({hint})[/dim]")
+
+    # G4 retrieval budget: numeric params, 0 = disabled (current behavior).
+    recall_cap = config.recall_max_chars_per_memory
+    recall_timeout = config.recall_timeout_ms
+    cap_state = "[green]on[/green]" if recall_cap else "[dim]off[/dim]"
+    timeout_state = "[green]on[/green]" if recall_timeout else "[dim]off[/dim]"
+    console.print(
+        f"  {'recall_max_chars_per_memory:':34} {cap_state}  "
+        f"[dim]({recall_cap}; per-memory truncation, G4)[/dim]"
+    )
+    console.print(
+        f"  {'recall_timeout_ms:':34} {timeout_state}  "
+        f"[dim]({recall_timeout}ms; retrieval timeout, G4)[/dim]"
+    )
+
+
+async def run_capability_probes(
+    client: object, project_id: str, config: MemoPadConfig
+) -> None:
+    """Best-effort, informational health probes for enabled capabilities.
+
+    Runs only in `--project` mode. Does NOT affect the exit code — these are
+    status probes, not integrity failures. Failures are surfaced explicitly
+    (`probe failed: <err>`) rather than swallowed, so a misconfigured gate is
+    visible without aborting the whole doctor run.
+
+    `client` is the httpx ASGI client from `get_client()`; typed as `object` to
+    avoid importing httpx here just for a type hint.
+    """
+    knowledge_client = KnowledgeClient(client, project_id)  # type: ignore[arg-type]
+
+    # --- G1 skills: count by status via the gated /knowledge/skills endpoint ---
+    # Trigger: skills_enabled is on (server reads the same config, so the gate
+    #          matches and the endpoint responds).
+    # Why: gives the user a snapshot of how many skills exist and how many are
+    #      still draft vs. validated.
+    # Outcome: a one-line count summary; a probe failure is reported, not raised.
+    if config.skills_enabled:
+        try:
+            statuses = ("draft", "validated", "deprecated")
+            counts = {}
+            for st in statuses:
+                data = await knowledge_client.list_skills(status=st, limit=1, offset=0)
+                counts[st] = data.get("count", 0)
+            total = await knowledge_client.list_skills(limit=1, offset=0)
+            console.print(
+                "[blue]Skills (G1):[/blue] "
+                f"draft={counts['draft']} validated={counts['validated']} "
+                f"deprecated={counts['deprecated']} (total={total.get('count', 0)})"
+            )
+        except Exception as e:  # informational probe — surface, don't abort
+            console.print(f"[yellow]Skills probe failed: {e}[/yellow]")
+
+    # --- G6 short-term sessions: local filesystem check (file-backed, no DB) ---
+    # Trigger: shortterm_enabled is on.
+    # Why: session layers live on disk under <data_dir>/sessions/<id>/; doctor is
+    #      a local consistency tool, so reporting session count + disk usage is
+    #      the natural health signal. No endpoint exists (by design — zero DB).
+    # Outcome: prints the sessions root, session count, total size, and up to 5
+    #          session ids; notes "none" when the directory is absent/empty.
+    if config.shortterm_enabled:
+        # Mirror the G1 probe: wrap the filesystem walk so a PermissionError /
+        # OSError / file-vanished-mid-iteration race is surfaced explicitly
+        # (`probe failed: <err>`) instead of propagating and changing the exit
+        # code. The contract is "informational only — never affects the exit code".
+        try:
+            sessions_root = Path(config.data_dir_path) / "sessions"
+            if sessions_root.is_dir():
+                session_dirs = [p for p in sessions_root.iterdir() if p.is_dir()]
+                total_size = sum(
+                    f.stat().st_size
+                    for d in session_dirs
+                    for f in d.rglob("*")
+                    if f.is_file()
+                )
+                size_kb = total_size / 1024.0
+                console.print(
+                    f"[blue]Short-term sessions (G6):[/blue] {len(session_dirs)} "
+                    f"session(s), {size_kb:.1f} KB under {sessions_root}"
+                )
+                for d in session_dirs[:5]:
+                    console.print(f"    {d.name}")
+                if len(session_dirs) > 5:
+                    console.print(f"    ... and {len(session_dirs) - 5} more")
+            else:
+                console.print(
+                    f"[blue]Short-term sessions (G6):[/blue] none (no {sessions_root} directory yet)"
+                )
+        except Exception as e:  # informational probe — surface, don't abort
+            console.print(f"[yellow]Short-term sessions probe failed: {e}[/yellow]")
+
+    # --- G2 / G5 / G3: config-only hints (no safe aggregate probe) ---
+    # These have no cheap "count everything" endpoint (G2 find_symbol needs a
+    # name; G5/G3 state is in-memory or per-write). We surface a hint instead of
+    # guessing, so the user knows what to run next.
+    if config.codegraph_enabled:
         console.print(
-            "[yellow]App DB not found — skipping schema health checks "
-            "(run `memopad` once to initialise it).[/yellow]"
+            "[blue]CodeGraph (G2):[/blue] enabled — `memopad watch` auto-reindexes "
+            "the code graph on source-file changes (full-tree, idempotent); "
+            "`index_code` is the manual fallback when watch is off or a reindex "
+            "fails. Query via `find_symbol` / `impact_path` / `code_context`."
         )
-        return 0
-
-    issues = 0
-    async with aiosqlite.connect(str(db_path)) as conn:
-        # --- Check 1a: reindex_state + fingerprint (incremental reindex) ---
-        # reindex_state.fingerprint is the per-entity SHA-256 that lets
-        # reindex_all skip unchanged entities (migration o9c0d1e2f3a4).
-        cur = await conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='reindex_state'"
+    if config.levels_enabled:
+        console.print(
+            "[blue]Levels (G5):[/blue] enabled — provenance enforced at write time; "
+            "`drill_down` traces L3 → L1 → L0 sources."
         )
-        if await cur.fetchone() is None:
-            console.print(
-                "[yellow]reindex_state table missing — incremental reindex is "
-                "disabled (run migrations).[/yellow]"
-            )
-            issues += 1
-        else:
-            cur = await conn.execute("PRAGMA table_info(reindex_state)")
-            columns = {row[1] for row in await cur.fetchall()}
-            if "fingerprint" not in columns:
-                console.print(
-                    "[yellow]reindex_state.fingerprint missing — per-entity "
-                    "fingerprint absent, reindex can't skip unchanged rows.[/yellow]"
-                )
-                issues += 1
-            else:
-                console.print(
-                    "[green]OK[/green] reindex_state.fingerprint present "
-                    "(incremental reindex enabled)"
-                )
-
-        # --- Check 1b: embedding.content_hash (embedding dedup) ---
-        # content_hash lives on the embedding table (migration p9d1e2f3a4b5),
-        # NOT on reindex_state. It lets upsert_batch skip re-embedding
-        # unchanged text+model items.
-        cur = await conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='embedding'"
+    if config.levels_pipeline_automatic:
+        console.print(
+            "[blue]Distillation scheduler (G3):[/blue] active — emits triggers; the "
+            "distiller callback is a no-op seam until the levels pipeline lands."
         )
-        if await cur.fetchone() is None:
-            # Embedding table is created lazily on first embedding index, so its
-            # absence is not an error — just means embeddings never ran.
-            console.print(
-                "[green]OK[/green] embedding table not yet created "
-                "(created on first embedding index)"
-            )
-        else:
-            cur = await conn.execute("PRAGMA table_info(embedding)")
-            columns = {row[1] for row in await cur.fetchall()}
-            if "content_hash" not in columns:
-                console.print(
-                    "[yellow]embedding.content_hash missing — embedding dedup "
-                    "disabled (run migrations).[/yellow]"
-                )
-                issues += 1
-            else:
-                console.print(
-                    "[green]OK[/green] embedding.content_hash present "
-                    "(embedding dedup enabled)"
-                )
-
-        # --- Check 2: vec0 table dim-scoping ---
-        # Only inspect main virtual tables; sqlite-vec's shadow tables
-        # (``_info``/``_chunks``/``_rowids``/``_vector_chunksNN``) are filtered
-        # out by ``_VEC_TABLE_MAIN``.
-        cur = await conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' "
-            "AND name LIKE 'embedding\\_vec\\_%' ESCAPE '\\'"
-        )
-        all_vec_names = [row[0] for row in await cur.fetchall()]
-        vec_tables = [n for n in all_vec_names if _VEC_TABLE_MAIN.match(n)]
-        legacy = [n for n in vec_tables if not _VEC_TABLE_DIM_SCOPED.match(n)]
-        if legacy:
-            console.print(
-                f"[yellow]{len(legacy)} legacy (non-dim-scoped) vec0 table(s) "
-                f"found — model swaps can break until they are dropped: "
-                f"{legacy}[/yellow]"
-            )
-            issues += len(legacy)
-        elif vec_tables:
-            console.print(
-                f"[green]OK[/green] all {len(vec_tables)} vec0 table(s) "
-                "are dim-scoped"
-            )
-        else:
-            console.print(
-                "[green]OK[/green] no vec0 tables yet "
-                "(created on first embedding index)"
-            )
-
-    if issues:
-        console.print(f"[yellow]Schema health: {issues} issue(s).[/yellow]")
-    else:
-        console.print("[green]Schema health checks passed.[/green]")
-    return issues
 
 
 async def run_doctor() -> None:
     """Run local consistency checks for file <-> database flows."""
     console.print("[blue]Running Memopad doctor checks...[/blue]")
-
-    # Schema health checks run first and are best-effort: a schema issue should
-    # be reported but must not abort the functional roundtrip below.
-    try:
-        await run_health_checks()
-    except Exception as e:  # pragma: no cover
-        console.print(f"[yellow]Schema health checks skipped: {e}[/yellow]")
+    # Capability status first (informational; never affects the roundtrip below).
+    print_capability_status(ConfigManager().load_config())
+    console.print()
 
     project_name = f"doctor-{uuid.uuid4().hex[:8]}"
     api_note_title = "Doctor API Note"
@@ -315,6 +320,11 @@ async def run_drift_check(project_name: str, fix: bool) -> int:
         project_id = target.external_id
         console.print(f"[blue]Inspecting project '{project_name}'...[/blue]")
 
+        # Capability status + (later) probes — informational, never affects the
+        # drift `remaining` count below.
+        app_config = ConfigManager().load_config()
+        print_capability_status(app_config)
+
         # --- Step 1: drift report (always runs, fix or no fix) ---
         status_response = await call_post(client, f"/v2/projects/{project_id}/status")
         status_report = SyncReportResponse.model_validate(status_response.json())
@@ -369,6 +379,11 @@ async def run_drift_check(project_name: str, fix: bool) -> int:
         else:
             console.print("[green]OK[/green] no unresolved relations")
 
+        # --- Step 4: capability probes for enabled Tb-borrowed features ---
+        # Informational only — does not contribute to `remaining`. See
+        # run_capability_probes for why failures are surfaced, not raised.
+        await run_capability_probes(client, project_id, app_config)
+
         remaining = (
             len(new_files) + len(modified) + len(deleted) + len(moves)
             if not fix
@@ -389,24 +404,9 @@ def doctor(
         "--fix",
         help="With --project: run a force_full sync to reconcile file ↔ DB drift.",
     ),
-    health: bool = typer.Option(
-        False,
-        "--health",
-        help="Only run local schema health checks (reindex_state fingerprint, "
-        "embedding content_hash, vec0 dim-scoping) against the app DB; skip "
-        "the roundtrip.",
-    ),
 ) -> None:
     """Run local consistency checks to verify file/database sync."""
     try:
-        if health:
-            issues = run_with_cleanup(run_health_checks())
-            if issues:
-                console.print(
-                    f"[yellow]{issues} schema issue(s) found.[/yellow]"
-                )
-                raise typer.Exit(code=1)
-            return
         if project:
             remaining = run_with_cleanup(run_drift_check(project, fix))
             if remaining:

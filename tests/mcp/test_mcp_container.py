@@ -9,18 +9,6 @@ from memopad.mcp.container import (
 )
 from memopad.runtime import RuntimeMode
 
-# cloud_mode is a planned future commercial-tier feature; not implemented here
-# (RuntimeMode has no CLOUD member). The cloud-mode container tests below are
-# the spec for that build and are marked xfail so they don't pollute the signal.
-# Remove these marks when the cloud build lands (tests flip to XPASS as a
-# reminder). Expected failure is AttributeError on RuntimeMode.CLOUD; a failure
-# for any OTHER reason is a real regression and still surfaces hard.
-_CLOUD_MODE_XFAIL = pytest.mark.xfail(
-    strict=False,
-    raises=(AttributeError, TypeError, ValueError),
-    reason="cloud_mode is a planned future commercial-tier feature; not yet implemented",
-)
-
 
 class TestMcpContainer:
     """Tests for McpContainer."""
@@ -49,7 +37,6 @@ class TestMcpContainer:
         container = McpContainer(config=app_config, mode=RuntimeMode.TEST)
         assert container.should_sync_files is False
 
-    @_CLOUD_MODE_XFAIL
     def test_should_not_sync_files_in_cloud_mode(self, app_config):
         """Sync should be disabled in cloud mode (cloud handles sync differently)."""
         app_config.sync_changes = True
@@ -65,7 +52,6 @@ class TestSyncSkipReason:
         container = McpContainer(config=app_config, mode=RuntimeMode.TEST)
         assert container.sync_skip_reason == "Test environment detected"
 
-    @_CLOUD_MODE_XFAIL
     def test_skip_reason_in_cloud_mode(self, app_config):
         """Returns cloud message when in cloud mode."""
         container = McpContainer(config=app_config, mode=RuntimeMode.CLOUD)

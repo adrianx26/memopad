@@ -1,8 +1,8 @@
 ﻿"""Schemas for import services."""
 
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class ImportResult(BaseModel):
@@ -11,10 +11,6 @@ class ImportResult(BaseModel):
     import_count: Dict[str, int]
     success: bool
     error_message: Optional[str] = None
-    # Per-item errors collected during import (e.g. individual files that failed
-    # to parse/write). Previously these were only logged and lost; surfacing them
-    # lets callers report what actually went wrong instead of just a skip count.
-    errors: List[str] = Field(default_factory=list)
 
 
 class ChatImportResult(ImportResult):

@@ -59,26 +59,21 @@ async def search(
 async def reindex(
     task_scheduler: TaskSchedulerDep,
     project_id: ProjectExternalIdPathDep,
-    force: bool = False,
 ):
     """Recreate and populate the search index for a project.
 
-    This is a background operation. By default it is incremental: only
-    changed/new entities are re-indexed and unchanged ones are skipped, so
-    repeat calls don't redo the whole corpus. Pass ``force=true`` for a full
-    wipe-and-rebuild — useful after bulk updates, schema changes, or if the
-    index becomes corrupted.
+    This is a background operation that rebuilds the search index
+    from scratch. Useful after bulk updates or if the index becomes
+    corrupted.
 
     Args:
         project_id: Project external UUID from URL path
         task_scheduler: Task scheduler for background work
-        force: When true, perform a full wipe-and-rebuild instead of an
-            incremental reindex.
 
     Returns:
         Status message indicating reindex has been initiated
     """
-    task_scheduler.schedule("reindex_project", project_id=project_id, force=force)
+    task_scheduler.schedule("reindex_project", project_id=project_id)
     return {"status": "ok", "message": "Reindex initiated"}
 
 

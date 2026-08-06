@@ -16,28 +16,8 @@ class EntityCreationError(Exception):
     pass
 
 
-class EntityUpdateError(Exception):
-    """Raised when an entity exists but cannot be updated (e.g. DB update is a no-op
-    for a record that should be present).
-
-    Distinct from EntityCreationError so callers can distinguish "create failed"
-    from "update failed" from "bad input" (the latter remains ValueError).
-    """
-
-    pass
-
-
-class EntityAlreadyExistsError(EntityCreationError):
-    """Raised when an entity would collide with an existing one (duplicate title
-    or permalink) and the caller asked for a strict create.
-
-    Subclasses EntityCreationError so existing code/tests that catch
-    EntityCreationError for the duplicate-create case keep working, while
-    the router and clients can branch on this more specific type to map it to
-    HTTP 409 (instead of the previous behavior of leaking as a 500). Lets
-    higher layers (e.g. daily_note, write_note, assimilate) branch on 'already
-    exists' without string-matching exception messages or HTTP status codes.
-    """
+class DirectoryOperationError(Exception):
+    """Raised when directory operations fail"""
 
     pass
 

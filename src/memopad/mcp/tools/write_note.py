@@ -9,7 +9,6 @@ from memopad.mcp.project_context import get_active_project, add_project_metadata
 from memopad.mcp.server import mcp
 from fastmcp import Context
 from memopad.schemas.base import Entity
-from memopad.services.exceptions import EntityAlreadyExistsError
 from memopad.utils import parse_tags, validate_project_path
 
 # Define TagType as a Union that can accept either a string or a list of strings or None
@@ -162,18 +161,30 @@ async def write_note(
         try:
             result = await knowledge_client.create_entity(entity.model_dump(), fast=False)
             action = "Created"
-        except EntityAlreadyExistsError:
-            # The entity already exists — update it instead of overwriting. We catch
-            # the typed exception from the client rather than string-matching the
-            # error message (fragile across transports/locales) or HTTP status.
-            logger.debug(f"Entity exists, updating instead permalink={entity.permalink}")
-            if not entity.permalink:
-                raise ValueError("Entity permalink is required for updates")  # pragma: no cover
-            entity_id = await knowledge_client.resolve_entity(entity.permalink)
-            result = await knowledge_client.update_entity(
-                entity_id, entity.model_dump(), fast=False
-            )
-            action = "Updated"
+        except Exception as e:
+            # If creation failed due to conflict (already exists), try to update
+            if (
+                "409" in str(e)
+                or "conflict" in str(e).lower()
+                or "already exists" in str(e).lower()
+            ):
+                logger.debug(f"Entity exists, updating instead permalink={entity.permalink}")
+                try:
+                    if not entity.permalink:
+                        raise ValueError(
+                            "Entity permalink is required for updates"
+                        )  # pragma: no cover
+                    entity_id = await knowledge_client.resolve_entity(entity.permalink)
+                    result = await knowledge_client.update_entity(
+                        entity_id, entity.model_dump(), fast=False
+                    )
+                    action = "Updated"
+                except Exception as update_error:  # pragma: no cover
+                    # Re-raise the original error if update also fails
+                    raise e from update_error  # pragma: no cover
+            else:
+                # Re-raise if it's not a conflict error
+                raise  # pragma: no cover
         summary = [
             f"# {action} note",
             f"project: {active_project.name}",

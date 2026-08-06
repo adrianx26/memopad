@@ -16,6 +16,12 @@ from memopad.mcp.tools.view_note import view_note
 from memopad.mcp.tools.write_note import write_note
 from memopad.mcp.tools.search import search_notes, search_by_metadata
 from memopad.mcp.tools.canvas import canvas
+from memopad.mcp.tools.codegraph import (
+    index_code,
+    find_symbol,
+    impact_path,
+    code_context,
+)
 from memopad.mcp.tools.list_directory import list_directory
 from memopad.mcp.tools.list_observation_schemas import list_observation_schemas
 from memopad.mcp.tools.list_observation_schema_suggestions import list_observation_schema_suggestions
@@ -29,6 +35,20 @@ from memopad.mcp.tools.project_management import (
 from memopad.mcp.tools.optimize_storage import optimize_storage
 from memopad.mcp.tools.daily_note import daily_note
 from memopad.mcp.tools.backlinks import backlinks
+from memopad.mcp.tools.drill_down import drill_down
+from memopad.mcp.tools.skill import (
+    create_skill,
+    get_skill,
+    list_skills,
+    validate_skill,
+)
+from memopad.mcp.tools.shortterm import (
+    add_session_ref,
+    add_session_step,
+    get_session_context,
+    drill_down_session,
+    finalize_session,
+)
 from memopad.mcp.tools.semantic_search import semantic_search
 from memopad.mcp.tools.batch_import import batch_import_directory
 from memopad.mcp.tools.auto_tag import auto_tag_note
@@ -40,24 +60,37 @@ from memopad.mcp.tools.sync import sync_project_files
 from memopad.mcp.tools.chatgpt_tools import search, fetch
 
 __all__ = [
+    "add_session_ref",
+    "add_session_step",
     "assimilate",
     "auto_tag_note",
     "backlinks",
     "batch_import_directory",
     "build_context",
     "canvas",
+    "code_context",
     "create_memory_project",
+    "create_skill",
     "daily_note",
     "delete_note",
     "delete_project",
+    "drill_down",
+    "drill_down_session",
     "edit_note",
     "extract_relations",
     "fetch",
+    "finalize_session",
+    "find_symbol",
     "get_relevant_context",
+    "get_session_context",
+    "get_skill",
+    "impact_path",
+    "index_code",
     "list_directory",
     "list_memory_projects",
     "list_observation_schema_suggestions",
     "list_observation_schemas",
+    "list_skills",
     "move_note",
     "optimize_storage",
     "read_content",
@@ -68,6 +101,7 @@ __all__ = [
     "search_notes",
     "semantic_search",
     "sync_project_files",
+    "validate_skill",
     "view_note",
     "write_note",
 ]

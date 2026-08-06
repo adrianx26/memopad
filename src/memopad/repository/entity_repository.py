@@ -343,6 +343,63 @@ class EntityRepository(Repository[Entity]):
         result = await self.execute_query(query)
         return list(result.scalars().all())
 
+    async def get_by_ids(self, entity_ids: List[int]) -> Sequence[Entity]:
+        """Fetch multiple entities by numeric ID in one query.
+
+        Used by the G1 skill-boost in ContextService to read `entity_metadata`
+        for a batch of primary-result IDs without N round-trips. Returns entities
+        without the heavy relation load options (only metadata is needed).
+        """
+        if not entity_ids:
+            return []
+        query = self.select().where(Entity.id.in_(entity_ids))
+        result = await self.execute_query(query)
+        return list(result.scalars().all())
+
+    async def list_by_entity_type(
+        self,
+        entity_type: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Sequence[Entity]:
+        """List entities of a given `entity_type`, newest first.
+
+        Tb G1: the SQL backends (SQLite/Postgres) share one EntityRepository
+        and had no type-filtered list (only the Stoolap variant did). Skills are
+        retrieved through this. Ordered by `updated_at DESC` so recently revised
+        skills surface first.
+        """
+        query = (
+            self.select()
+            .where(Entity.entity_type == entity_type)
+            .order_by(Entity.updated_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await self.execute_query(query)
+        return list(result.scalars().all())
+
+    async def get_symbol_permalinks(
+        self, entity_types: Sequence[str]
+    ) -> List[tuple[int, str]]:
+        """Return (id, permalink) for entities of the given types in this project.
+
+        Lightweight — selects only id + permalink, no eager loading of
+        observations/relations. Used by CodeGraph re-index to find code symbols
+        whose source file is no longer present in a scan so they can be pruned
+        (the complement of the freshly-scanned permalinks). Project-scoped via
+        `_add_project_filter`, so it never touches other projects' symbols.
+        """
+        if not entity_types:
+            return []
+        query = select(Entity.id, Entity.permalink).where(
+            Entity.entity_type.in_(list(entity_types))
+        )
+        query = self._add_project_filter(query)
+        result = await self.execute_query(query, use_query_options=False)
+        return [(row.id, row.permalink) for row in result.all()]
+
     async def upsert_entity(self, entity: Entity) -> Entity:
         """Insert or update entity with clean separation of concerns.
 
@@ -524,35 +581,6 @@ class EntityRepository(Repository[Entity]):
         query = self.select().where(Entity.file_path.like(pattern))
 
         # Skip eager loading - we only need basic entity fields for directory trees
-        result = await self.execute_query(query, use_query_options=False)
-        return list(result.scalars().all())
-
-    async def find_path_conflict_candidates(self, file_path: str) -> Sequence[Entity]:
-        """Return entities that could conflict with `file_path`, scoped narrowly.
-
-        Conflicts (case/unicode variants, permalink collisions) almost always
-        involve a file in the *same directory* — a case-variant filename, or a
-        sibling whose permalink collides (space vs hyphen vs underscore). So
-        instead of `find_all()` (which eager-loads every entity in the project on
-        every create/update), we fetch only the same-directory siblings with a
-        case-insensitive prefix match. The caller then runs the exact fuzzy
-        comparison (`detect_potential_file_conflicts`) over this small set.
-
-        Root-level files (no path separator) are matched against other root
-        files only. This is an advisory conflict warning, not a correctness
-        path, so the rare cross-directory permalink collision is not surfaced
-        here — it is independently caught by the permalink-uniqueness loop.
-        """
-        posix_path = Path(file_path).as_posix()
-        parent = posix_path.rsplit("/", 1)[0] if "/" in posix_path else ""
-
-        if parent == "":
-            # Root level: files with no separator.
-            query = self.select().where(~Entity.file_path.like("%/%"))
-        else:
-            pattern = f"{parent.lower()}/%"
-            query = self.select().where(func.lower(Entity.file_path).like(pattern))
-
         result = await self.execute_query(query, use_query_options=False)
         return list(result.scalars().all())
 

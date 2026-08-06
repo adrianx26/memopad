@@ -526,40 +526,84 @@ tags: [coffee, brewing]
   </div>
 </div>
 
-<h2>5. Embeddings &amp; Semantic Search</h2>
+<h2>7. Tb-Borrowed Layers (Feature-Flagged)</h2>
 <p class="section-intro">
-  Opt-in semantic/hybrid search (BM25 + embeddings) layered on the FTS5 index.
-  <code>EmbeddingService</code> owns a two-tier vector store (canonical BLOB
-  table + optional sqlite-vec ANN index) reached only through
-  <code>SearchService</code>. Tuned to stay light on CPU: inference runs off the
-  event loop, unchanged content is never re-embedded, and repeat queries are
-  cached. See <code>docs/CHANGES-embedding-perf.md</code>.
+  Seven capabilities borrowed from TbDB-Agent-Memory sit as opt-in layers (default off)
+  on top of the existing graph — no schema migration, 100% backward-compatible. Each is gated
+  by a config flag enforced at every layer; the pure logic is split from the DB-backed service
+  so it is unit-testable without a server. See <code>tb-borrow-implementation-plan.md</code>
+  and <code>tb-borrow-progress.md</code>.
 </p>
 
 <div class="diagram-container">
   <pre class="mermaid">
-    flowchart LR
-      subgraph Write["Index / re-index / sync (Fix 1, 2, 4)"]
-        Items["(item_type, item_id, text) batch"]
-        Items --> Hash{"content_hash == stored?"}
-        Hash -- "unchanged" --> Skip["skip — no model call"]
-        Hash -- "new / changed" --> Off["_embed()\nasyncio.to_thread\nthreads capped"]
-        Off --> Blob[("embedding BLOB\n+ content_hash")]
-        Off --> Vec0[("vec0 mirror\n(optional)")]
+    flowchart TB
+      subgraph Flags["Feature Flags (default off)"]
+        F1["levels_enabled"]
+        F2["skills_enabled"]
+        F3["codegraph_enabled"]
+        F4["shortterm_enabled"]
+        F5["levels_pipeline_automatic"]
+        F6["recall_max_chars_per_memory / recall_timeout_ms (0=off)"]
       end
 
-      subgraph Search["hybrid_search (Fix 3a, 5)"]
-        Q["query"] --> QCache{"LRU cache hit?"}
-        QCache -- hit --> QVec["cached q_vec"]
-        QCache -- miss --> Off2["_embed() off-loop + cache"]
-        Off2 --> QVec
-        QVec --> KNN{"vec0 available?"}
-        KNN -- yes --> V0["vec0 KNN\n(sublinear)"]
-        KNN -- no --> Np["numpy matmul\nover BLOBs"]
-        V0 --> RRF["RRF fuse with FTS5"]
-        Np --> RRF
+      subgraph Borrow["Tb-borrowed capabilities"]
+        direction TB
+        G5["G5 Provenance<br/>drill_down: L3→L1→L0 chain<br/>via source_entities + derived_from"]
+        G1["G1 Skill asset<br/>create/get/list/validate_skill<br/>entity_type=skill, versioned metadata"]
+        G2["G2 CodeGraph<br/>index_code/find_symbol/impact_path/code_context<br/>code:// entities, calls/defined_in/imports"]
+        G6["G6 Short-term context<br/>add_session_ref/step/get_context/<br/>drill_down_session/finalize_session<br/>refs→steps→canvas.mmd"]
+        G3["G3 Distillation scheduler<br/>cadences + idle + warmup<br/>emits DistillationTrigger (seam)"]
+        G4["G4 Retrieval budget<br/>per-memory cap + timeout<br/>graceful degradation in build_context"]
+        G7["G7 PersonaMem eval<br/>provenance recall harness<br/>@pytest.mark.eval"]
       end
+
+      subgraph Core["Existing MemoPad core (reused, unchanged)"]
+        BC["build_context"]
+        ES["EntityService"]
+        Repos["Entity / Relation /<br/>Observation / Search Repos"]
+      end
+
+      F1 --> G5
+      F2 --> G1
+      F3 --> G2
+      F4 --> G6
+      F5 --> G3
+      F6 --> G4
+
+      G5 --> BC
+      G1 --> BC
+      G4 --> BC
+      G2 --> ES
+      G1 --> ES
+      ES --> Repos
+      G6 -.->|finalize_session → stable_steps| Seam1["seam: ScenarioBuilder (Faza 4/L2)"]
+      G3 -.->|DistillationTrigger → callback| Seam2["seam: distiller L0→L1→L2→L3 (Faza 1/4)"]
+
+      style Flags fill:#2a3a5a,stroke:#6b8aff
+      style Core fill:#1a3a3a,stroke:#00d4aa
+      style Seam1 fill:#3a2a1a,stroke:#ffb347,stroke-dasharray:5 5
+      style Seam2 fill:#3a2a1a,stroke:#ffb347,stroke-dasharray:5 5
   </pre>
+  <div class="legend">
+    <div class="legend-item"><div class="legend-color" style="background:#6b8aff"></div>Feature flag (gate at every layer)</div>
+    <div class="legend-item"><div class="legend-color" style="background:#00d4aa"></div>Reused existing core</div>
+    <div class="legend-item"><div class="legend-color" style="background:#ffb347"></div>Documented seam (future hookup, not a bug)</div>
+  </div>
+</div>
+
+<div class="flow-note">
+  <strong>Seams, not gaps:</strong> G3 emits triggers but the distiller itself (L0→L1→L2→L3) is
+  Faza 1/4 of the levels plan; G6's <code>finalize_session</code> returns <code>stable_steps()</code>
+  ready for a future <code>ScenarioBuilder</code> (L2). Both hookup points are one-line integrations
+  documented in <code>tb-borrow-progress.md</code> — the deterministic policy/storage/query
+  logic is complete and tested today.
+  <br><br>
+  <strong>Wired in the finishing session:</strong> G1 trigger-matching (<code>match_trigger</code> +
+  <code>_inject_trigger_skills</code> in <code>build_context</code>) and G2 watch reindex
+  (<code>WatchService.handle_changes</code> runs a full-tree <code>index_directory</code> when
+  <code>codegraph_enabled</code> + source files changed; manual <code>index_code</code> is the
+  documented fallback). Both stay feature-flagged (default off).
 </div>
 
 </div>

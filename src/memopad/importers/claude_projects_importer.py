@@ -33,9 +33,7 @@ class ClaudeProjectsImporter(Importer[ProjectImportResult]):
         """Import projects from Claude JSON export.
 
         Args:
-            source_data: Parsed/deserialized Claude projects export — an iterable
-                of project dicts (callers json.load the file before passing it in;
-                this method does not read a path from disk).
+            source_path: Path to the Claude projects.json file.
             destination_folder: Base folder for projects within the project.
             **kwargs: Additional keyword arguments.
 

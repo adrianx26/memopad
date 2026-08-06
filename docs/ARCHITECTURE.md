@@ -28,7 +28,7 @@ A composition root is the single place in an application where dependencies are 
 Each entrypoint has a container dataclass in its package:
 
 ```
-src/memopad/
+src/basic_memory/
 ├── api/
 │   └── container.py      # ApiContainer
 ├── mcp/
@@ -117,7 +117,7 @@ def resolve_runtime_mode(cloud_mode_enabled: bool, is_test_env: bool) -> Runtime
 The `deps/` package provides FastAPI dependencies organized by feature:
 
 ```
-src/memopad/deps/
+src/basic_memory/deps/
 ├── __init__.py       # Re-exports for backwards compatibility
 ├── config.py         # Configuration access
 ├── db.py             # Database/session management
@@ -130,8 +130,8 @@ src/memopad/deps/
 ### Usage in Routers
 
 ```python
-from memopad.deps.services import get_entity_service
-from memopad.deps.projects import get_project_config
+from basic_memory.deps.services import get_entity_service
+from basic_memory.deps.projects import get_project_config
 
 @router.get("/entities/{id}")
 async def get_entity(
@@ -148,10 +148,10 @@ The old `deps.py` file still exists as a thin re-export shim:
 
 ```python
 # deps.py - backwards compatibility shim
-from memopad.deps import *
+from basic_memory.deps import *
 ```
 
-New code should import from specific submodules (`memopad.deps.services`) for clarity.
+New code should import from specific submodules (`basic_memory.deps.services`) for clarity.
 
 ## MCP Tools Architecture
 
@@ -160,7 +160,7 @@ New code should import from specific submodules (`memopad.deps.services`) for cl
 MCP tools communicate with the API through typed clients that encapsulate HTTP paths and response validation:
 
 ```
-src/memopad/mcp/clients/
+src/basic_memory/mcp/clients/
 ├── __init__.py       # Re-exports all clients
 ├── base.py           # BaseClient with common logic
 ├── knowledge.py      # KnowledgeClient - entity CRUD
@@ -210,6 +210,52 @@ Service Layer (business logic)
 Repository Layer (data access)
 ```
 
+#### Feature-flagged (Tb-borrowed) tools
+
+A second family of tools (G1 skills, G2 CodeGraph, G5 `drill_down`, G6 short-term
+session context) follows the same flow but is gated at **every** layer by a config
+flag (default off). The gate is enforced server-side so a disabled tool surfaces a
+clear error rather than silently no-op'ing:
+
+```
+MCP Tool                ── shortterm_enabled / codegraph_enabled / skills_enabled / levels_enabled
+    ↓ (disabled → ToolError)
+Typed Client            ── KnowledgeClient.{index_codegraph, find_symbol, impact_path,
+    code_context, drill_down, list_skills, validate_skill}
+    ↓
+HTTP API router         ── if not app_config.<flag>: raise HTTPException(400)
+    ↓
+Service Layer           ── CodeGraphService / ProvenanceService / SkillService
+                           (pure logic split into *_query.py / pure modules for unit testing
+                            without DB; DB-backed service composes repositories + app_config)
+    ↓
+Repository Layer        ── EntityRepository / RelationRepository / ObservationRepository /
+                           SearchRepository  (reused — no new tables; code entities use
+                           content_type="text/x-python", file_path = code:// permalink)
+```
+
+The pure/DB split (e.g. `codegraph_query.py` vs `codegraph_service.py`,
+`shortterm_context.py` pure file-backed service with no DB at all) keeps the
+deterministic logic unit-testable without standing up a server, while the
+MCP-tool tests monkeypatch the HTTP seam (`get_client` / `get_active_project` /
+`KnowledgeClient`).
+
+Two internal composition hooks reuse this flow without adding new layers or MCP
+tool signatures (both feature-flagged, default off):
+
+- **G1 trigger-matching** — `ContextService.build_context` calls
+  `skill_service.match_trigger` (pure) + `_inject_trigger_skills` to prepend
+  validated skills whose `[trigger]` observation matches the request topic (the
+  raw path of a non-wildcard `memory_url`). Complements `_apply_skill_boost`
+  (re-ranks skills already surfaced by search). No API/DB change.
+- **G2 watch reindex** — `WatchService.handle_changes` runs a full-tree
+  `CodeGraphService.index_directory` (idempotent) at the end of a change batch
+  when `codegraph_enabled` is on and the batch contains a supported source file
+  (pure `_batch_has_code_files` hint). Keeps the code graph fresh during a watch
+  session; `index_code` is the documented manual fallback when watch is off or a
+  reindex fails. Best-effort — a reindex failure degrades explicitly without
+  aborting the file sync that already ran.
+
 Example tool using typed client:
 
 ```python
@@ -225,8 +271,8 @@ async def search_notes(
         active_project = await get_active_project(client, project)
 
         # Import client inside function to avoid circular imports
-        from memopad.mcp.clients import SearchClient
-        from memopad.schemas.search import SearchQuery
+        from basic_memory.mcp.clients import SearchClient
+        from basic_memory.schemas.search import SearchQuery
 
         search_query = SearchQuery(
             text=query,
@@ -274,27 +320,6 @@ class SyncStatus(Enum):
     STOPPED = "stopped"
     ERROR = "error"
 ```
-
-### File ↔ DB consistency invariants
-
-Two invariants keep the file and database views from diverging (see
-`docs/CHANGES-hardening-p0-p3.md`):
-
-- **Cache invalidation on every mutation.** `EntityService` keeps a 2Q
-  permalink cache (`_permalink_cache`, keyed `path:<file>`) and a 60 s
-  metadata cache. Moves and deletes invalidate both the old and new path keys
-  *around* the operation (before resolving the destination permalink, after
-  the DB update succeeds), and the sync write path reads metadata with
-  `use_cache=False`. `resolve_permalink` never serves a cached value when the
-  markdown carries an explicit `permalink:` frontmatter field. A failed move
-  restores the original permalink into the file.
-- **Atomic replace via single-session repository methods.** Replacing an
-  entity's observations or outgoing relations uses `replace_observations` /
-  `replace_outgoing_relations` — one `db.scoped_session`, delete + insert in
-  one commit — so a failure mid-replace can't leave the entity with zero
-  observations/relations (the old delete-then-add-on-separate-sessions path
-  committed the delete before the add). `create_entity` cleans up an
-  orphaned file if upsert/reconcile raises after the write.
 
 ## Project Resolution
 
@@ -351,7 +376,7 @@ When testing MCP tools, mock at the client level:
 
 ```python
 def test_search_notes(monkeypatch):
-    import memopad.mcp.clients as clients_mod
+    import basic_memory.mcp.clients as clients_mod
 
     class MockSearchClient:
         async def search(self, query):
@@ -393,7 +418,7 @@ To avoid circular imports, typed clients are imported inside functions:
 async def my_tool():
     async with get_client() as client:
         # Import here to avoid circular dependency
-        from memopad.mcp.clients import KnowledgeClient
+        from basic_memory.mcp.clients import KnowledgeClient
 
         knowledge_client = KnowledgeClient(client, project_id)
 ```
@@ -404,11 +429,11 @@ When refactoring, maintain backwards compatibility via shims:
 
 ```python
 # Old module becomes a shim
-from memopad.new_location import *
+from basic_memory.new_location import *
 
 # Docstring explains migration path
 """
-DEPRECATED: Import from memopad.new_location instead.
+DEPRECATED: Import from basic_memory.new_location instead.
 This shim will be removed in a future version.
 """
 ```
@@ -416,7 +441,7 @@ This shim will be removed in a future version.
 ## File Organization
 
 ```
-src/memopad/
+src/basic_memory/
 ├── api/
 │   ├── container.py          # API composition root
 │   ├── routers/              # FastAPI routers
@@ -444,71 +469,3 @@ src/memopad/
 ├── project_resolver.py       # Unified project selection
 └── config.py                 # Configuration management
 ```
-
-## Embeddings & Semantic Search
-
-Semantic/hybrid search is an opt-in feature (`MEMOPAD_EMBEDDINGS_ENABLED`)
-layered on top of the FTS5 keyword index. `EmbeddingService`
-(`services/embedding_service.py`) owns a two-tier vector store and is reached
-only through `SearchService` — entity/observation/relation services never touch
-it directly.
-
-**Two-tier store**
-
-- **Canonical BLOB store** (`embedding` table, every backend): `item_type`
-  (`entity`/`observation`/`relation`) + `item_id` composite key, packed
-  float32 `vector`, and a `content_hash` (SHA-256 of the embedded text). Source
-  of truth; created by the `p9d1e2f3a4b5` migration (and lazily by
-  `_init_blob_store`).
-- **Optional `sqlite-vec` ANN index**: one `vec0` virtual table per item type
-  per project mirrors the BLOB store for sublinear KNN. Table names are
-  **dim-scoped** — `embedding_vec_<item_type>_p<project>_d<dim>` — so a model
-  swap (different `dim`) creates its own table instead of mutating an
-  existing `IF NOT EXISTS` table whose row width no longer matches; this
-  prevents a wrong-dim `INSERT` from rolling back the canonical BLOB write.
-  When the extension can't load, search falls back to a numpy matmul over the
-  BLOB store. `db.py` loads the extension per connection (gated on the env var)
-  and logs the outcome once.
-
-**Hybrid search** fuses BM25 (FTS5) and cosine rankings via Reciprocal Rank
-Fusion (RRF), keyed by `(item_type, item_id)` so entities, facts, and
-relations fuse on equal footing.
-
-**Performance design** (see `docs/CHANGES-embedding-perf.md`):
-
-```mermaid
-flowchart LR
-  subgraph Write["Index / re-index / sync"]
-    Items["(item_type, item_id, text) batch"]
-    Items --> Hash{"content_hash\n== stored?"}
-    Hash -- "unchanged" --> Skip["skip (no model call)"]
-    Hash -- "new/changed" --> Off["_embed()\nasyncio.to_thread\n(threads capped)"]
-    Off --> Blob[("embedding BLOB\n+ content_hash")]
-    Off --> Vec0[("vec0 mirror\n(optional)")]
-  end
-
-  subgraph Search["hybrid_search"]
-    Q["query"] --> QCache{"LRU cache\nhit?"}
-    QCache -- hit --> QVec["cached q_vec"]
-    QCache -- miss --> Off2["_embed()\noff-loop + cache"]
-    Off2 --> QVec
-    QVec --> KNN{"vec0\navailable?"}
-    KNN -- yes --> V0["vec0 KNN\n(sublinear)"]
-    KNN -- no --> Np["numpy matmul\nover BLOBs"]
-    V0 --> RRF["RRF fuse with FTS5"]
-    Np --> RRF
-  end
-```
-
-- **Off-loop inference (Fix 1):** `provider.embed` runs via `asyncio.to_thread`;
-  ONNX threads capped to `MEMOPAD_EMBEDDING_THREADS` (default `min(4, cpu_count)`).
-- **Content-hash dedup (Fix 2):** `upsert_batch` skips items whose text+model
-  are unchanged — re-indexing unchanged content costs nothing.
-- **sqlite-vec loading (Fix 3a):** aiosqlite connections drive the extension via
-  `run_async`; vec0 actually loads instead of silently falling back to the
-  O(N) scorer.
-- **Batched sync (Fix 4):** `SearchService.begin_embedding_batch` /
-  `flush_embedding_buffer` accumulate items across a sync sweep and flush in
-  128-item chunks (one model call per chunk, not per file).
-- **Query cache (Fix 5):** a bounded LRU (256, keyed by `(model, query)`)
-  serves repeat queries without a model call.

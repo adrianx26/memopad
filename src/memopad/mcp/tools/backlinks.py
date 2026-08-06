@@ -66,12 +66,9 @@ async def backlinks(
             return add_project_metadata(summary, active_project.name)
 
         # Group by relation_type — gives a clearer picture than a flat list.
-        # Guard against rows missing relation_type so a single malformed row
-        # doesn't KeyError the whole tool.
         by_type: dict[str, list[dict]] = {}
         for item in items:
-            rel_type = item.get("relation_type") or "related"
-            by_type.setdefault(rel_type, []).append(item)
+            by_type.setdefault(item["relation_type"], []).append(item)
 
         lines = [
             f"# Backlinks for '{target_title}'",

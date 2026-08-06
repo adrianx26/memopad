@@ -24,11 +24,12 @@ from memopad.deps import (
     RelationRepositoryV2ExternalDep,
     TaskSchedulerDep,
     FileServiceV2ExternalDep,
+    ObservationRepositoryV2ExternalDep,
+    CodeGraphServiceV2ExternalDep,
 )
 from memopad.schemas import DeleteEntitiesResponse
 from memopad.schemas.base import Entity
 from memopad.schemas.request import EditEntityRequest
-from memopad.services.exceptions import EntityAlreadyExistsError
 from memopad.schemas.v2 import (
     EntityResolveRequest,
     EntityResolveResponse,
@@ -38,6 +39,25 @@ from memopad.schemas.v2 import (
     DeleteDirectoryRequestV2,
 )
 from memopad.schemas.response import DirectoryMoveResult, DirectoryDeleteResult
+from memopad.services.provenance_service import (
+    DERIVED_FROM_RELATION_TYPE,
+    build_drill_down_chain,
+    entity_level,
+    parse_source_entities,
+    render_drill_down_chain,
+)
+from memopad.services.skill_service import (
+    SKILL_ENTITY_TYPE,
+    SKILL_STATUS_KEY,
+    STATUS_VALIDATED,
+    build_skill_detail,
+    group_skill_observations,
+    is_skill_entity,
+    render_skill_detail,
+    skill_status,
+    skill_version,
+    structural_validation,
+)
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge-v2"])
 
@@ -196,13 +216,7 @@ async def create_entity(
             project_id=project_id,
         )
     else:
-        try:
-            entity = await entity_service.create_entity(data)
-        except EntityAlreadyExistsError as e:
-            # Duplicate create is a 409 Conflict, not a 500. Mapping it here (rather
-            # than letting the global handler turn it into a 500) lets clients branch
-            # on the typed status instead of string-matching an "already exists" detail.
-            raise HTTPException(status_code=409, detail=str(e)) from e
+        entity = await entity_service.create_entity(data)
         await search_service.index_entity(entity, background_tasks=background_tasks)
 
     result = EntityResponseV2.model_validate(entity)
@@ -383,10 +397,6 @@ async def edit_entity_by_id(
 
         return result
 
-    except HTTPException:
-        # Preserve intentional HTTP status codes (e.g. 404) instead of
-        # collapsing them into a generic 400.
-        raise
     except Exception as e:
         logger.error(f"Error editing entity {entity_id}: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -402,6 +412,7 @@ async def delete_entity_by_id(
     entity_service: EntityServiceV2ExternalDep,
     entity_repository: EntityRepositoryV2ExternalDep,
     entity_id: str = Path(..., description="Entity external ID (UUID)"),
+    search_service=Depends(lambda: None),  # Optional for now
 ) -> DeleteEntitiesResponse:
     """Delete an entity by external ID.
 
@@ -411,10 +422,7 @@ async def delete_entity_by_id(
     Returns:
         Deletion status
 
-    Note: Returns deleted=False if entity doesn't exist (idempotent).
-        Search-index cleanup is handled inside ``entity_service.delete_entity``
-        (it calls ``search_service.handle_delete``), so no separate search
-        service parameter is needed here.
+    Note: Returns deleted=False if entity doesn't exist (idempotent)
     """
     logger.info(f"API v2 request: delete_entity_by_id entity_id={entity_id}")
 
@@ -423,10 +431,12 @@ async def delete_entity_by_id(
         logger.info(f"API v2 response: external_id={entity_id} not found, deleted=False")
         return DeleteEntitiesResponse(deleted=False)
 
-    # Delete the entity using internal ID. ``delete_entity`` also removes the
-    # entity from the search index internally, so no separate background task
-    # is required here.
+    # Delete the entity using internal ID
     deleted = await entity_service.delete_entity(entity.id)
+
+    # Remove from search index if search service available
+    if search_service:
+        background_tasks.add_task(search_service.handle_delete, entity)  # pragma: no cover
 
     logger.info(f"API v2 response: external_id={entity_id}, deleted={deleted}")
 
@@ -550,8 +560,6 @@ async def move_directory(
         )
         return result
 
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Error moving directory: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -593,8 +601,6 @@ async def delete_directory(
         )
         return result
 
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Error deleting directory: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -662,3 +668,363 @@ async def get_backlinks(
         f"API v2 response: get_backlinks entity_id={entity_id} count={len(items)}"
     )
     return {"target_external_id": entity_id, "target_title": target.title, "backlinks": items}
+
+
+## Drill-down (provenance chain) endpoint
+
+
+@router.get("/entities/{entity_id}/drill-down")
+async def get_drill_down(
+    project_id: ProjectExternalIdPathDep,
+    entity_repository: EntityRepositoryV2ExternalDep,
+    relation_repository: RelationRepositoryV2ExternalDep,
+    entity_id: str = Path(..., description="Entity external ID (UUID) to trace from"),
+    target_level: str = Query("L0", description="Stop descending at this level (L0|L1|L2|L3)"),
+    max_depth: int = Query(5, description="Safety bound on recursion depth", ge=1, le=10),
+) -> dict:
+    """Trace a distilled memory back to its ground-truth sources (Tb G5).
+
+    Follows, in order:
+      1. frontmatter `source_entities` (the plan's authoritative provenance field,
+         stored in `entity_metadata`), and
+      2. native `derived_from` relations as a secondary backref path,
+    recursing down to `target_level` (default L0) or until a source cannot be
+    resolved.
+
+    This is the reversible side of the L0–L3 distillation pyramid: from any
+    high-level abstraction (L3 persona, L2 scenario, L1 fact) the caller can reach
+    the raw L0 evidence it was distilled from, plus the file_path of each hop so
+    bodies can be read via `read_note`.
+
+    Returns a dict with `chain` (rendered Markdown), `target`, and `nodes`
+    (structured tree). Unresolved sources appear as leaves tagged _[unresolved]_.
+    """
+    logger.info(
+        f"API v2 request: get_drill_down entity_id={entity_id} target_level={target_level}"
+    )
+
+    target = await entity_repository.get_by_external_id(entity_id)
+    if not target:
+        raise HTTPException(
+            status_code=404, detail=f"Entity with external_id '{entity_id}' not found"
+        )
+
+    chain_root = await build_drill_down_chain(
+        entity_repository,
+        relation_repository,
+        target,
+        target_level=target_level,
+        max_depth=max_depth,
+    )
+
+    def _serialize(node) -> dict:
+        return {
+            "external_id": node.external_id,
+            "title": node.title,
+            "permalink": node.permalink,
+            "level": node.level,
+            "file_path": node.file_path,
+            "resolved": node.resolved,
+            "via": node.via,
+            "source_ref": node.source_ref,
+            "children": [_serialize(c) for c in node.children],
+        }
+
+    logger.info(
+        f"API v2 response: get_drill_down entity_id={entity_id} "
+        f"target_level={target_level} source_refs={len(parse_source_entities(target.entity_metadata))}"
+    )
+    return {
+        "target_external_id": entity_id,
+        "target_title": target.title,
+        "target_level": entity_level(target.entity_metadata),
+        "source_entities": parse_source_entities(target.entity_metadata),
+        "derived_from_relation_type": DERIVED_FROM_RELATION_TYPE,
+        "chain": render_drill_down_chain(chain_root),
+        "nodes": _serialize(chain_root),
+    }
+
+
+## Skill asset endpoints (Tb G1)
+#
+# Skills are entities with `entity_type = "skill"` carrying versioning metadata
+# (`skill_version`, `skill_status`) in `entity_metadata` and structured
+# `[trigger]` / `[step]` / `[validation]` observations. Create/get reuse the
+# generic entity endpoints; these two endpoints cover the skill-specific
+# operations the generic CRUD can't do: list-by-type and structural validation
+# with status promotion. Gated behind `skills_enabled` (default off).
+
+
+@router.get("/skills")
+async def list_skills(
+    project_id: ProjectExternalIdPathDep,
+    entity_repository: EntityRepositoryV2ExternalDep,
+    app_config: AppConfigDep,
+    status: str | None = Query(
+        None, description="Filter by skill_status: draft | validated | deprecated"
+    ),
+    limit: int = Query(50, ge=1, le=200, description="Max skills to return"),
+    offset: int = Query(0, ge=0, description="Pagination offset"),
+) -> dict:
+    """List skill entities, optionally filtered by `skill_status`.
+
+    Returns summary dicts (external_id, title, permalink, file_path, version,
+    status, source count). Use `GET /knowledge/entities/{id}` for full detail.
+    """
+    if not app_config.skills_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="Skill asset is disabled (skills_enabled=false). "
+            "Enable MEMOPAD_SKILLS_ENABLED to use skill endpoints.",
+        )
+
+    if status and status not in ("draft", "validated", "deprecated"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"status must be one of draft|validated|deprecated, got '{status}'",
+        )
+
+    logger.info(f"API v2 request: list_skills status={status} limit={limit} offset={offset}")
+
+    skills = await entity_repository.list_by_entity_type(
+        SKILL_ENTITY_TYPE, limit=limit if not status else 200, offset=offset
+    )
+
+    summaries = []
+    for ent in skills:
+        st = skill_status(ent.entity_metadata)
+        if status and st != status:
+            continue
+        summaries.append(
+            {
+                "external_id": ent.external_id,
+                "title": ent.title,
+                "permalink": ent.permalink,
+                "file_path": ent.file_path,
+                "skill_version": skill_version(ent.entity_metadata),
+                "skill_status": st,
+                "source_entities_count": len((ent.entity_metadata or {}).get("source_entities", []) or []),
+            }
+        )
+
+    logger.info(f"API v2 response: list_skills returned {len(summaries)} skills")
+    return {"skills": summaries, "count": len(summaries)}
+
+
+@router.post("/skills/{entity_id}/validate")
+async def validate_skill(
+    project_id: ProjectExternalIdPathDep,
+    entity_repository: EntityRepositoryV2ExternalDep,
+    observation_repository: ObservationRepositoryV2ExternalDep,
+    entity_service: EntityServiceV2ExternalDep,
+    search_service: SearchServiceV2ExternalDep,
+    file_service: FileServiceV2ExternalDep,
+    app_config: AppConfigDep,
+    background_tasks: BackgroundTasks,
+    entity_id: str = Path(..., description="Skill entity external ID (UUID)"),
+) -> dict:
+    """Structurally validate a skill and, if complete, promote it to `validated`.
+
+    The Tb triple must be present: >= 1 `[trigger]`, >= 1 `[step]`,
+    >= 1 `[validation]` observation. When complete, the skill's frontmatter
+    `skill_status` is set to `validated` (files remain the source of truth: the
+    markdown is rewritten via `entity_service.update_entity` and re-indexed).
+
+    LLM verification (do the steps actually cover the trigger?) is deferred —
+    structural completeness is the deterministic precondition recorded here.
+    """
+    if not app_config.skills_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="Skill asset is disabled (skills_enabled=false).",
+        )
+
+    logger.info(f"API v2 request: validate_skill entity_id={entity_id}")
+
+    entity = await entity_repository.get_by_external_id(entity_id)
+    if not entity:
+        raise HTTPException(
+            status_code=404, detail=f"Entity with external_id '{entity_id}' not found"
+        )
+    if not is_skill_entity(entity):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Entity '{entity_id}' is not a skill (entity_type='{entity.entity_type}').",
+        )
+
+    observations = await observation_repository.find_by_entity(entity.id)
+    grouped = group_skill_observations(observations)
+    result = structural_validation(grouped)
+
+    if not result.ok:
+        # Validation failed — do not promote. Return 200 with ok=False so the
+        # caller gets the missing-category list (not a transport error).
+        return {
+            "external_id": entity.external_id,
+            "ok": False,
+            "missing": result.missing,
+            "present": result.present,
+            "skill_status": skill_status(entity.entity_metadata),
+        }
+
+    # --- Structural check passed: promote skill_status -> validated in the file ---
+    import frontmatter as _frontmatter
+    from pathlib import Path as _Path
+
+    existing_content = await file_service.read_file_content(_Path(entity.file_path))
+    post = _frontmatter.loads(existing_content)
+    post[SKILL_STATUS_KEY] = STATUS_VALIDATED
+    new_content = _frontmatter.dumps(post)
+
+    # Reuse the canonical update path so the file is rewritten, re-parsed, and
+    # entity_metadata is re-derived from frontmatter (files = source of truth).
+    directory = _Path(entity.file_path).parent.as_posix()
+    merged_metadata = {**(entity.entity_metadata or {}), SKILL_STATUS_KEY: STATUS_VALIDATED}
+
+    from memopad.schemas.base import Entity as EntitySchema
+
+    schema = EntitySchema(
+        title=entity.title,
+        directory=directory,
+        entity_type=SKILL_ENTITY_TYPE,
+        content_type=entity.content_type or "text/markdown",
+        content=new_content,
+        entity_metadata=merged_metadata,
+    )
+    updated = await entity_service.update_entity(entity, schema)
+    await search_service.index_entity(updated, background_tasks=background_tasks)
+
+    logger.info(
+        f"API v2 response: validate_skill entity_id={entity_id} promoted to validated "
+        f"(version={skill_version(updated.entity_metadata)})"
+    )
+    return {
+        "external_id": updated.external_id,
+        "ok": True,
+        "missing": [],
+        "present": result.present,
+        "skill_status": STATUS_VALIDATED,
+    }
+
+
+## CodeGraph endpoints (Tb G2)
+# Index source code into the existing Entity/Relation graph and query it. Gated
+# behind `codegraph_enabled` (default off). `impacts` is derived (reverse of
+# `calls`) at query time, never stored.
+
+
+@router.post("/codegraph/index")
+async def index_codegraph(
+    codegraph_service: CodeGraphServiceV2ExternalDep,
+    app_config: AppConfigDep,
+    root: str = Query(..., description="Absolute or project-relative path of the source tree to index"),
+    languages: list[str] | None = Query(
+        None, description="Languages to index (default: python)"
+    ),
+) -> dict:
+    """Parse a source tree and upsert code entities + relations + search rows.
+
+    Idempotent: re-running on the same tree upserts (file_path is the conflict
+    key) and replaces outgoing relations + search rows.
+    """
+    if not app_config.codegraph_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="CodeGraph is disabled (codegraph_enabled=false). "
+            "Enable MEMOPAD_CODEGRAPH_ENABLED to index code.",
+        )
+    from pathlib import Path as _Path
+
+    logger.info(f"API v2 request: index_codegraph root={root} languages={languages}")
+    try:
+        report = await codegraph_service.index_directory(
+            _Path(root), languages=set(languages) if languages else None
+        )
+    except Exception as e:  # CodeGraphError or filesystem issues
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {
+        "files": report.files,
+        "entities": report.entities,
+        "relations": report.relations,
+        "skipped": report.skipped,
+        "summary": report.render(),
+    }
+
+
+@router.get("/codegraph/find-symbol")
+async def find_symbol(
+    codegraph_service: CodeGraphServiceV2ExternalDep,
+    app_config: AppConfigDep,
+    name: str = Query(..., description="Symbol name (substring, case-insensitive)"),
+    exact: bool = Query(False, description="Require an exact title match"),
+) -> dict:
+    """Find functions/classes/modules by name."""
+    if not app_config.codegraph_enabled:
+        raise HTTPException(status_code=400, detail="CodeGraph is disabled (codegraph_enabled=false).")
+    hits = await codegraph_service.find_symbol(name, exact=exact)
+    return {
+        "symbols": [
+            {
+                "permalink": h.permalink,
+                "title": h.title,
+                "entity_type": h.entity_type,
+                "qualified_name": h.qualified_name,
+                "file": h.file,
+            }
+            for h in hits
+        ],
+        "count": len(hits),
+    }
+
+
+@router.get("/codegraph/impact-path")
+async def impact_path(
+    codegraph_service: CodeGraphServiceV2ExternalDep,
+    app_config: AppConfigDep,
+    permalink: str = Query(..., description="code:// permalink of the symbol being changed"),
+    max_hops: int = Query(5, ge=1, le=20, description="Max BFS hops"),
+) -> dict:
+    """BFS over reverse `calls`: what does changing this symbol affect?"""
+    if not app_config.codegraph_enabled:
+        raise HTTPException(status_code=400, detail="CodeGraph is disabled (codegraph_enabled=false).")
+    view = await codegraph_service._load_graph_view()
+    if permalink not in view.symbols:
+        raise HTTPException(status_code=404, detail=f"No code symbol at '{permalink}'.")
+    ip = await codegraph_service.impact_path(permalink, max_hops=max_hops)
+    return {
+        "root": permalink,
+        "impacted": [
+            {"permalink": p, "hops": ip.distances[p]}
+            for p in sorted(ip.distances, key=lambda p: (ip.distances[p], p))
+        ],
+        "count": len(ip.distances),
+        "render": ip.render(view),
+    }
+
+
+@router.get("/codegraph/context")
+async def code_context(
+    codegraph_service: CodeGraphServiceV2ExternalDep,
+    app_config: AppConfigDep,
+    permalink: str = Query(..., description="code:// permalink of the symbol"),
+    max_tokens: int = Query(0, ge=0, description="Token budget for the rendered context (0=unlimited)"),
+) -> dict:
+    """Definition + direct dependencies + direct callers for a symbol."""
+    if not app_config.codegraph_enabled:
+        raise HTTPException(status_code=400, detail="CodeGraph is disabled (codegraph_enabled=false).")
+    view = await codegraph_service._load_graph_view()
+    if permalink not in view.symbols:
+        raise HTTPException(status_code=404, detail=f"No code symbol at '{permalink}'.")
+    ctx = await codegraph_service.code_context(permalink, max_tokens=max_tokens)
+    if ctx is None:
+        raise HTTPException(status_code=404, detail=f"No code symbol at '{permalink}'.")
+    return {
+        "permalink": ctx.symbol.permalink,
+        "title": ctx.symbol.title,
+        "entity_type": ctx.symbol.entity_type,
+        "defined_in": ctx.defined_in,
+        "callers": ctx.callers,
+        "callees": ctx.callees,
+        "imports": ctx.imports,
+        "render": ctx.render(view, max_tokens=max_tokens),
+    }

@@ -155,6 +155,8 @@ from memopad.deps.services import (
     DirectoryServiceV2Dep,
     get_directory_service_v2_external,
     DirectoryServiceV2ExternalDep,
+    get_codegraph_service_v2_external,
+    CodeGraphServiceV2ExternalDep,
 )
 
 from memopad.deps.importers import (
@@ -317,6 +319,8 @@ __all__ = [
     "DirectoryServiceV2Dep",
     "get_directory_service_v2_external",
     "DirectoryServiceV2ExternalDep",
+    "get_codegraph_service_v2_external",
+    "CodeGraphServiceV2ExternalDep",
     # Importers
     "get_chatgpt_importer",
     "ChatGPTImporterDep",

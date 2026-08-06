@@ -21,16 +21,6 @@ class SkippedFileResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class SyncFailureResponse(BaseModel):
-    """A file whose sync task raised an exception (sync did not fully succeed)."""
-
-    path: str = Field(description="File path relative to project root")
-    error_class: str = Field(description="Exception class name raised by the sync task")
-    message: str = Field(description="Error message from the exception")
-
-    model_config = {"from_attributes": True}
-
-
 class SyncReportResponse(BaseModel):
     """Report of file changes found compared to database state.
 
@@ -48,10 +38,6 @@ class SyncReportResponse(BaseModel):
     )
     skipped_files: List[SkippedFileResponse] = Field(
         default_factory=list, description="Files skipped due to repeated failures"
-    )
-    failed: List[SyncFailureResponse] = Field(
-        default_factory=list,
-        description="Files whose sync task raised an exception (sync did not fully succeed)",
     )
     total: int = Field(description="Total number of changes")
 
@@ -79,14 +65,6 @@ class SyncReportResponse(BaseModel):
                     first_failed=skipped.first_failed,
                 )
                 for skipped in report.skipped_files
-            ],
-            failed=[
-                SyncFailureResponse(
-                    path=f.path,
-                    error_class=f.error_class,
-                    message=f.message,
-                )
-                for f in report.failed
             ],
             total=report.total,
         )

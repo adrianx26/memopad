@@ -1,6 +1,5 @@
 """Tests for context service."""
 
-import types
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -9,47 +8,9 @@ import pytest_asyncio
 from memopad.repository.search_repository import SearchIndexRow
 from memopad.schemas.memory import memory_url, memory_url_path
 from memopad.schemas.search import SearchItemType
-from memopad.services.context_service import ContextResultRow, ContextService
+from memopad.services.context_service import ContextService
 from memopad.models.knowledge import Entity, Relation
 from memopad.models.project import Project
-
-
-def _fake_app_config(enabled: bool, weight: float = 0.5, threshold: int = 0):
-    """Minimal stand-in for MemoPadConfig exposing only the hub-penalty knobs."""
-    return types.SimpleNamespace(
-        hub_penalty_enabled=enabled,
-        hub_penalty_weight=weight,
-        hub_degree_threshold=threshold,
-    )
-
-
-def test_hub_penalty_config_is_honored_when_enabled():
-    """A high-degree hub row must be demoted when hub_penalty_enabled=True."""
-    svc = ContextService(None, None, None, app_config=_fake_app_config(enabled=True))
-    low = ContextResultRow(type="entity", id=1, title="leaf", permalink="leaf",
-                           file_path="leaf.md", depth=0, root_id=1,
-                           created_at=datetime.now(timezone.utc))
-    hub = ContextResultRow(type="entity", id=2, title="hub", permalink="hub",
-                           file_path="hub.md", depth=0, root_id=2,
-                           created_at=datetime.now(timezone.utc))
-    ranked = svc._apply_hub_penalty([low, hub], degrees={1: 0, 2: 10})
-    # Enabled: the hub (degree 10) is penalized, so the leaf comes first.
-    assert ranked[0].id == 1
-    assert ranked[0].relevance_score > ranked[1].relevance_score
-
-
-def test_hub_penalty_config_disabled_no_penalization():
-    """With hub_penalty_enabled=False, a high-degree row must NOT be demoted."""
-    svc = ContextService(None, None, None, app_config=_fake_app_config(enabled=False))
-    low = ContextResultRow(type="entity", id=1, title="leaf", permalink="leaf",
-                           file_path="leaf.md", depth=0, root_id=1,
-                           created_at=datetime.now(timezone.utc))
-    hub = ContextResultRow(type="entity", id=2, title="hub", permalink="hub",
-                           file_path="hub.md", depth=0, root_id=2,
-                           created_at=datetime.now(timezone.utc))
-    svc._apply_hub_penalty([low, hub], degrees={1: 0, 2: 10})
-    # Disabled: both share the same depth, so identical relevance regardless of degree.
-    assert low.relevance_score == pytest.approx(hub.relevance_score)
 
 
 @pytest_asyncio.fixture

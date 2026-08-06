@@ -12,7 +12,6 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from memopad import db as db_module
 from memopad.models.knowledge import Observation
 from memopad.services.conflict_service import (
     ConflictService,
@@ -191,69 +190,3 @@ async def test_empty_observations_no_op():
 
     assert results == []
     repo.find_by_entity.assert_not_called()
-
-
-# --- Test: batched conflict writes issue a single UPDATE ---
-
-
-@pytest.mark.asyncio
-async def test_write_conflicts_batches_into_single_update():
-    """_write_conflicts must emit ONE execute() (a batched CASE UPDATE), not 2N.
-
-    Regression guard for the 4.4 batching: previously it issued two UPDATEs per
-    conflict pair (one per side). Now one statement covers every flagged row.
-    """
-    from memopad.services.conflict_service import ConflictResult
-
-    service, repo = _make_service()
-
-    captured = []
-
-    class _FakeSession:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return False
-
-        async def execute(self, stmt):
-            captured.append(stmt)
-
-    fake_session = _FakeSession()
-    with patch.object(
-        db_module, "scoped_session", return_value=fake_session
-    ), patch.object(service.observation_repository, "session_maker", fake_session):
-        results = [
-            ConflictResult(obs_a_id=1, obs_b_id=2, score=0.9),
-            ConflictResult(obs_a_id=3, obs_b_id=4, score=0.8),
-        ]
-        await service._write_conflicts(results, provenance_path="notes/x.md")
-
-    # Exactly one batched UPDATE — not one per side per pair.
-    assert len(captured) == 1
-
-
-@pytest.mark.asyncio
-async def test_write_conflicts_empty_is_noop():
-    service, repo = _make_service()
-
-    captured = []
-
-    class _FakeSession:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return False
-
-        async def execute(self, stmt):
-            captured.append(stmt)
-
-    fake_session = _FakeSession()
-    with patch.object(
-        db_module, "scoped_session", return_value=fake_session
-    ) as mock_scoped:
-        await service._write_conflicts([], provenance_path=None)
-
-        assert captured == []
-        mock_scoped.assert_not_called()

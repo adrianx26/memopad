@@ -183,24 +183,6 @@ class TwoQueueCache(Generic[K, V]):
         self.a1.clear()
         self.am.clear()
         logger.debug(f"Cleared 2Q cache ({cleared} entries)")
-
-    def remove(self, key: K) -> bool:
-        """Remove a single key without disturbing the rest of the cache.
-
-        Returns True if the key was present. Used for targeted invalidation so a
-        single file change doesn't evict the whole (warm) cache — the original
-        implementation only offered clear(), forcing callers to nuke everything.
-        Safe with the 2Q invariant: deletion doesn't affect promotion accounting.
-        """
-        if key in self.am:
-            del self.am[key]
-            logger.trace(f"2Q remove (Am): {key}")
-            return True
-        if key in self.a1:
-            del self.a1[key]
-            logger.trace(f"2Q remove (A1): {key}")
-            return True
-        return False
     
     def __len__(self) -> int:
         """Return total number of cached items."""

@@ -6,12 +6,12 @@
     "url": "https://github.com/adrianx26/memopad.git",
     "source": "github"
   },
-  "version": "0.19.0",
+  "version": "0.20.1",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "memopad",
-      "version": "0.19.0",
+      "version": "0.20.1",
       "runtimeHint": "uvx",
       "runtimeArguments": [
         {

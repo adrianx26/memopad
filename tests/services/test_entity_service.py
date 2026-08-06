@@ -14,11 +14,7 @@ from memopad.repository import EntityRepository
 from memopad.schemas import Entity as EntitySchema
 from memopad.services import FileService
 from memopad.services.entity_service import EntityService
-from memopad.services.exceptions import (
-    EntityCreationError,
-    EntityNotFoundError,
-    EntityUpdateError,
-)
+from memopad.services.exceptions import EntityCreationError, EntityNotFoundError
 from memopad.services.search_service import SearchService
 from memopad.utils import generate_permalink
 
@@ -1764,9 +1760,7 @@ async def test_move_entity_rollback_on_database_failure(
     entity_repository.update = failing_update
 
     try:
-        # DB update returning None now surfaces a typed EntityUpdateError (not the
-        # bare ValueError it used to wrap), and the filesystem move is rolled back.
-        with pytest.raises(EntityUpdateError):
+        with pytest.raises(ValueError, match="Move failed:"):
             await entity_service.move_entity(
                 identifier=entity.permalink,
                 destination_path="moved/test-note.md",

@@ -173,8 +173,8 @@ MEMOPAD_FORCE_LOCAL=true memopad mcp
    - Check that the MCP extension is properly installed
 
 3. **Notes not saving:**
-   - Check `~/memopad/memopad.log` for errors
-   - Verify file permissions on `~/memopad/` directory
+   - Check `~/.memopad/memopad.log` for errors
+   - Verify file permissions on `~/.memopad/` directory
 
 4. **Sync issues:**
    - Run `memopad doctor` to check consistency
@@ -182,11 +182,11 @@ MEMOPAD_FORCE_LOCAL=true memopad mcp
 
 ### Log Location
 
-Logs are stored at: `~/memopad/memopad.log`
+Logs are stored at: `~/.memopad/memopad.log`
 
 ```bash
 # View log file
-tail -f ~/memopad/memopad.log
+tail -f ~/.memopad/memopad.log
 ```
 
 ## Uninstallation
@@ -210,7 +210,7 @@ uv tool uninstall memopad
 
 ```bash
 # Remove notes and configuration
-rm -rf ~/memopad
+rm -rf ~/.memopad
 ```
 
 ## Next Steps

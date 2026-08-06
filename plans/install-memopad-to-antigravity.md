@@ -83,7 +83,7 @@ docker build -t memopad-mcp:latest .
     "-v",
     "f:\\:/mnt/f",
     "-v",
-    "%USERPROFILE%\\memopad:/root/memopad",
+    "%USERPROFILE%\\.memopad:/root/.memopad",
     "memopad-mcp:latest",
     "memopad",
     "mcp"
@@ -236,5 +236,5 @@ To use a custom directory for MemoPad:
 ## Troubleshooting
 
 1. **Command not found**: Ensure `uv` is installed and in PATH
-2. **Permission errors**: Check file permissions for `~/memopad` directory
+2. **Permission errors**: Check file permissions for `~/.memopad` directory
 3. **Sync issues**: Run `memopad doctor` to diagnose problems

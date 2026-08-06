@@ -139,20 +139,13 @@ def app_config(config_home, db_backend, postgres_container, monkeypatch) -> Memo
 def config_manager(app_config: MemoPadConfig, config_home: Path, monkeypatch) -> ConfigManager:
     # Invalidate config cache to ensure clean state for each test
     from memopad import config as config_module
-    from memopad.config import DATA_DIR_NAME
 
-    # The real cache is the module-level ``_config_cache`` instance; the old
-    # ``_CONFIG_CACHE`` attribute never existed, so assigning to it was a
-    # silent no-op that let stale configs leak across tests.
-    config_module.clear_config_cache()
+    config_module._CONFIG_CACHE = None
 
     # Create a new ConfigManager that uses the test home directory
     config_manager = ConfigManager()
-    # Update its paths to use the test directory. Match production
-    # (``ConfigManager.__init__`` uses ``home / DATA_DIR_NAME``) so the fresh
-    # ``ConfigManager()`` constructed in e.g. ``WatchService.handle_changes``
-    # reads back the config we save below.
-    config_manager.config_dir = config_home / DATA_DIR_NAME
+    # Update its paths to use the test directory
+    config_manager.config_dir = config_home / ".memopad"
     config_manager.config_file = config_manager.config_dir / "config.json"
     config_manager.config_dir.mkdir(parents=True, exist_ok=True)
 
@@ -378,7 +371,6 @@ async def entity_service(
         entity_parser=entity_parser,
         entity_repository=entity_repository,
         observation_repository=observation_repository,
-        alias_repository=entity_alias_repository,
         relation_repository=relation_repository,
         file_service=file_service,
         link_resolver=link_resolver,
@@ -431,8 +423,11 @@ async def sync_service(
         entity_repository=entity_repository,
         relation_repository=relation_repository,
         entity_parser=entity_parser,
-        search_service=search_service,
         file_service=file_service,
+        link_resolver=link_resolver,
+        conflict_service=ConflictService(observation_repository),
+        schema_service=SchemaService(observation_schema_repository),
+        alias_repository=entity_alias_repository,
     )
 
 

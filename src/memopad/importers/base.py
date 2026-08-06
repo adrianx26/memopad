@@ -46,10 +46,7 @@ class Importer(Generic[T]):
         """Import data from source file to destination folder.
 
         Args:
-            source_data: Source data to import. Most concrete importers expect
-                already-parsed/deserialized data (callers load the file first);
-                a few (e.g. MarkdownImporter) accept a directory path. See each
-                subclass docstring for the exact contract.
+            source_path: Path to the source file.
             destination_folder: Destination folder within the project.
             **kwargs: Additional keyword arguments for specific import types.
 

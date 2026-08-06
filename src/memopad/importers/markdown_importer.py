@@ -7,7 +7,6 @@ from typing import Any, Optional
 from memopad.markdown.entity_parser import EntityParser
 from memopad.importers.base import Importer
 from memopad.schemas.importer import EntityImportResult
-from memopad.utils import generate_permalink
 
 logger = logging.getLogger(__name__)
 
@@ -54,11 +53,10 @@ class MarkdownImporter(Importer[EntityImportResult]):
             entities_created = 0
             relations_count = 0
             skipped_entities = 0
-            errors: list[str] = []
 
             # Find all markdown files recursively
             md_files = list(source_path.rglob("*.md"))
-
+            
             # Temporary parser just to read/normalize the frontmatter and content structure
             parser = EntityParser(source_path)
 
@@ -85,24 +83,7 @@ class MarkdownImporter(Importer[EntityImportResult]):
 
                     # Determine file path
                     file_path = f"{destination_folder}/{rel_path.as_posix()}" if destination_folder else rel_path.as_posix()
-
-                    # Re-resolve the permalink against the destination path so the
-                    # imported copy doesn't carry a source-derived permalink (which
-                    # would point back at the source vault instead of its new home).
-                    # The parser was constructed against the source tree, so without
-                    # this the entity's frontmatter permalink reflects the source.
-                    dest_permalink = generate_permalink(file_path)
-                    if entity.frontmatter is None:
-                        # parse_markdown_content always returns frontmatter, but guard
-                        # so a malformed source file can't crash the import.
-                        from memopad.markdown.schemas import EntityFrontmatter
-
-                        entity.frontmatter = EntityFrontmatter(metadata={"permalink": dest_permalink})
-                    else:
-                        if entity.frontmatter.metadata is None:
-                            entity.frontmatter.metadata = {}
-                        entity.frontmatter.metadata["permalink"] = dest_permalink
-
+                    
                     # Rewrite the entity so it gets consistent frontmatter and formatting
                     await self.write_entity(entity, file_path)
                     
@@ -112,7 +93,6 @@ class MarkdownImporter(Importer[EntityImportResult]):
                 except Exception as e:
                     logger.warning(f"Failed to import file {md_file}: {e}")
                     skipped_entities += 1
-                    errors.append(f"{md_file}: {e}")
 
             return EntityImportResult(
                 import_count={"entities": entities_created, "relations": relations_count, "skipped": skipped_entities},
@@ -120,7 +100,6 @@ class MarkdownImporter(Importer[EntityImportResult]):
                 entities=entities_created,
                 relations=relations_count,
                 skipped_entities=skipped_entities,
-                errors=errors,
             )
 
         except Exception as e:

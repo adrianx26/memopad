@@ -181,6 +181,121 @@ class MemoPadConfig(BaseSettings):
         ge=0,
     )
 
+    # --- Levels (L0–L3) & Tb-derived memory features ---
+    # These are opt-in feature flags. All default to False so existing flows are
+    # untouched until a user explicitly enables them (MEMOPAD_LEVELS_ENABLED=true, etc.).
+    # See `memopad-levels-implementation-plan.md` and `tb-borrow-implementation-plan.md`.
+    levels_enabled: bool = Field(
+        default=False,
+        description="Enable L0–L3 memory levels: provenance enforcement (source_entities), "
+        "level-aware ranking, and the distillation pipeline hooks. Off = current behavior.",
+    )
+    skills_enabled: bool = Field(
+        default=False,
+        description="Enable the 'skill' asset type (versioned, trigger/steps/validation). "
+        "Off = skill entities are treated as ordinary notes.",
+    )
+    codegraph_enabled: bool = Field(
+        default=False,
+        description="Enable CodeGraph: indexing code symbols and call/impact relations into "
+        "the knowledge graph. Off = code files are not indexed as entities.",
+    )
+    shortterm_enabled: bool = Field(
+        default=False,
+        description="Enable in-task short-term context layering (refs -> steps -> Mermaid canvas). "
+        "Off = no per-session context offload.",
+    )
+    # --- Short-term layering ratios (Tb G6) ---
+    # Only consulted when shortterm_enabled is on. The budget is the agent's
+    # context window (in approximate tokens); offload triggers when raw session
+    # content crosses the ratios. 0 budget = store layers without compressing.
+    shortterm_context_token_budget: int = Field(
+        default=0,
+        description="Approximate token budget for the in-task context window. Raw session "
+        "content is offloaded/compressed as it crosses the ratios below. 0 = store only, "
+        "no compression (Tb G6).",
+        ge=0,
+    )
+    shortterm_mild_offload_ratio: float = Field(
+        default=0.5,
+        description="At this fraction of the token budget, raw refs are offloaded to disk and "
+        "only step summaries are injected (drill-down reaches the raw refs).",
+        ge=0.0,
+        le=1.0,
+    )
+    shortterm_aggressive_compress_ratio: float = Field(
+        default=0.85,
+        description="At this fraction of the token budget, the Mermaid canvas is regenerated "
+        "and becomes the primary injected layer (steps become drill-downable).",
+        ge=0.0,
+        le=1.0,
+    )
+    shortterm_mmd_max_token_ratio: float = Field(
+        default=0.2,
+        description="The Mermaid canvas is capped at this fraction of the token budget.",
+        ge=0.0,
+        le=1.0,
+    )
+    levels_pipeline_automatic: bool = Field(
+        default=False,
+        description="Enable the reactive distillation scheduler (Tb G3): event-driven "
+        "trigger cadences, idle timeout, and warmup. Off = distillation stays manual. "
+        "Requires levels_enabled. The scheduler emits trigger decisions; actual distillation "
+        "is performed by a callback (default no-op until the distiller lands).",
+    )
+    # --- Distillation cadences (Tb G3) ---
+    # Only consulted when levels_pipeline_automatic is on. Zero means the given
+    # trigger is disabled. Defaults match the implementation plan.
+    pipeline_every_n_conversations: int = Field(
+        default=5,
+        description="Distill L1 after this many new memories are ingested. 0 = disabled.",
+        ge=0,
+    )
+    pipeline_max_memories_per_session: int = Field(
+        default=20,
+        description="Cap on memories consumed per distillation pass (anti-pollution guard).",
+        ge=1,
+    )
+    pipeline_l1_idle_timeout_seconds: int = Field(
+        default=600,
+        description="If idle for this many seconds, run an L1 pass anyway. 0 = disabled.",
+        ge=0,
+    )
+    pipeline_l2_min_interval_seconds: int = Field(
+        default=900,
+        description="Minimum seconds between L2 (scenario) triggers (debounce). 0 = no debounce.",
+        ge=0,
+    )
+    pipeline_persona_trigger_every_n: int = Field(
+        default=50,
+        description="Regenerate the L3 persona after this many new memories. 0 = disabled.",
+        ge=0,
+    )
+    pipeline_enable_warmup: bool = Field(
+        default=True,
+        description="New-session warmup: progressively widen retrieval as the session grows "
+        "(1 -> 2 -> 4 -> ... up to N) rather than cold-starting at full depth.",
+    )
+
+    # --- Retrieval budget (Tb G4: per-memory cap + graceful timeout) ---
+    # 0 means disabled (current behavior). Opt-in via config/env to avoid changing
+    # retrieval semantics for existing deployments.
+    recall_max_chars_per_memory: int = Field(
+        default=0,
+        description="Maximum characters injected per individual memory item at context-build "
+        "time. 0 = disabled (no truncation). Tb-derived: prevents a single large "
+        "memory from exhausting the token budget.",
+        ge=0,
+    )
+    recall_timeout_ms: int = Field(
+        default=0,
+        description="Hard timeout in milliseconds for context retrieval (search + graph "
+        "traversal + observation fetch). 0 = disabled. On timeout, retrieval degrades "
+        "gracefully: it returns whatever was gathered so far instead of failing the "
+        "conversation. Tb-derived.",
+        ge=0,
+    )
+
     skip_initialization_sync: bool = Field(
         default=False,
         description="Skip expensive initialization synchronization. Useful for cloud/stateless deployments where project reconciliation is not needed.",

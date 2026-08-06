@@ -1,28 +1,6 @@
-"""Tests for runtime mode resolution.
-
-NOTE: every test in this module exercises the ``cloud_mode`` runtime path
-(``RuntimeMode.CLOUD``, ``is_cloud``, ``resolve_runtime_mode(cloud_mode_enabled=...)``)
-which is a PLANNED FUTURE COMMERCIAL-TIER feature and is NOT implemented in this
-branch. The local-only ``memopad.runtime`` has only ``LOCAL``/``TEST`` and no
-``cloud_mode_enabled`` parameter, so these tests fail today with
-``AttributeError``/``TypeError``. They are kept as the spec for the cloud build
-and marked xfail so they don't pollute the test signal. Remove these marks when
-the cloud build lands (the tests will flip to XPASS as a reminder).
-"""
-
-import pytest
+"""Tests for runtime mode resolution."""
 
 from memopad.runtime import RuntimeMode, resolve_runtime_mode
-
-# cloud_mode is a planned future commercial-tier feature; not implemented here.
-# Expected to fail with AttributeError (no RuntimeMode.CLOUD / is_cloud),
-# TypeError (no cloud_mode_enabled kwarg), or ValueError. A failure for any
-# OTHER reason is a real regression and will still surface as a hard failure.
-pytestmark = pytest.mark.xfail(
-    strict=False,
-    raises=(AttributeError, TypeError, ValueError),
-    reason="cloud_mode is a planned future commercial-tier feature; not yet implemented",
-)
 
 
 class TestRuntimeMode:

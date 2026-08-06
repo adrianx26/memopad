@@ -15,18 +15,6 @@ from memopad.schemas import (
 from memopad.services.project_service import ProjectService
 from memopad.config import ConfigManager
 
-# cloud_mode is a planned future commercial-tier feature; not implemented here
-# (MemoPadConfig has no ``cloud_mode`` field). The cloud-mode remove_project
-# tests below are the spec for that build and are marked xfail so they don't
-# pollute the signal. Remove these marks when the cloud build lands (tests flip
-# to XPASS as a reminder). Expected failures are AttributeError/ValueError on
-# the missing config field; a failure for any OTHER reason is a real regression.
-_CLOUD_MODE_XFAIL = pytest.mark.xfail(
-    strict=False,
-    raises=(AttributeError, TypeError, ValueError),
-    reason="cloud_mode is a planned future commercial-tier feature; not yet implemented",
-)
-
 
 def test_projects_property(project_service: ProjectService):
     """Test the projects property."""
@@ -1363,7 +1351,6 @@ async def test_remove_project_delete_notes_missing_directory(project_service: Pr
 
 
 @pytest.mark.asyncio
-@_CLOUD_MODE_XFAIL
 async def test_remove_project_cloud_mode_uses_database_not_config(project_service: ProjectService):
     """Test that in cloud mode, remove_project only checks database for default status.
 
@@ -1418,7 +1405,6 @@ async def test_remove_project_cloud_mode_uses_database_not_config(project_servic
 
 
 @pytest.mark.asyncio
-@_CLOUD_MODE_XFAIL
 async def test_remove_project_local_mode_checks_both_config_and_database(
     project_service: ProjectService,
 ):
@@ -1478,7 +1464,6 @@ async def test_remove_project_local_mode_checks_both_config_and_database(
 
 
 @pytest.mark.asyncio
-@_CLOUD_MODE_XFAIL
 async def test_remove_project_rejects_database_default_in_both_modes(
     project_service: ProjectService,
 ):

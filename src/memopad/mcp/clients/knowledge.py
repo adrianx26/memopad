@@ -6,7 +6,6 @@ Encapsulates all /v2/projects/{project_id}/knowledge/* endpoints.
 from typing import Any
 
 from httpx import AsyncClient
-from mcp.server.fastmcp.exceptions import ToolError
 
 from memopad.mcp.tools.utils import call_get, call_post, call_put, call_patch, call_delete
 from memopad.schemas.response import (
@@ -15,7 +14,6 @@ from memopad.schemas.response import (
     DirectoryMoveResult,
     DirectoryDeleteResult,
 )
-from memopad.services.exceptions import EntityAlreadyExistsError
 
 
 class KnowledgeClient:
@@ -57,29 +55,15 @@ class KnowledgeClient:
             EntityResponse with created entity details
 
         Raises:
-            ToolError: If the request fails.
-            EntityAlreadyExistsError: If the server responds 409 Conflict (the entity
-                already exists). Lets callers branch on "already exists" via a typed
-                exception instead of string-matching the error message or HTTP status.
+            ToolError: If the request fails
         """
         params = {"fast": fast} if fast is not None else None
-        try:
-            response = await call_post(
-                self.http_client,
-                f"{self._base_path}/entities",
-                json=entity_data,
-                params=params,
-            )
-        except ToolError as e:
-            # call_post wraps the real httpx HTTPStatusError as ToolError.__cause__.
-            # Surface a 409 as a typed EntityAlreadyExistsError so callers don't have
-            # to grep the message for "conflict"/"already exists" (fragile across
-            # transports and locales).
-            cause = getattr(e, "__cause__", None)
-            status = getattr(getattr(cause, "response", None), "status_code", None)
-            if status == 409:
-                raise EntityAlreadyExistsError(str(e) or "Entity already exists") from e
-            raise
+        response = await call_post(
+            self.http_client,
+            f"{self._base_path}/entities",
+            json=entity_data,
+            params=params,
+        )
         return EntityResponse.model_validate(response.json())
 
     async def update_entity(
@@ -252,6 +236,134 @@ class KnowledgeClient:
         response = await call_get(
             self.http_client,
             f"{self._base_path}/entities/{entity_id}/backlinks",
+        )
+        return response.json()
+
+    async def drill_down(
+        self,
+        entity_id: str,
+        *,
+        target_level: str = "L0",
+        max_depth: int = 5,
+    ) -> dict:
+        """Trace a distilled memory back to its ground-truth sources (Tb G5).
+
+        Args:
+            entity_id: Entity external_id (UUID) to trace from.
+            target_level: Stop descending at this level (L0|L1|L2|L3). Default L0.
+            max_depth: Safety bound on recursion depth (1–10). Default 5.
+
+        Returns:
+            Dict with `chain` (rendered Markdown), `nodes` (structured tree),
+            `target_*` metadata, and `source_entities`.
+        """
+        params = {"target_level": target_level, "max_depth": max_depth}
+        response = await call_get(
+            self.http_client,
+            f"{self._base_path}/entities/{entity_id}/drill-down",
+            params=params,
+        )
+        return response.json()
+
+    # --- Skill asset (Tb G1) ---
+
+    async def list_skills(
+        self, *, status: str | None = None, limit: int = 50, offset: int = 0
+    ) -> dict:
+        """List skill entities, optionally filtered by `skill_status`.
+
+        Args:
+            status: Optional `draft` | `validated` | `deprecated` filter.
+            limit/offset: Pagination.
+
+        Returns:
+            Dict with `skills` (list of summary dicts) and `count`.
+        """
+        params: dict = {"limit": limit, "offset": offset}
+        if status:
+            params["status"] = status
+        response = await call_get(self.http_client, f"{self._base_path}/skills", params=params)
+        return response.json()
+
+    async def validate_skill(self, entity_id: str) -> dict:
+        """Structurally validate a skill and set its status to `validated`.
+
+        Args:
+            entity_id: Skill entity external_id (UUID).
+
+        Returns:
+            Dict with `ok`, `missing`, `present`, `skill_status`, and the
+            updated entity `external_id`. Raises ToolError on 4xx.
+        """
+        response = await call_post(
+            self.http_client, f"{self._base_path}/skills/{entity_id}/validate"
+        )
+        return response.json()
+
+    # --- CodeGraph (Tb G2) ---
+
+    async def index_codegraph(
+        self, root: str, *, languages: list[str] | None = None
+    ) -> dict:
+        """Index a source tree into the code graph (entities + relations + search).
+
+        Args:
+            root: Absolute or project-relative path of the source tree.
+            languages: Optional language list (default: python).
+
+        Returns:
+            Dict with `files`, `entities`, `relations`, `skipped`, `summary`.
+        """
+        params: dict = {"root": root}
+        if languages:
+            params["languages"] = languages
+        response = await call_post(
+            self.http_client, f"{self._base_path}/codegraph/index", params=params
+        )
+        return response.json()
+
+    async def find_symbol(
+        self, name: str, *, exact: bool = False
+    ) -> dict:
+        """Find code symbols (functions/classes/modules) by name.
+
+        Returns:
+            Dict with `symbols` (permalink, title, entity_type, qualified_name)
+            and `count`.
+        """
+        params = {"name": name, "exact": str(exact).lower()}
+        response = await call_get(
+            self.http_client, f"{self._base_path}/codegraph/find-symbol", params=params
+        )
+        return response.json()
+
+    async def impact_path(
+        self, permalink: str, *, max_hops: int = 5
+    ) -> dict:
+        """BFS over reverse `calls`: what does changing `permalink` affect?
+
+        Returns:
+            Dict with `root`, `impacted` (list of {permalink, hops}), `count`,
+            and `render` (markdown).
+        """
+        params = {"permalink": permalink, "max_hops": max_hops}
+        response = await call_get(
+            self.http_client, f"{self._base_path}/codegraph/impact-path", params=params
+        )
+        return response.json()
+
+    async def code_context(
+        self, permalink: str, *, max_tokens: int = 0
+    ) -> dict:
+        """Definition + direct dependencies + direct callers for a symbol.
+
+        Returns:
+            Dict with `permalink`, `title`, `defined_in`, `callers`, `callees`,
+            `imports`, and `render` (markdown).
+        """
+        params = {"permalink": permalink, "max_tokens": max_tokens}
+        response = await call_get(
+            self.http_client, f"{self._base_path}/codegraph/context", params=params
         )
         return response.json()
 

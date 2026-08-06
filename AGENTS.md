@@ -240,6 +240,13 @@ See SPEC-16 for full context manager refactor details.
 **Local Commands:**
 - Check sync status: `memopad status`
 - Doctor check (file <-> DB loop): `memopad doctor`
+    - Prints the state of the Tb-borrowed feature flags (G1–G7) at the start
+      of every run, and in `--project NAME` mode runs lightweight health probes
+      for any enabled capabilities (skill counts, short-term session disk usage,
+      CodeGraph/levels/scheduler hints). The CodeGraph hint notes that
+      `memopad watch` auto-reindexes the code graph on source-file changes and
+      `index_code` is the manual fallback. Informational only — never changes the
+      exit code. `--fix` reconciles file ↔ DB drift via a force_full sync.
 - Import from Claude: `memopad import claude conversations`
 - Import from ChatGPT: `memopad import chatgpt`
 - Import from Memory JSON: `memopad import memory-json`
@@ -294,6 +301,32 @@ See SPEC-16 for full context manager refactor details.
   **ChatGPT-Compatible Tools:**
     - `search(query)` - Search across knowledge base (OpenAI actions compatible)
     - `fetch(id)` - Fetch full content of a search result document
+
+  **Tb-Borrowed Tools** (all gated by feature flags, default off — see
+  `tb-borrow-implementation-plan.md` and `tb-borrow-progress.md`):
+    - *G5 provenance:* `drill_down(identifier, target_level, max_depth)` - Trace a
+      distilled memory (L1/L2/L3) back to its ground-truth L0 sources via
+      frontmatter `source_entities` + `derived_from` relations.
+    - *G1 skill asset:* `create_skill`, `get_skill`, `list_skills`,
+      `validate_skill` - Versioned skill entities (trigger/steps/validation) with
+      structural validation + status promotion. Gated by `skills_enabled`.
+    - *G6 short-term layering:* `add_session_ref`, `add_session_step`,
+      `get_session_context`, `drill_down_session`, `finalize_session` - Per-session
+      3-layer context (refs -> steps -> Mermaid canvas) with token-budget offload.
+      Gated by `shortterm_enabled`.
+    - *G2 CodeGraph:* `index_code`, `find_symbol`, `impact_path`, `code_context` -
+      Index source code into the graph (file/function/class/module + calls/
+      defined_in/imports) and query impact paths. Gated by `codegraph_enabled`.
+      When the flag is on, `memopad watch` also auto-reindexes the code graph
+      (full-tree, idempotent) at the end of a change batch that touches source
+      files; `index_code` remains the manual fallback when watch is off or a
+      reindex fails. Reindex is fully idempotent: it upserts the current symbols,
+      replaces every upserted symbol's outgoing relations (so vanished calls are
+      cleared), and prunes the file/module/function/class entities whose source
+      no longer exists — DB cascade drops their observations + both-direction
+      relations, and the search row is removed explicitly. Relation loading is
+      project-scoped (`project_id` filter) so multiple code-graph-indexed
+      projects in one DB don't cross-contaminate `impact_path`/`code_context`.
 
 - MCP Prompts for better AI interaction:
     - `ai_assistant_guide()` - Guidance on effectively using MemoPad tools for AI assistants

@@ -68,21 +68,6 @@ async def batch_import_directory(
         )
 
         if result.success:
-            lines = [
-                "# Batch Import Complete",
-                "",
-                f"- **Entities Imported**: {result.entities}",
-                f"- **Relations Extracted**: {result.relations}",
-                f"- **Files Skipped**: {result.skipped_entities}",
-            ]
-            # Surface the per-file errors the importer collected (previously these
-            # were only logged and lost), so the caller knows what actually failed.
-            errors = getattr(result, "errors", None) or []
-            if errors:
-                lines.append("")
-                lines.append(f"## Errors ({len(errors)})")
-                for err in errors:
-                    lines.append(f"- {err}")
-            return "\n".join(lines)
+            return f"# Batch Import Complete\n\n- **Entities Imported**: {result.entities}\n- **Relations Extracted**: {result.relations}\n- **Files Skipped**: {result.skipped_entities}"
         else:
             return f"# Batch Import Failed\n\n{result.error_message}"

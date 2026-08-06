@@ -34,9 +34,7 @@ class ClaudeConversationsImporter(Importer[ChatImportResult]):
         """Import conversations from Claude JSON export.
 
         Args:
-            source_data: Parsed/deserialized Claude export — an iterable of
-                conversation dicts (callers json.load the file before passing it
-                in; this method does not read a path from disk).
+            source_data: Path to the Claude conversations.json file.
             destination_folder: Destination folder within the project.
             **kwargs: Additional keyword arguments.
 

@@ -1,4 +1,4 @@
-"""Service for syncing files between filesystem and database."""
+﻿"""Service for syncing files between filesystem and database."""
 
 import asyncio
 import os
@@ -40,6 +40,7 @@ MAX_CONSECUTIVE_FAILURES = 3
 MAX_CONCURRENT_SYNCS = 10  # Limit concurrent file operations to prevent resource exhaustion
 
 
+
 @dataclass
 class FileFailureInfo:
     """Track failure information for a file that repeatedly fails to sync.
@@ -77,19 +78,6 @@ class SkippedFile:
 
 
 @dataclass
-class SyncFailure:
-    """A file whose sync task raised an exception.
-
-    Surfaced on SyncReport.failed so callers can tell that a sync did not fully
-    succeed (previously these were only logged and silently dropped).
-    """
-
-    path: str
-    error_class: str
-    message: str
-
-
-@dataclass
 class SyncReport:
     """Report of file changes found compared to database state.
 
@@ -101,7 +89,6 @@ class SyncReport:
         moves: Files that have been moved from one location to another
         checksums: Current checksums for files on disk
         skipped_files: Files that were skipped due to repeated failures
-        failed: Files whose sync task raised an exception (not just skipped)
     """
 
     # We keep paths as strings in sets/dicts for easier serialization
@@ -111,7 +98,6 @@ class SyncReport:
     moves: Dict[str, str] = field(default_factory=dict)  # old_path -> new_path
     checksums: Dict[str, str] = field(default_factory=dict)  # path -> checksum
     skipped_files: List[SkippedFile] = field(default_factory=list)
-    failed: List[SyncFailure] = field(default_factory=list)
 
     @property
     def total(self) -> int:
@@ -277,16 +263,16 @@ class SyncService:
         cached_checksum: Optional[str] = None,
     ) -> Tuple[Optional[Entity], Optional[str]]:
         """Sync a file with semaphore-controlled concurrency.
-
+        
         This wrapper enables parallel processing while limiting concurrent operations
         to prevent resource exhaustion (memory, file handles, database connections).
-
+        
         Args:
             semaphore: Semaphore to limit concurrent operations
             path: File path to sync
             new: Whether this is a new file
             cached_checksum: Pre-calculated checksum if available
-
+        
         Returns:
             Tuple of (entity, checksum) or (None, None) on failure
         """
@@ -342,74 +328,61 @@ class SyncService:
         # Sync new and modified files in parallel with controlled concurrency
         # Create semaphore to limit concurrent operations
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_SYNCS)
-
+        
         # Build tasks for all new files
         new_tasks = [
             self._sync_file_with_semaphore(
-                semaphore, path, new=True, cached_checksum=report.checksums.get(path)
+                semaphore,
+                path,
+                new=True,
+                cached_checksum=report.checksums.get(path)
             )
             for path in report.new
         ]
-
+        
         # Build tasks for all modified files
         modified_tasks = [
             self._sync_file_with_semaphore(
-                semaphore, path, new=False, cached_checksum=report.checksums.get(path)
+                semaphore,
+                path,
+                new=False,
+                cached_checksum=report.checksums.get(path)
             )
             for path in report.modified
         ]
-
-        # Buffer embedding writes across the parallel file sync so the sweep makes
-        # ceil(total_items / batch_size) model calls instead of one per file
-        # (Fix 4). Combined with content-hash dedup (Fix 2) and off-loop inference
-        # (Fix 1), this is what keeps a large first-time sync from pegging the
-        # CPU. Flushed in the finally so a task failure can't strand the buffer.
-        self.search_service.begin_embedding_batch()
-        try:
-            # Execute all tasks in parallel (respecting semaphore limit)
-            if new_tasks or modified_tasks:
-                logger.info(
-                    f"Starting parallel sync: {len(new_tasks)} new files, "
-                    f"{len(modified_tasks)} modified files "
-                    f"(max {MAX_CONCURRENT_SYNCS} concurrent)"
-                )
-
-                all_tasks = new_tasks + modified_tasks
-                results = await asyncio.gather(*all_tasks, return_exceptions=True)
-
-                # Process results and track skipped files
-                all_paths = list(report.new) + list(report.modified)
-                for path, result in zip(all_paths, results):
-                    if isinstance(result, Exception):
-                        # Task raised an exception — record it on the report so callers
-                        # can tell the sync did not fully succeed (previously only logged).
-                        logger.error(f"Sync task failed for {path}: {result}")
-                        report.failed.append(
-                            SyncFailure(
-                                path=path,
-                                error_class=type(result).__name__,
-                                message=str(result),
-                            )
+        
+        # Execute all tasks in parallel (respecting semaphore limit)
+        if new_tasks or modified_tasks:
+            logger.info(
+                f"Starting parallel sync: {len(new_tasks)} new files, "
+                f"{len(modified_tasks)} modified files "
+                f"(max {MAX_CONCURRENT_SYNCS} concurrent)"
+            )
+            
+            all_tasks = new_tasks + modified_tasks
+            results = await asyncio.gather(*all_tasks, return_exceptions=True)
+            
+            # Process results and track skipped files
+            all_paths = list(report.new) + list(report.modified)
+            for path, result in zip(all_paths, results):
+                if isinstance(result, Exception):
+                    # Task raised an exception
+                    logger.error(f"Sync task failed for {path}: {result}")
+                    continue
+                
+                entity, checksum = result
+                
+                # Track if file was skipped
+                if entity is None and await self._should_skip_file(path):
+                    failure_info = self._file_failures[path]
+                    report.skipped_files.append(
+                        SkippedFile(
+                            path=path,
+                            reason=failure_info.last_error,
+                            failure_count=failure_info.count,
+                            first_failed=failure_info.first_failure,
                         )
-                        continue
-
-                    entity, checksum = result
-
-                    # Track if file was skipped
-                    if entity is None and await self._should_skip_file(path):
-                        failure_info = self._file_failures[path]
-                        report.skipped_files.append(
-                            SkippedFile(
-                                path=path,
-                                reason=failure_info.last_error,
-                                failure_count=failure_info.count,
-                                first_failed=failure_info.first_failure,
-                            )
-                        )
-        finally:
-            # Drain any buffered embeddings even if a sync task raised, so changed
-            # files that did complete still get their vectors.
-            await self.search_service.flush_embedding_buffer()
+                    )
 
         # Only resolve relations if there were actual changes
         # If no files changed, no new unresolved relations could have been created
@@ -549,8 +522,7 @@ class SyncService:
         # Step 3a: Batch fetch all entities for files being scanned (eliminates N+1 queries)
         logger.debug(f"Batch fetching entities for {len(file_paths_to_scan)} files")
         db_entities = await self.entity_repository.get_by_file_paths_batch(
-            file_paths_to_scan,
-            eager_load=False,  # We only need basic info for scanning
+            file_paths_to_scan, eager_load=False  # We only need basic info for scanning
         )
         db_entity_map = {entity.file_path: entity for entity in db_entities}
         logger.debug(f"Fetched {len(db_entities)} existing entities from database")
@@ -760,7 +732,7 @@ class SyncService:
         file_contains_frontmatter = has_frontmatter(file_content)
 
         # Get file timestamps for tracking modification times
-        file_metadata = await self.file_service.get_file_metadata(path, use_cache=False)
+        file_metadata = await self.file_service.get_file_metadata(path)
         created = file_metadata.created_at
         modified = file_metadata.modified_at
 
@@ -846,7 +818,7 @@ class SyncService:
             await self.entity_service.resolve_permalink(path, skip_conflict_check=True)
 
             # get file timestamps
-            file_metadata = await self.file_service.get_file_metadata(path, use_cache=False)
+            file_metadata = await self.file_service.get_file_metadata(path)
             created = file_metadata.created_at
             modified = file_metadata.modified_at
 
@@ -888,9 +860,7 @@ class SyncService:
                         raise ValueError(f"Entity not found after constraint violation: {path}")
 
                     # Re-get file metadata since we're in update path
-                    file_metadata_for_update = await self.file_service.get_file_metadata(
-                        path, use_cache=False
-                    )
+                    file_metadata_for_update = await self.file_service.get_file_metadata(path)
                     updated = await self.entity_repository.update(
                         entity.id,
                         {
@@ -911,7 +881,7 @@ class SyncService:
                     raise  # pragma: no cover
         else:
             # Get file timestamps for updating modification time
-            file_metadata = await self.file_service.get_file_metadata(path, use_cache=False)
+            file_metadata = await self.file_service.get_file_metadata(path)
             modified = file_metadata.modified_at
 
             entity = await self.entity_repository.get_by_file_path(path)
@@ -944,10 +914,6 @@ class SyncService:
         # First get entity to get permalink before deletion
         entity = await self.entity_repository.get_by_file_path(file_path)
         if entity:
-            # Drop the cached permalink for this path so a future file created
-            # at the same path resolves its own permalink against the DB instead
-            # of inheriting the deleted entity's.
-            self.entity_service.invalidate_permalink_cache(file_path)
             logger.info(
                 f"Deleting entity with file_path={file_path}, entity_id={entity.id}, permalink={entity.permalink}"
             )
@@ -972,11 +938,6 @@ class SyncService:
                     await self.search_service.delete_by_permalink(permalink)
                 else:
                     await self.search_service.delete_by_entity_id(entity.id)
-
-            # Drop the semantic vectors (entity + observations + relations) via the
-            # shared cleanup helper, so file-sync deletes don't orphan vectors the
-            # way the explicit API/CLI delete path cleans them.
-            await self.search_service.delete_entity_embeddings(entity)
 
     async def handle_move(self, old_path, new_path):
         logger.debug("Moving entity", old_path=old_path, new_path=new_path)
@@ -1022,10 +983,6 @@ class SyncService:
                 and not self.app_config.disable_permalinks
                 and self.file_service.is_markdown(new_path)
             ):
-                # Drop any stale cache entry for new_path (a previously deleted
-                # file may have lived there) so resolve_permalink re-resolves
-                # against the DB instead of returning the predecessor's permalink.
-                self.entity_service.invalidate_permalink_cache(new_path)
                 # generate new permalink value - skip conflict checks during bulk sync
                 new_permalink = await self.entity_service.resolve_permalink(
                     new_path, skip_conflict_check=True
@@ -1085,11 +1042,6 @@ class SyncService:
 
             # update search index
             await self.search_service.index_entity(updated)
-
-            # The entity has left old_path; a future file created there must
-            # resolve its own permalink, not this moved entity's. Drop the stale
-            # cache entry (new_path was invalidated above before re-resolving).
-            self.entity_service.invalidate_permalink_cache(old_path)
 
     async def resolve_relations(self, entity_id: int | None = None):
         """Try to resolve unresolved relations.
@@ -1362,9 +1314,7 @@ async def get_sync_service(project: Project) -> SyncService:  # pragma: no cover
     project_repository = ProjectRepository(session_maker)
 
     # Initialize services
-    search_service = SearchService(
-        search_repository, entity_repository, file_service, session_maker, project.id
-    )
+    search_service = SearchService(search_repository, entity_repository, file_service)
     link_resolver = LinkResolver(entity_repository, search_service)
 
     # Initialize services

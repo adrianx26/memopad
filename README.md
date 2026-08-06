@@ -419,6 +419,26 @@ optimize_storage(project, dry_run=True) - Find duplicate notes; with dry_run=Fal
 canvas(nodes, edges, title, folder) - Generate knowledge visualizations
 ```
 
+**Tb-borrowed tools** (all gated by feature flags, default off — see
+`tb-borrow-implementation-plan.md` / `tb-borrow-progress.md`):
+```
+# G5 provenance (levels_enabled)
+drill_down(identifier, target_level, max_depth) - Trace a distilled memory back to its L0 sources
+
+# G1 skill assets (skills_enabled)
+create_skill / get_skill / list_skills / validate_skill - Versioned skills (trigger/steps/validation)
+
+# G6 short-term session context (shortterm_enabled)
+add_session_ref / add_session_step / get_session_context / drill_down_session / finalize_session
+                                          - Per-session 3-layer context (refs -> steps -> Mermaid canvas)
+
+# G2 CodeGraph (codegraph_enabled)
+index_code / find_symbol / impact_path / code_context - Index & query source code in the knowledge graph
+```
+
+> The new tools are MCP-only (no `memopad tool` CLI wrappers), consistent with other
+> feature-flagged tools like `canvas`. Enable each via its config flag to use.
+
 5. Example prompts to try:
 
 ```
@@ -449,7 +469,7 @@ MemoPad uses [Loguru](https://github.com/Delgan/loguru) for logging. The logging
 | MCP server | File only | Stdout would corrupt the JSON-RPC protocol |
 | API server | File (local) or stdout (cloud) | Docker/cloud deployments use stdout |
 
-**Log file location:** `~/memopad/memopad.log` (10MB rotation, 10 days retention)
+**Log file location:** `~/.memopad/memopad.log` (10MB rotation, 10 days retention)
 
 ### Environment Variables
 
@@ -467,7 +487,7 @@ MemoPad uses [Loguru](https://github.com/Delgan/loguru) for logging. The logging
 MEMOPAD_LOG_LEVEL=DEBUG memopad sync
 
 # View logs
-tail -f ~/memopad/memopad.log
+tail -f ~/.memopad/memopad.log
 
 # Cloud/Docker mode (stdout logging with structured context)
 MEMOPAD_CLOUD_MODE=true uvicorn basic_memory.api.app:app
@@ -542,23 +562,12 @@ memopad doctor --project my-research
 
 # Drift check + auto-reconcile via force_full sync
 memopad doctor --project my-research --fix
-
-# Schema health checks only (reindex_state content_hash, vec0 dim-scoping)
-memopad doctor --health
 ```
 
 The `--project` mode reports new files on disk, modified/deleted entries, and
 unresolved `[[wikilinks]]`. With `--fix`, file ↔ DB drift is reconciled
 automatically. Unresolved wikilinks are reported only — fixing them is left
 to the user since fuzzy-rewriting markdown is risky.
-
-`--health` runs read-only schema checks against the app DB
-(`~/memopad/memory.db`): it verifies the `reindex_state.content_hash` column
-that powers incremental reindex, and that every `embedding_vec_*` virtual table
-is dim-scoped (`..._p<project>_d<dim>`, so a model swap can't roll back
-canonical embedding writes). The default `memopad doctor` runs these same
-checks first as a best-effort warning before the roundtrip; `--health` runs
-only them and exits non-zero if any issues are found.
 
 ## Optional: hybrid semantic search
 
@@ -569,9 +578,6 @@ keyword FTS5. It's **opt-in** so existing installs see no behavior change.
 # Install the optional dependency (CPU-only ONNX runtime, ~30MB model)
 pip install 'memopad[embeddings]'
 
-# Optional but recommended: ANN index for sublinear KNN search (Linux/macOS/Win)
-pip install sqlite-vec
-
 # Enable for the current session
 export MEMOPAD_EMBEDDINGS_ENABLED=true
 ```
@@ -581,29 +587,7 @@ Hybrid mode fuses keyword and embedding rankings via Reciprocal Rank Fusion
 (RRF) — robust across precise term lookups and conceptual queries without
 weight tuning.
 
-### Performance & CPU
-
-The embedding service is tuned to stay light on CPU:
-
-- **Inference runs off the event loop.** ONNX inference executes on a worker
-  thread (`asyncio.to_thread`) so the API/MCP server stays responsive while a
-  batch embeds.
-- **Thread cap.** onnxruntime is capped to `min(4, cpu_count)` threads by
-  default so a single embed no longer saturates every core. Override with
-  `MEMOPAD_EMBEDDING_THREADS` (set `0` to let onnxruntime use all cores).
-- **No re-embedding of unchanged content.** Each vector stores a SHA-256 of its
-  text; re-indexing unchanged notes (or unchanged facts/relations inside a
-  changed note) does zero model work.
-- **Batched sync.** A sync sweep batches embedding calls across files (one
-  model call per 128 items instead of one per file).
-- **Cached queries.** Repeat identical searches reuse the query embedding
-  (bounded LRU, 256 entries).
-- **sqlite-vec ANN.** When `sqlite-vec` is installed, KNN search is sublinear
-  (vec0 virtual tables). Without it, search falls back to a numpy scorer over
-  the BLOB store — the startup log reports which path is active.
-
-See [`docs/CHANGES-embedding-perf.md`](docs/CHANGES-embedding-perf.md) for the
-full breakdown of the embedding performance fixes.
+See [plans/PLAN.md](plans/PLAN.md) §2.4 for the full integration roadmap.
 
 See the [justfile](justfile) for the complete list of development commands.
 

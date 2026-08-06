@@ -17,7 +17,6 @@ from memopad.mcp.async_client import get_client
 from memopad.mcp.project_context import get_active_project, add_project_metadata
 from memopad.mcp.server import mcp
 from memopad.schemas.base import Entity
-from memopad.services.exceptions import EntityAlreadyExistsError
 
 from .config import DEFAULT_CONFIG, DIRECT_DOWNLOAD_EXTENSIONS, DIRECT_DOWNLOAD_CONTENT_TYPES
 from .crawler import crawl, get_http_client
@@ -227,39 +226,53 @@ async def _assimilate_impl(
                         result = await knowledge_client.create_entity(
                             entity.model_dump(), fast=True
                         )
-                    except EntityAlreadyExistsError:
-                        # The note already exists — update it in place. KnowledgeClient
-                        # raises this typed exception on HTTP 409 so we branch on the
-                        # type rather than string-matching the error message or status.
-                        if not entity.permalink:
-                            raise
-                        try:
-                            entity_id = await knowledge_client.resolve_entity(
-                                entity.permalink
-                            )
-                            result = await knowledge_client.update_entity(
-                                entity_id, entity.model_dump(), fast=False
-                            )
-                            global_logger.info(
-                                f"assimilate: updated existing note "
-                                f"'{title}' at {result.permalink}"
-                            )
+                    except Exception as e:
+                        # Trigger: KnowledgeClient may raise either an httpx.HTTPStatusError
+                        #          (HTTP 409) or a domain-level "already exists" error.
+                        # Why: prefer typed status check; fall back to message match only when
+                        #      the typed path doesn't apply (e.g. service-layer exception).
+                        is_conflict = False
+                        status = getattr(getattr(e, "response", None), "status_code", None)
+                        if status == 409:
+                            is_conflict = True
+                        else:
+                            msg_lower = str(e).lower()
+                            if "conflict" in msg_lower or "already exists" in msg_lower:
+                                is_conflict = True
 
-                            # Log file update to assimilate logger
-                            file_path = f"{directory}/{title}.md"
-                            assimilate_logger.log_file_saved(
-                                title=title,
-                                file_path=file_path,
-                                permalink=result.permalink,
-                                directory=directory,
-                                operation="updated",
-                                content_length=len(content),
-                            )
-                        except Exception as update_err:
-                            global_logger.error(
-                                f"assimilate: update failed for '{title}': {update_err}"
-                            )
-                            raise update_err
+                        if is_conflict:
+                            if entity.permalink:
+                                try:
+                                    entity_id = await knowledge_client.resolve_entity(
+                                        entity.permalink
+                                    )
+                                    result = await knowledge_client.update_entity(
+                                        entity_id, entity.model_dump(), fast=False
+                                    )
+                                    global_logger.info(
+                                        f"assimilate: updated existing note "
+                                        f"'{title}' at {result.permalink}"
+                                    )
+
+                                    # Log file update to assimilate logger
+                                    file_path = f"{directory}/{title}.md"
+                                    assimilate_logger.log_file_saved(
+                                        title=title,
+                                        file_path=file_path,
+                                        permalink=result.permalink,
+                                        directory=directory,
+                                        operation="updated",
+                                        content_length=len(content),
+                                    )
+                                except Exception as update_err:
+                                    global_logger.error(
+                                        f"assimilate: update failed for '{title}': {update_err}"
+                                    )
+                                    raise update_err
+                            else:
+                                raise
+                        else:
+                            raise
                     stored.append(f"- {title}: {result.permalink}")
                     global_logger.info(
                         f"assimilate: stored note '{title}' at {result.permalink}"

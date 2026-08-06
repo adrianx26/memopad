@@ -68,8 +68,8 @@ After restarting Claude Desktop:
 
 ```bash
 # Default location
-# Windows: C:\Users\<username>\memopad
-# macOS/Linux: ~/memopad
+# Windows: C:\Users\<username>\.memopad
+# macOS/Linux: ~/.memopad
 
 # Or check with command
 memopad status
@@ -92,10 +92,10 @@ memopad status
    ```
 
 3. **Check logs:**
-   - Location: `~/memopad/memopad.log`
+   - Location: `~/.memopad/memopad.log`
    ```bash
-   tail -f ~/memopad/memopad.log  # macOS/Linux
-   Get-Content ~\memopad\memopad.log -Wait  # Windows
+   tail -f ~/.memopad/memopad.log  # macOS/Linux
+   Get-Content ~\.memopad\memopad.log -Wait  # Windows
    ```
 
 ### Claude Desktop Not Showing Tools

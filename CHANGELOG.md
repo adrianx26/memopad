@@ -1,5 +1,121 @@
 ﻿# CHANGELOG
 
+## [0.20.1] - 2026-08-06
+
+### Fixed — from the full-code review (5 parallel review agents)
+
+Correctness fixes found by a full-codebase review and implemented under the
+standing autonomy grant. All additive / backward-compatible; no functional flow
+changed unless strictly necessary. The MCP capability surface is **unchanged**
+(no tool added/removed/renamed) — these are internal correctness fixes.
+
+- **G2 `index_directory` now prunes stale code entities (fix #1):** On reindex,
+  file/module/function/class entities whose source file is gone from the scanned
+  tree are removed. DB cascade (`ON DELETE CASCADE` on `observation.entity_id`
+  and `relation.from_id`/`relation.to_id`) drops their observations and both-
+  direction relations; the search row is removed explicitly via
+  `search_repository.delete_by_entity_id`. New `entity_repository.get_symbol_permalinks`
+  (lightweight `id`+`permalink` select) drives the diff. `IndexReport.pruned`
+  counts them. Without this, `find_symbol`/`code_context` would surface symbols
+  whose source no longer exists — the gap the `memopad watch` re-index hook
+  relies on `index_directory` to close.
+- **G2 relation loading is now project-scoped (fix #2):** `relation_repository
+  .find_by_type` is not project-scoped, so with >1 code-graph-indexed project in
+  one DB it returns every project's relations and a foreign project's code edges
+  would leak into another's graph view (and from there into `find_symbol`/
+  `impact_path`/`code_context`). `_load_graph_view` now filters every relation by
+  `project_id` first.
+- **`code_context` now honors its `Optional` contract (fix #3):** `code_context`
+  and `render_code_context` were declared `Optional` but raised `KeyError` when
+  the permalink was absent; now they return `None` / a helpful "use `find_symbol`"
+  message. Single `GraphView` load is shared between the lookup and definition
+  fetch (one walk, not two). Pure `_code_context` keeps the raise (pure layer may
+  raise).
+- **`CodeContext.render` negative-slice clamp (fix #4):** For very small
+  `max_tokens` (1–4 → `budget_chars` 4–16) the truncation slice start
+  (`budget_chars - 20`) went negative and sliced from the *end* of the string,
+  garbling output and appending the truncation marker to a tail. Now clamped at
+  `max(0, …)` for a clean (possibly empty) prefix.
+- **G1 `match_trigger` is now token-boundary, not bare substring (fix #5):**
+  Replaced the `List` of topic tokens with a `set` and matched by token-set
+  intersection on significant tokens (≥ 3 chars). A 3-char topic token like
+  `test` now only matches a trigger that contains the *word* `test`, not one that
+  merely contains "test" as a substring of "latest". Strictly better precision;
+  all 14 existing trigger tests still pass.
+- **G1 boost E2E test no longer a false positive (fix #6):**
+  `test_boost_end_to_end_via_build_context` indexed the skill first, so the skill
+  was first even *without* the boost — the test passed trivially and could not
+  detect a missing/broken boost. Reordered to index the NOTE first (natural
+  pre-boost order is note-first); the boost must now re-rank the validated skill
+  ahead. Assertions unchanged.
+
+Also from the review (Phase 1, this session):
+
+- **CRITICAL — G6 `shortterm` tools were dead-on-arrival (fix):**
+  `mcp/tools/shortterm.py:_sessions_root` called `app_config.data_dir_path()`
+  with parens, but `data_dir_path` is a `@property` on `MemoPadConfig` (returns a
+  `Path`). Every G6 short-term tool raised `TypeError` the moment
+  `shortterm_enabled` was on. Fixed to the parens-free form used elsewhere
+  (`doctor.py`, `auth.py`). New regression test calls the real function and asserts
+  the property is used without parens.
+- **MAJOR — `memopad doctor` G6 probe could change the exit code (fix):** The
+  short-term filesystem-walk probe in `run_capability_probes` had no `try/except`,
+  so a `PermissionError` / file-vanished-mid-iteration race propagated and changed
+  the exit code — breaking the "informational only" contract. Wrapped to mirror
+  the G1 probe (`probe failed: <err>`).
+- **MINOR — `build_context` `metadata.primary_count` drift (fix):** Computed
+  before `_inject_trigger_skills`, which can prepend validated skills, so the
+  metadata count no longer matched `len(result.results)`. Reconciled after
+  injection (no-op when the flag is off / no topic).
+
+### Tests
+
+- 4 new tests: `test_sessions_root_uses_data_dir_path_property_without_parens`
+  (G6 regression), `test_match_trigger_token_boundary_no_substring_false_positive`
+  (G1 fix #5), `test_index_directory_prunes_symbols_of_deleted_file` (G2 fix #1),
+  `test_load_graph_view_excludes_other_projects_relations` (G2 fix #2). Total
+  Tb-related passing tests: 167 → 171.
+
+### Validation
+
+- Broad regression sweep: 200 passed across the affected suites; 2 pre-existing
+  `entity_service` permalink-uniqueness failures confirmed out of scope
+  (additive `get_symbol_permalinks` is read-only, not on the create/update path —
+  matches the validation-memory baseline, not a regression).
+
+## [0.20.0] - 2026-08-06
+
+### Added — Tb-borrowed capabilities (feature-flagged, default off; backward-compatible)
+
+Finishing session of the Tb-borrow program (G1–G7). All new capabilities are
+opt-in via config flags (default off), so existing deployments are unaffected.
+
+- **G1 trigger-matching in `build_context`**: `skill_service.match_trigger` (pure,
+  case-insensitive token-set intersection on significant ≥ 3-char tokens) +
+  `ContextService._inject_trigger_skills` prepend validated skills whose
+  `[trigger]` observation matches the request topic
+  (the raw path of a non-wildcard `memory_url`). Complements `_apply_skill_boost`
+  (re-ranks skills already surfaced by search). Gated by `skills_enabled`.
+- **G2 watch reindex hook**: `WatchService.handle_changes` runs a full-tree
+  `CodeGraphService.index_directory` (idempotent) at the end of a change batch when
+  `codegraph_enabled` is on and the batch contains a supported source file (pure
+  `_batch_has_code_files` hint). New `get_codegraph_service(project)` factory
+  (mirrors `get_sync_service`). Best-effort — a reindex failure degrades
+  explicitly without aborting the file sync that already ran. `index_code` remains
+  the documented manual fallback when watch is off or a reindex fails.
+- **`memopad doctor` capability report**: prints the on/off state of the G1–G7
+  feature flags (+ G4 retrieval params) at the start of every run, and in
+  `--project` mode runs lightweight, informational health probes for enabled
+  capabilities (skill counts, short-term session disk usage, CodeGraph/levels/
+  scheduler hints). Informational only — never changes the exit code.
+
+### Tests
+
+- 23 new tests: G1 trigger-matching (`test_context_service_trigger_match.py`, 14)
+  + G2 watch reindex (`test_watch_service_code_reindex.py`, 9). 0 regressions on
+  changed code; pre-existing failures (Alembic MultipleHeads, CTE `near "?"`,
+  broken `sync_service` conftest fixture) remain unchanged and out of scope.
+
 ## [Unreleased] - 2026-02-04
 
 ### Changed - BREAKING

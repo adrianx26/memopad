@@ -60,7 +60,7 @@ bm project bisync --name work
 
 **What happens under the covers:**
 - Config stores `cloud_projects` dict mapping project names to local paths
-- Each project gets its own bisync state in `~/memopad/bisync-state/{project}/`
+- Each project gets its own bisync state in `~/.memopad/bisync-state/{project}/`
 - Rclone syncs using single remote: `memopad-cloud`
 - Projects can live anywhere on your filesystem, not forced into sync directory
 
@@ -76,7 +76,7 @@ bm cloud login
 
 **What this does:**
 1. Opens browser to MemoPad Cloud authentication page
-2. Stores authentication token in `~/memopad/auth/token`
+2. Stores authentication token in `~/.memopad/auth/token`
 3. **Enables cloud mode** - all CLI commands now work against cloud
 4. Validates your subscription status
 
@@ -119,7 +119,7 @@ When you add a project with `--local-path`:
 1. Project created on cloud at `/app/data/research`
 2. Local path stored in config: `cloud_projects.research.local_path = "~/Documents/research"`
 3. Local directory created if it doesn't exist
-4. Bisync state directory created at `~/memopad/bisync-state/research/`
+4. Bisync state directory created at `~/.memopad/bisync-state/research/`
 
 **Result:** Project is ready to sync, but no files synced yet.
 
@@ -138,7 +138,7 @@ bm project bisync --name research --resync
 **What happens under the covers:**
 1. Rclone reads from `~/Documents/research` (local)
 2. Connects to `memopad-cloud:bucket-name/app/data/research` (remote)
-3. Creates bisync state files in `~/memopad/bisync-state/research/`
+3. Creates bisync state files in `~/.memopad/bisync-state/research/`
 4. Syncs files bidirectionally with settings:
    - `conflict_resolve=newer` (most recent wins)
    - `max_delete=25` (safety limit)
@@ -223,7 +223,7 @@ bm project add research --local-path ~/Documents/research
 **What this does:**
 - Creates project on cloud at `/app/data/research`
 - Creates local directory `~/Documents/research`
-- Stores sync config in `~/memopad/config.json`
+- Stores sync config in `~/.memopad/config.json`
 - Prepares for bisync (but doesn't sync yet)
 
 **Result:** Project ready to sync. Run `bm project bisync --name research --resync` to establish baseline.
@@ -456,7 +456,7 @@ bm cloud logout
 
 **The solution:** `.bmignore` file with gitignore-style patterns.
 
-**Location:** `~/memopad/.bmignore`
+**Location:** `~/.memopad/.bmignore`
 
 **Default patterns:**
 
@@ -500,10 +500,10 @@ Thumbs.db/**
 
 ```bash
 # Edit patterns
-code ~/memopad/.bmignore
+code ~/.memopad/.bmignore
 
 # Add custom patterns
-echo "*.tmp/**" >> ~/memopad/.bmignore
+echo "*.tmp/**" >> ~/.memopad/.bmignore
 
 # Next sync uses updated patterns
 bm project bisync --name research
@@ -547,7 +547,7 @@ bm project bisync --name research --resync
 
 **What this does:**
 - Establishes initial sync state
-- Creates baseline in `~/memopad/bisync-state/research/`
+- Creates baseline in `~/.memopad/bisync-state/research/`
 - Syncs all files bidirectionally
 
 **Result:** Future syncs work without `--resync`.
@@ -589,7 +589,7 @@ bm project bisync --name research --resync
 ```
 
 **What this does:**
-- Removes all bisync metadata from `~/memopad/bisync-state/research/`
+- Removes all bisync metadata from `~/.memopad/bisync-state/research/`
 - Forces fresh baseline on next `--resync`
 - Safe operation (doesn't touch your files)
 
@@ -645,7 +645,7 @@ If instance is down, wait a few minutes and retry.
 ## Security
 
 - **Authentication**: OAuth 2.1 with PKCE flow
-- **Tokens**: Stored securely in `~/memopad/memopad-cloud.json`
+- **Tokens**: Stored securely in `~/.memopad/memopad-cloud.json`
 - **Transport**: All data encrypted in transit (HTTPS)
 - **Credentials**: Scoped S3 credentials (read-write to your tenant only)
 - **Isolation**: Your data isolated from other tenants

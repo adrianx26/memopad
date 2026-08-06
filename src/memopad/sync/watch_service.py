@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List, Optional, Set, Sequence, Callable, Awaitable, TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from memopad.services.codegraph_service import CodeGraphService
     from memopad.sync.sync_service import SyncService
 
 from memopad.config import MemoPadConfig, WATCH_STATUS_JSON, DATA_DIR_NAME
@@ -77,6 +78,11 @@ class WatchServiceState(BaseModel):
 # Type alias for sync service factory function
 SyncServiceFactory = Callable[[Project], Awaitable["SyncService"]]
 
+# Type alias for code-graph service factory function (Tb G2 watch reindex).
+# Mirror of SyncServiceFactory: the watch flow obtains a CodeGraphService lazily
+# per change batch only when codegraph_enabled is on and source files changed.
+CodeGraphServiceFactory = Callable[[Project], Awaitable["CodeGraphService"]]
+
 
 class WatchService:
     def __init__(
@@ -85,6 +91,7 @@ class WatchService:
         project_repository: ProjectRepository,
         quiet: bool = False,
         sync_service_factory: Optional[SyncServiceFactory] = None,
+        codegraph_service_factory: Optional[CodeGraphServiceFactory] = None,
     ):
         self.app_config = app_config
         self.project_repository = project_repository
@@ -93,6 +100,9 @@ class WatchService:
         self.status_path.parent.mkdir(parents=True, exist_ok=True)
         self._ignore_patterns_cache: dict[Path, Set[str]] = {}
         self._sync_service_factory = sync_service_factory
+        # Tb G2: code-graph reindex factory. Lazily used at the end of a
+        # change batch only when codegraph_enabled is on and source files changed.
+        self._codegraph_service_factory = codegraph_service_factory
 
         # quiet mode for mcp so it doesn't mess up stdout
         self.console = Console(quiet=quiet)
@@ -105,6 +115,37 @@ class WatchService:
         from memopad.sync.sync_service import get_sync_service
 
         return await get_sync_service(project)
+
+    async def _get_codegraph_service(self, project: Project) -> "CodeGraphService":
+        """Get a CodeGraphService for a project, using factory if provided.
+
+        Tb G2: mirror of ``_get_sync_service``. The default factory
+        (``get_codegraph_service``) is lazy-imported so the watch module does not
+        pull in codegraph dependencies at import time, matching the sync factory.
+        """
+        if self._codegraph_service_factory:
+            return await self._codegraph_service_factory(project)
+        from memopad.services.codegraph_service import get_codegraph_service
+
+        return await get_codegraph_service(project)
+
+    @staticmethod
+    def _batch_has_code_files(paths: List[str]) -> bool:
+        """Return True if any path in the batch is a supported source file.
+
+        Pure + deterministic (extension lookup only) so it is unit-testable
+        without a DB. Used to decide whether the G2 watch reindex is worth
+        running: if a change batch contains only markdown/notes, reindexing the
+        code graph would be wasted work, so we skip it. The check is a *hint*,
+        not a correctness gate — ``index_directory`` is idempotent either way.
+        """
+        from memopad.importers.code_importer import language_for_extension
+
+        for p in paths:
+            suffix = Path(p).suffix
+            if suffix and language_for_extension(suffix) is not None:
+                return True
+        return False
 
     async def _schedule_restart(self, stop_event: asyncio.Event):
         """Schedule a restart of the watch service after the configured interval."""
@@ -500,6 +541,47 @@ class WatchService:
             if changes:
                 self.console.print(f"{', '.join(changes)}", style="dim")  # pyright: ignore
                 logger.info(f"changes: {len(changes)}")
+
+        # --- Tb G2: re-index the code graph when source files changed ---
+        # Trigger: `codegraph_enabled` is on AND the change batch contains at
+        #   least one supported source file (checked by the pure
+        #   `_batch_has_code_files` helper — a hint, not a correctness gate).
+        # Why: the watch flow above syncs markdown/notes into the search index,
+        #   but code entities (functions/classes) live in a separate graph that
+        #   is normally populated by an explicit `index_code` run. Without this
+        #   hook, code edited during a watch session goes stale until the user
+        #   manually re-runs `index_code`. We reuse the tested, idempotent
+        #   `index_directory` (full-tree) rather than a per-file incremental path:
+        #   incremental would need CodeGraphService wired into SyncService
+        #   (touching the functional sync flow) and risks cross-file staleness
+        #   (a symbol whose caller changed). Full-tree is correct and bounded by
+        #   the project's source size.
+        # Outcome: best-effort — a reindex failure is logged and degraded, never
+        #   aborting the file sync that already succeeded above. Manual
+        #   `index_code` remains the documented fallback (see codegraph_service
+        #   module docstring + `get_codegraph_service`).
+        if (
+            getattr(self.app_config, "codegraph_enabled", False)
+            and self._batch_has_code_files(adds + modifies + deletes)
+        ):
+            try:
+                cg_service = await self._get_codegraph_service(project)
+                report = await cg_service.index_directory(directory)
+                self.console.print(
+                    f"[dim]code graph re-indexed: {report.render().lower()}[/dim]"
+                )
+                logger.info(
+                    "CodeGraph watch reindex: "
+                    f"files={report.files} entities={report.entities} "
+                    f"relations={report.relations} skipped={report.skipped}"
+                )
+            except Exception as e:  # explicit degradation, not a silent fallback
+                logger.warning(
+                    f"CodeGraph watch reindex failed (file sync already done): {e}"
+                )
+                self.console.print(
+                    f"[orange]?[/orange] code graph re-index failed: {e}"
+                )
 
         duration_ms = int((time.time() - start_time) * 1000)
         self.state.last_scan = datetime.now()
