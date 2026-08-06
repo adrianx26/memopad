@@ -55,6 +55,13 @@ class SearchQuery(BaseModel):
     # Optional filters
     types: Optional[List[str]] = None  # Filter by type
     entity_types: Optional[List[SearchItemType]] = None  # Filter by entity type
+    # Exclude entities whose metadata.entity_type is in this list (the complement
+    # of `types`). Used by the general `search_notes` tool to keep code symbols
+    # (file/module/function/class) out of unfiltered knowledge-graph search so
+    # CodeGraph (G2) never pollutes the note knowledge graph, even when G2 is on.
+    # Ignored when `types` is set (an explicit `types` filter is an opt-in to
+    # exactly those entity types, so exclusion would contradict it).
+    exclude_types: Optional[List[str]] = None  # Exclude by entity type
     after_date: Optional[Union[datetime, str]] = None  # Time-based filter
     metadata_filters: Optional[dict[str, Any]] = None  # Structured frontmatter filters
     tags: Optional[List[str]] = None  # Convenience tag filter

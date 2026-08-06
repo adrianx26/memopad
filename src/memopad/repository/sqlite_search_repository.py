@@ -300,6 +300,7 @@ class SQLiteSearchRepository(SearchRepositoryBase):
         after_date: Optional[datetime] = None,
         search_item_types: Optional[List[SearchItemType]] = None,
         metadata_filters: Optional[dict] = None,
+        exclude_types: Optional[List[str]] = None,
         limit: int = 10,
         offset: int = 0,
     ) -> List[SearchIndexRow]:
@@ -362,6 +363,16 @@ class SQLiteSearchRepository(SearchRepositoryBase):
             type_list = ", ".join(f"'{t}'" for t in types)
             conditions.append(
                 f"json_extract(search_index.metadata, '$.entity_type') IN ({type_list})"
+            )
+        elif exclude_types:
+            # Complement of `types`: exclude entities whose metadata.entity_type is
+            # in this list. Used by the general `search_notes` tool to keep CodeGraph
+            # (G2) symbols (file/module/function/class) out of unfiltered
+            # knowledge-graph search. Only applied when `types` is not set — an
+            # explicit `types` filter is an opt-in to exactly those entity types.
+            exclude_list = ", ".join(f"'{t}'" for t in exclude_types)
+            conditions.append(
+                f"json_extract(search_index.metadata, '$.entity_type') NOT IN ({exclude_list})"
             )
 
         # Handle date filter using datetime() for proper comparison

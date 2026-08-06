@@ -607,6 +607,42 @@ review-driven; suprafața MCP capabilităților NESCHIMBATĂ — niciun tool
 adăugat/șters/redenumit; G6 short-term funcționează acum efectiv, `code_context`
 onoră Optional).
 
+## Search isolation (2026-08-06, sesiunea post-review — 0.20.2 → 0.20.3)
+Constrângere explicită a utilizatorului: **fișierele de cod nu trebuie indexate ca
+entități, ca să nu afecteze knowledge graph-urile.** Confirmat: `codegraph_enabled`
+e default off → codul NU e indexat ca entități by default. Dar chiar și cu G2 activat,
+simbolurile de cod (file/module/function/class) ar fi apărut în `search_notes`
+NEFILTRAT → poluare a grafului de note. Utilizatorul a ales **izolarea în search**
+(opt-in explicit `types=[...]` ocolește izolarea).
+
+- **Schimbare:** `search_notes` (tool MCP general) setează
+  `SearchQuery.exclude_types = [file, module, function, class]` când NU e dat un
+  filtru `types` explicit. Codul rămâne accesibil via tool-urile G2 dedicate
+  (`find_symbol`/`impact_path`/`code_context`) și via opt-in `types=["function"]`.
+  `build_context`/`find_symbol`/`link_resolver`/prompt routers — NEatinse (scope
+  deliberat îngust: doar `search_notes`).
+- **Plumbing:** `SearchQuery.exclude_types` (nou, complement al `types`) →
+  `search_service.search` → `SearchRepository.search` (Protocol + base + SQLite
+  `NOT IN json_extract` + Postgres `NOT (JSONB @>)`). Stoolap neatins (semnătură
+  diferită). Nu adăugat la `SearchQuery.no_criteria()` (e filtru, nu criteriu).
+- **Fișiere atinse:** `schemas/search.py`, `repository/search_repository_base.py`,
+  `repository/search_repository.py` (Protocol), `repository/sqlite_search_repository.py`,
+  `repository/postgres_search_repository.py`, `services/search_service.py`,
+  `mcp/tools/search.py` (import constante code_importer + set exclude_types),
+  `AGENTS.md` (notă G2 search isolation), `CHANGELOG.md` [0.20.3], `server.json`
+  + `__init__.py` (version bump).
+- **Teste (2 noi):** `tests/schemas/test_search.py::test_exclude_types_field_round_trips`
+  (default None + round-trip model_dump) + `tests/repository/test_search_repository.py
+  ::test_search_exclude_types_keeps_code_out_of_general_search` (baseline surfacă
+  ambele; exclude_types drop-ează doar funcția code, păstrează nota; opt-in
+  `types=[function]` returnează funcția).
+- **Validare:** 43 trecute (1 nou + 42 search service), **0 regresii**.
+  `test_search_with_date_filter` eșuează — confirmat PRE-EXISTENT via `git stash`
+  (eșează și pe 0.20.2 curat; problemă FTS/after_date timing, nu din schimbarea asta).
+- **Suprafața MCP:** NESCHIMBATĂ — `search_notes` există înainte/după, doar
+  comportamentul e rafinat (excludere code în căutarea generală). Niciun tool
+  adăugat/șters/redenumit.
+
 ## Următorul pas
 - **Nimic în acest program.** Implementarea împrumuturilor Tb este completă.
 - Pentru reluare: validare oficială cu `just test-sqlite` / `just test-postgres` în

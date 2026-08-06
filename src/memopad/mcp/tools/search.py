@@ -11,6 +11,22 @@ from memopad.mcp.project_context import get_active_project
 from memopad.mcp.server import mcp
 from memopad.schemas.search import SearchItemType, SearchQuery, SearchResponse
 
+# CodeGraph (G2) entity types. When the general `search_notes` tool runs WITHOUT an
+# explicit `types` filter, these are passed as `exclude_types` so code symbols never
+# surface in unfiltered knowledge-graph search — keeping the note knowledge graph
+# clean even when G2 is enabled and `index_code` has populated code entities. Code
+# remains reachable via the dedicated G2 tools (find_symbol/impact_path/code_context)
+# and via an explicit `types=["function"]` opt-in. No-op when G2 is off (no code
+# entities exist to exclude). Sourced from `code_importer` (the canonical constants).
+from memopad.importers.code_importer import (
+    ENTITY_CLASS,
+    ENTITY_FILE,
+    ENTITY_FUNCTION,
+    ENTITY_MODULE,
+)
+
+_CODE_ENTITY_TYPES = [ENTITY_FILE, ENTITY_MODULE, ENTITY_FUNCTION, ENTITY_CLASS]
+
 
 def _format_search_error_response(
     project: str, error_message: str, query: str, search_type: str = "text"
@@ -380,6 +396,12 @@ async def search_notes(
         search_query.entity_types = [SearchItemType(t) for t in entity_types]
     if types:
         search_query.types = types
+    else:
+        # No explicit entity_type filter → this is a general knowledge-graph
+        # search. Exclude CodeGraph (G2) code symbols so they never pollute note
+        # search, even when G2 is on and code has been indexed. An explicit
+        # `types=[...]` opt-in bypasses this (caller asked for exactly those types).
+        search_query.exclude_types = _CODE_ENTITY_TYPES
     if after_date:
         search_query.after_date = after_date
     if metadata_filters:

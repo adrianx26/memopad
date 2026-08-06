@@ -220,6 +220,7 @@ class PostgresSearchRepository(SearchRepositoryBase):
         after_date: Optional[datetime] = None,
         search_item_types: Optional[List[SearchItemType]] = None,
         metadata_filters: Optional[dict] = None,
+        exclude_types: Optional[List[str]] = None,
         limit: int = 10,
         offset: int = 0,
     ) -> List[SearchIndexRow]:
@@ -284,6 +285,15 @@ class PostgresSearchRepository(SearchRepositoryBase):
                     f'search_index.metadata @> \'{{"entity_type": "{entity_type}"}}\''
                 )
             conditions.append(f"({' OR '.join(type_conditions)})")
+        elif exclude_types:
+            # Complement of `types`: exclude entities whose metadata.entity_type is
+            # in this list (keeps CodeGraph/G2 code symbols out of unfiltered
+            # knowledge-graph search). NOT (metadata @> {"entity_type": X}) per type.
+            exclude_conditions = [
+                f'NOT (search_index.metadata @> \'{{"entity_type": "{entity_type}"}}\')'
+                for entity_type in exclude_types
+            ]
+            conditions.append(f"({' AND '.join(exclude_conditions)})")
 
         # Handle date filter
         if after_date:

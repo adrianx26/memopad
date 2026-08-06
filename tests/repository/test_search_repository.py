@@ -181,6 +181,89 @@ async def test_index_item(search_repository, search_entity):
 
 
 @pytest.mark.asyncio
+async def test_search_exclude_types_keeps_code_out_of_general_search(
+    search_repository, session_maker, test_project
+):
+    """G2 isolation guarantee (repo level): unfiltered search with `exclude_types`
+    drops code entities (file/module/function/class) but keeps notes; an explicit
+    `types` opt-in still returns them. This is the contract `search_notes` relies on
+    so CodeGraph (G2) never pollutes the note knowledge-graph search, even when G2
+    is on and `index_code` has populated code entities. `exclude_types` is ignored
+    when `types` is set (an explicit filter is an opt-in to exactly those types)."""
+    from memopad.importers.code_importer import (
+        ENTITY_CLASS,
+        ENTITY_FILE,
+        ENTITY_FUNCTION,
+        ENTITY_MODULE,
+    )
+
+    # A note and a code function sharing the searchable term "caching".
+    async with db.scoped_session(session_maker) as session:
+        note = Entity(
+            project_id=test_project.id,
+            title="Note on caching strategy",
+            entity_type="note",
+            permalink="test/note-caching",
+            file_path="test/note_caching.md",
+            content_type="text/markdown",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        func = Entity(
+            project_id=test_project.id,
+            title="caching helper",
+            entity_type=ENTITY_FUNCTION,
+            permalink="code://proj/x.py::caching",
+            file_path="code://proj/x.py",
+            content_type="text/x-python",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        session.add_all([note, func])
+        await session.flush()
+        note_id, func_id = note.id, func.id
+
+    for e, stems in (
+        (note, "note about caching strategy"),
+        (func, "def caching helper implementation"),
+    ):
+        await search_repository.index_item(
+            SearchIndexRow(
+                id=e.id,
+                type=SearchItemType.ENTITY.value,
+                title=e.title,
+                content_stems=stems,
+                content_snippet=stems,
+                permalink=e.permalink,
+                file_path=e.file_path,
+                entity_id=e.id,
+                metadata={"entity_type": e.entity_type},
+                created_at=e.created_at,
+                updated_at=e.updated_at,
+                project_id=search_repository.project_id,
+            )
+        )
+
+    code_types = [ENTITY_FILE, ENTITY_MODULE, ENTITY_FUNCTION, ENTITY_CLASS]
+
+    # Baseline: no exclusion → both the note and the code function match "caching".
+    base = await search_repository.search(search_text="caching")
+    base_ids = {r.id for r in base}
+    assert note_id in base_ids and func_id in base_ids, "baseline should surface both"
+
+    # exclude_types drops the code entity, keeps the note (general search stays clean).
+    excluded = await search_repository.search(search_text="caching", exclude_types=code_types)
+    exc_ids = {r.id for r in excluded}
+    assert note_id in exc_ids, "note must remain in general search"
+    assert func_id not in exc_ids, "code function must be excluded from general search"
+
+    # Explicit types=["function"] opt-in still returns the code entity.
+    optin = await search_repository.search(search_text="caching", types=[ENTITY_FUNCTION])
+    optin_ids = {r.id for r in optin}
+    assert func_id in optin_ids, "explicit types opt-in must still surface code"
+
+
+@pytest.mark.asyncio
 async def test_index_item_upsert_on_duplicate_permalink(search_repository, search_entity):
     """Test that indexing the same permalink twice uses upsert instead of failing.
 

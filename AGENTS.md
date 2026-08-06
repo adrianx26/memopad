@@ -329,6 +329,12 @@ See SPEC-16 for full context manager refactor details.
       relations, and the search row is removed explicitly. Relation loading is
       project-scoped (`project_id` filter) so multiple code-graph-indexed
       projects in one DB don't cross-contaminate `impact_path`/`code_context`.
+      **Search isolation (since 0.20.3):** code symbols never pollute the general
+      knowledge-graph search — `search_notes` excludes the code entity types
+      (file/module/function/class) when called without an explicit `types` filter
+      (a no-op when G2 is off). Code stays reachable via the G2 tools
+      (`find_symbol`/`impact_path`/`code_context`) and via an explicit
+      `types=["function"]` opt-in; `build_context` is unaffected.
 
 - MCP Prompts for better AI interaction:
     - `ai_assistant_guide()` - Guidance on effectively using MemoPad tools for AI assistants

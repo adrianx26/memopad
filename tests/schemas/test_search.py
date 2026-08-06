@@ -41,6 +41,18 @@ def test_search_filters():
     assert query.after_date == "2024-01-01T00:00:00"
 
 
+def test_exclude_types_field_round_trips():
+    """`exclude_types` (G2 search isolation) defaults to None and serializes into the
+    payload `search_notes` sends, so the server-side SearchQuery receives it. An
+    explicit `types` filter is the opt-in path; `exclude_types` is the complement
+    used by unfiltered general search to keep code symbols out."""
+    assert SearchQuery(text="x").exclude_types is None  # default: no exclusion
+    query = SearchQuery(text="x", exclude_types=["function", "class"])
+    assert query.exclude_types == ["function", "class"]
+    dumped = query.model_dump(exclude_none=True)
+    assert dumped["exclude_types"] == ["function", "class"]  # flows over the API
+
+
 def test_search_result():
     """Test search result structure."""
     result = SearchResult(

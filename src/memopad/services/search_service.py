@@ -125,6 +125,7 @@ class SearchService:
             search_item_types=query.entity_types,
             after_date=after_date,
             metadata_filters=metadata_filters,
+            exclude_types=query.exclude_types,
             limit=limit,
             offset=offset,
         )

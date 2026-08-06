@@ -1,5 +1,46 @@
 ﻿# CHANGELOG
 
+## [0.20.3] - 2026-08-06
+
+### Changed — CodeGraph (G2) search isolation
+
+Code symbols no longer pollute the general knowledge-graph search, even when G2
+is enabled and `index_code` has populated code entities. The note knowledge graph
+stays clean by default; code remains reachable via the dedicated G2 tools.
+
+- **`search_notes` (general search) now excludes code entity types when no
+  explicit `types` filter is given.** When the caller does not pass `types`, the
+  tool sets `exclude_types = [file, module, function, class]` (the CodeGraph entity
+  types) on the `SearchQuery`, so unfiltered knowledge-graph search never surfaces
+  code symbols. An explicit `types=["function"]` (or any `types`) is an opt-in
+  that bypasses the exclusion — the caller asked for exactly those types. This is a
+  no-op when G2 is off (no code entities exist to exclude), so non-codegraph users
+  see no behavior change.
+- **New `SearchQuery.exclude_types`** field (complement of `types`): wired through
+  `search_service` → `search_repository_base` / the `SearchRepository` Protocol →
+  the SQLite and Postgres search repositories as a `NOT IN` / `NOT (JSONB @>)`
+  clause mirroring the existing `types` (`IN`) filter. Stoolap's `search` has a
+  different, simpler signature (no `metadata.entity_type` filtering today) and is
+  untouched.
+- **Scope is deliberately narrow:** only the `search_notes` general-search tool
+  sets `exclude_types`. `build_context` (context retrieval — code as context may
+  be desirable), `find_symbol`/`impact_path`/`code_context` (the dedicated G2
+  tools), `link_resolver`, and the prompt routers are untouched — they construct
+  `SearchQuery` without `exclude_types`, so code is still reachable where it
+  should be. `search_by_metadata` (structured metadata search) is also left as-is.
+
+### Tests
+
+- `test_search_exclude_types_keeps_code_out_of_general_search` (repo level):
+  indexes a note + a code function sharing a search term; asserts the baseline
+  surfaces both, `exclude_types` drops only the code entity, and an explicit
+  `types=["function"]` opt-in still returns it.
+- `test_exclude_types_field_round_trips` (schema): `exclude_types` defaults None
+  and serializes into the API payload `search_notes` sends.
+- Existing search suite (42 service tests + repo tests) passes unchanged; the
+  pre-existing `test_search_with_date_filter` failure is unrelated (reproduced on
+  clean 0.20.2 — an FTS/after_date timing issue, not this change).
+
 ## [0.20.2] - 2026-08-06
 
 ### Changed
