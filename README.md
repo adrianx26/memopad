@@ -1,8 +1,9 @@
 <!-- mcp-name: io.github.basicmachines-co/memopad -->
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![PyPI version](https://badge.fury.io/py/memopad.svg)](https://badge.fury.io/py/memopad)
+[![Version](https://img.shields.io/badge/version-0.20.3-blue.svg)](#memopad)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://github.com/basicmachines-co/memopad/workflows/Tests/badge.svg)](https://github.com/basicmachines-co/memopad/actions)
+[![Tests](https://github.com/adrianx26/memopad/workflows/Tests/badge.svg)](https://github.com/adrianx26/memopad/actions)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 ![](https://badge.mcpx.dev?type=server 'MCP Server')
 ![](https://badge.mcpx.dev?type=dev 'MCP Dev')
