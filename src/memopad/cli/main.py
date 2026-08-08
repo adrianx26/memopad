@@ -6,6 +6,7 @@ from memopad.cli.app import app  # pragma: no cover
 from memopad.cli.commands import (  # noqa: F401  # pragma: no cover
 
     db,
+    distill,
     doctor,
     import_chatgpt,
     import_claude_conversations,

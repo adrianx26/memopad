@@ -133,6 +133,21 @@ class ContextService:
         # existing retrieval order when disabled.
         self.skills_enabled = bool(app_config and app_config.skills_enabled)
 
+        # --- Level-weighted ranking (Tb L0-L3 distillation) ---
+        # When `levels_enabled` is on, each primary entity's search score is
+        # multiplied by its configured level weight (L3=1.0 > L2=0.85 > L1=0.70 >
+        # L0=0.40) and the results re-sorted, so distilled higher-level memories
+        # surface above raw L0 notes. A uniform weight across an all-L0 repo
+        # preserves the search-engine order, so enabling is safe even when no
+        # derived tiers exist yet — reordering only happens when levels differ.
+        self.levels_enabled = bool(app_config and app_config.levels_enabled)
+        self.level_weights = {
+            "L3": app_config.level_weight_l3 if app_config else 1.0,
+            "L2": app_config.level_weight_l2 if app_config else 0.85,
+            "L1": app_config.level_weight_l1 if app_config else 0.70,
+            "L0": app_config.level_weight_l0 if app_config else 0.40,
+        }
+
     def _truncate_memory(self, text: Optional[str]) -> Optional[str]:
         """Cap a single memory item's content at the configured per-memory limit.
 
@@ -214,6 +229,84 @@ class ContextService:
             else:
                 rest.append(item)
         return boosted + rest
+
+    async def _apply_level_weights(
+        self, context_results: List[ContextResultItem]
+    ) -> List[ContextResultItem]:
+        """Re-rank primary results by memory level weight (Tb L0-L3 distillation).
+
+        Trigger: `levels_enabled` is on and build_context produced results.
+        Why: distilled memories (L1 facts, L2 scenarios, L3 persona) are
+            higher-confidence abstractions than raw L0 notes, so when both match
+            a context lookup the higher level should surface first. The level
+            weight (L3=1.0 > L2=0.85 > L1=0.70 > L0=0.40) scales the search score.
+        Outcome: each primary's score is multiplied by its level weight and the
+            list is re-sorted by (weighted_score, -weight) ascending. The primary
+            key is the weighted score (bm25 convention: more negative = better),
+            so a much stronger raw match still wins — the weight scales relevance,
+            it does not override it. The -weight tiebreaker is what makes level
+            ranking effective here: build_context's primary search has no
+            full-text component, so bm25 ties at 0 and the level weight itself
+            breaks the tie (higher level → larger weight → sorts first).
+
+        Primaries without a higher level (unlevelled entities, and non-entity
+        rows like observations/relations) take the L0 weight — the "no level"
+        default — so only L1+ memories rise above the L0 tier; the relative order
+        within the L0 tier is preserved (uniform weight, stable sort). Because of
+        this, an all-L0 repo is untouched even with the flag on: reordering only
+        happens when L1/L2/L3 memories are present.
+
+        The level is read from authoritative `entity_metadata` via a single
+        batched `get_by_ids` (the search index stores only `entity_type`, not the
+        full metadata). On read failure we degrade to the unweighted order
+        (logged) — explicit degradation, like the G4 timeout / G1 boost, not a
+        hidden correctness fallback.
+        """
+        if not self.levels_enabled or not context_results:
+            return context_results
+
+        entity_ids = [
+            item.primary_result.id
+            for item in context_results
+            if getattr(item.primary_result, "type", None) == SearchItemType.ENTITY.value
+        ]
+        if not entity_ids:
+            return context_results  # no entity primaries → nothing to re-rank
+
+        try:
+            entities = await self.entity_repository.get_by_ids(entity_ids)
+        except Exception as e:  # pragma: no cover - explicit degradation, not fallback
+            logger.warning(
+                f"Level-weight re-rank skipped — entity metadata read failed: {e}. "
+                f"Returning unweighted order."
+            )
+            return context_results
+
+        level_by_id = {
+            e.id: (e.entity_metadata or {}).get("level") for e in entities
+        }
+        l0_weight = self.level_weights["L0"]
+
+        def _weight_for(prim) -> float:
+            if getattr(prim, "type", None) == SearchItemType.ENTITY.value:
+                return self.level_weights.get(level_by_id.get(prim.id), l0_weight)
+            return l0_weight  # non-entity / no level → default L0 tier
+
+        def _sort_key(item: ContextResultItem):
+            prim = item.primary_result
+            weight = _weight_for(prim)
+            raw = getattr(prim, "score", None)
+            raw = raw if raw is not None else 0.0
+            weighted = raw * weight
+            # Persist the weighted score on the row so callers see the re-ranked
+            # value (the primary_result is a per-request SearchIndexRow copy).
+            setattr(prim, "score", weighted)
+            # (weighted_score ASC, -weight ASC): bm25 best-first, ties broken
+            # toward the higher level (larger weight).
+            return (weighted, -weight)
+
+        context_results.sort(key=_sort_key)
+        return context_results
 
     async def _inject_trigger_skills(
         self,
@@ -456,6 +549,16 @@ class ContextService:
             )
 
             context_results.append(context_item)
+
+        # Tb L0-L3: level-weighted re-rank. Multiplies each primary entity's
+        # search score by its configured level weight and re-sorts, so distilled
+        # L1/L2/L3 memories surface above raw L0 notes. Self-gates on
+        # `levels_enabled`; a uniform weight across all-L0 results preserves the
+        # search-engine order, so this is a no-op for repos without derived tiers
+        # even when the flag is on. Runs before the skill boost so the G1 boost
+        # (validated skills to front) still wins over level weighting.
+        if context_results:
+            context_results = await self._apply_level_weights(context_results)
 
         # Tb G1: re-rank so validated skills surface first. The method
         # self-gates on `skills_enabled`, so this is a no-op when the flag is off.

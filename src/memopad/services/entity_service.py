@@ -376,6 +376,15 @@ class EntityService(BaseService[EntityModel]):
             content=final_content,
         )
 
+        # Fail-fast provenance invariant (Tb G5): a derived (L1/L2/L3) memory MUST carry a
+        # non-empty `source_entities` so the distillation chain stays reversible to L0. No-op
+        # unless `levels_enabled` is on and a level is set, so ordinary note creation (no
+        # `level` field) is completely untouched. Mirrors the guard on fast_write_entity.
+        _validate_provenance(
+            entity_markdown.frontmatter.metadata,
+            levels_enabled=bool(self.app_config and self.app_config.levels_enabled),
+        )
+
         # create entity and relations
         entity = await self.upsert_entity_from_markdown(file_path, entity_markdown, is_new=True)
 
@@ -444,6 +453,14 @@ class EntityService(BaseService[EntityModel]):
         entity_markdown = await self.entity_parser.parse_markdown_content(
             file_path=file_path,
             content=final_content,
+        )
+
+        # Fail-fast provenance invariant (Tb G5): enforce on the full update path too (mirrors
+        # fast_write_entity / fast_edit_entity). No-op unless `levels_enabled` is on and a
+        # derived level is set; ordinary note edits are completely untouched.
+        _validate_provenance(
+            entity_markdown.frontmatter.metadata,
+            levels_enabled=bool(self.app_config and self.app_config.levels_enabled),
         )
 
         # update entity and relations

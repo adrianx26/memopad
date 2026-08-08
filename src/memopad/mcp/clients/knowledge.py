@@ -367,6 +367,48 @@ class KnowledgeClient:
         )
         return response.json()
 
+    # --- Distillation (Tb L0-L3) ---
+
+    async def distill_memory(self, level: str = "L1", *, max_memories: int = 50) -> dict:
+        """Manually trigger a distillation pass (L1 facts / L2 scenarios / L3 persona).
+
+        Args:
+            level: Comma-separated levels to run (e.g. "L1", "L1,L2,L3").
+            max_memories: Max L0 entities to scan per L1 pass.
+
+        Returns:
+            Dict with per-level counts (l1_facts, l2_scenarios, l3_persona).
+        """
+        params = {"level": level, "max_memories": max_memories}
+        response = await call_post(
+            self.http_client, f"{self._base_path}/distill", params=params
+        )
+        return response.json()
+
+    async def list_facts(self, *, limit: int = 200) -> list:
+        """List distilled L1 atomic facts (entity_type=fact)."""
+        params = {"limit": limit}
+        response = await call_get(
+            self.http_client, f"{self._base_path}/facts", params=params
+        )
+        return response.json()
+
+    async def list_scenarios(self, *, limit: int = 200) -> list:
+        """List distilled L2 scenarios (entity_type=scenario)."""
+        params = {"limit": limit}
+        response = await call_get(
+            self.http_client, f"{self._base_path}/scenarios", params=params
+        )
+        return response.json()
+
+    async def get_persona(self) -> dict:
+        """Get the distilled L3 persona for this project (one per project).
+
+        Raises ToolError (via call_get) if no persona has been distilled yet.
+        """
+        response = await call_get(self.http_client, f"{self._base_path}/persona")
+        return response.json()
+
     # --- Resolution ---
 
     async def resolve_entity(self, identifier: str) -> str:

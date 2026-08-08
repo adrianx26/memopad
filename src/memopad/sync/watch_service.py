@@ -9,6 +9,7 @@ from typing import List, Optional, Set, Sequence, Callable, Awaitable, TYPE_CHEC
 
 if TYPE_CHECKING:
     from memopad.services.codegraph_service import CodeGraphService
+    from memopad.services.distillation_scheduler import DistillationScheduler
     from memopad.sync.sync_service import SyncService
 
 from memopad.config import MemoPadConfig, WATCH_STATUS_JSON, DATA_DIR_NAME
@@ -83,6 +84,12 @@ SyncServiceFactory = Callable[[Project], Awaitable["SyncService"]]
 # per change batch only when codegraph_enabled is on and source files changed.
 CodeGraphServiceFactory = Callable[[Project], Awaitable["CodeGraphService"]]
 
+# Type alias for the distillation scheduler factory (Tb G3 watch hook). The
+# scheduler is a process-wide singleton, so this factory takes no project arg
+# (unlike SyncServiceFactory / CodeGraphServiceFactory) and just returns the
+# shared scheduler instance. Default lazy-imports the DI singleton builder.
+DistillationSchedulerFactory = Callable[[], Awaitable["DistillationScheduler"]]
+
 
 class WatchService:
     def __init__(
@@ -92,6 +99,7 @@ class WatchService:
         quiet: bool = False,
         sync_service_factory: Optional[SyncServiceFactory] = None,
         codegraph_service_factory: Optional[CodeGraphServiceFactory] = None,
+        distillation_scheduler_factory: Optional[DistillationSchedulerFactory] = None,
     ):
         self.app_config = app_config
         self.project_repository = project_repository
@@ -103,6 +111,10 @@ class WatchService:
         # Tb G2: code-graph reindex factory. Lazily used at the end of a
         # change batch only when codegraph_enabled is on and source files changed.
         self._codegraph_service_factory = codegraph_service_factory
+        # Tb G3: distillation scheduler factory. Lazily used at the end of a
+        # change batch only when levels_pipeline_automatic is on and files were
+        # synced (the watch flow bypasses the API create path's trigger hook).
+        self._distillation_scheduler_factory = distillation_scheduler_factory
 
         # quiet mode for mcp so it doesn't mess up stdout
         self.console = Console(quiet=quiet)
@@ -128,6 +140,21 @@ class WatchService:
         from memopad.services.codegraph_service import get_codegraph_service
 
         return await get_codegraph_service(project)
+
+    async def _get_distillation_scheduler(self) -> "DistillationScheduler":
+        """Get the process-wide DistillationScheduler, using factory if provided.
+
+        Tb G3: the scheduler is a singleton (cadence counters must accumulate across
+        batches), so unlike ``_get_sync_service`` / ``_get_codegraph_service`` this
+        takes no project. The default lazy-imports the DI singleton builder and calls
+        it with the watch app_config (the builder returns the existing singleton after
+        first construction, so the watch path and the API path share one scheduler).
+        """
+        if self._distillation_scheduler_factory:
+            return await self._distillation_scheduler_factory()
+        from memopad.deps.services import get_distillation_scheduler
+
+        return await get_distillation_scheduler(self.app_config)
 
     @staticmethod
     def _batch_has_code_files(paths: List[str]) -> bool:
@@ -581,6 +608,29 @@ class WatchService:
                 )
                 self.console.print(
                     f"[orange]?[/orange] code graph re-index failed: {e}"
+                )
+
+        # --- Tb L0-L3: nudge the automatic distillation pipeline ---
+        # Trigger: `levels_pipeline_automatic` is on (the reactive scheduler) AND
+        #   the batch actually synced at least one file (`processed` non-empty). A
+        #   no-op batch (ignored files only) must not run distillation.
+        # Why: the watch flow bypasses the API create path, so the router's
+        #   `record_new_memory` hook never fires for files dropped into the project
+        #   directory. Without this hook, distillation stays dormant during a
+        #   watch/sync session even though new L0 notes arrived.
+        # Outcome: best-effort, fire-and-forget — a scheduler error is logged and
+        #   degraded, never aborting the file sync that already succeeded above.
+        if (
+            getattr(self.app_config, "levels_enabled", False)
+            and getattr(self.app_config, "levels_pipeline_automatic", False)
+            and processed
+        ):
+            try:
+                scheduler = await self._get_distillation_scheduler()
+                asyncio.create_task(scheduler.record_new_memory(project.id))
+            except Exception as e:  # explicit degradation, not a silent fallback
+                logger.warning(
+                    f"distillation watch hook failed (file sync already done): {e}"
                 )
 
         duration_ms = int((time.time() - start_time) * 1000)

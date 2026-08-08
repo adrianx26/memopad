@@ -42,6 +42,12 @@ from memopad.mcp.tools.skill import (
     list_skills,
     validate_skill,
 )
+from memopad.mcp.tools.distill import (
+    distill_memory,
+    list_facts,
+    list_scenarios,
+    get_persona,
+)
 from memopad.mcp.tools.shortterm import (
     add_session_ref,
     add_session_step,
@@ -74,6 +80,7 @@ __all__ = [
     "daily_note",
     "delete_note",
     "delete_project",
+    "distill_memory",
     "drill_down",
     "drill_down_session",
     "edit_note",
@@ -84,12 +91,15 @@ __all__ = [
     "get_relevant_context",
     "get_session_context",
     "get_skill",
+    "get_persona",
     "impact_path",
     "index_code",
     "list_directory",
+    "list_facts",
     "list_memory_projects",
     "list_observation_schema_suggestions",
     "list_observation_schemas",
+    "list_scenarios",
     "list_skills",
     "move_note",
     "optimize_storage",

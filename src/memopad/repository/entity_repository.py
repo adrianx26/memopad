@@ -1,5 +1,6 @@
 ﻿"""Repository for managing entities in the knowledge graph."""
 
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Sequence, Union, Any
 
@@ -377,6 +378,27 @@ class EntityRepository(Repository[Entity]):
             .limit(limit)
             .offset(offset)
         )
+        result = await self.execute_query(query)
+        return list(result.scalars().all())
+
+    async def find_updated_since(
+        self,
+        since: Optional[datetime] = None,
+        *,
+        limit: int = 50,
+    ) -> Sequence[Entity]:
+        """Entities updated after `since` (oldest first), with eager-loaded relations.
+
+        Tb L0-L3 distillation: the L1 pass selects raw L0 memories ingested since the
+        last pass watermark. `since=None` selects all (first pass / cold start).
+        Ordered oldest-first so a backlogged batch is processed fairly (FIFO) rather
+        than always re-touching the newest entities. Project-scoped via the base
+        select. Backend-agnostic — `updated_at` is a plain column, no JSON extract.
+        """
+        query = self.select()
+        if since is not None:
+            query = query.where(Entity.updated_at > since)
+        query = query.order_by(Entity.updated_at.asc()).limit(limit)
         result = await self.execute_query(query)
         return list(result.scalars().all())
 

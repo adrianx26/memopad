@@ -157,6 +157,10 @@ from memopad.deps.services import (
     DirectoryServiceV2ExternalDep,
     get_codegraph_service_v2_external,
     CodeGraphServiceV2ExternalDep,
+    get_distillation_scheduler,
+    DistillationSchedulerDep,
+    get_distillation_service_v2_external,
+    DistillationServiceV2ExternalDep,
 )
 
 from memopad.deps.importers import (
@@ -321,6 +325,11 @@ __all__ = [
     "DirectoryServiceV2ExternalDep",
     "get_codegraph_service_v2_external",
     "CodeGraphServiceV2ExternalDep",
+    # Distillation (Tb G3 engine)
+    "get_distillation_scheduler",
+    "DistillationSchedulerDep",
+    "get_distillation_service_v2_external",
+    "DistillationServiceV2ExternalDep",
     # Importers
     "get_chatgpt_importer",
     "ChatGPTImporterDep",

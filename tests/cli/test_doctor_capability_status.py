@@ -41,10 +41,11 @@ def _state_of(label: str, lines: list[str]) -> str:
 
 
 def test_capability_status_default_state(monkeypatch):
-    """Default config: G6 short-term reports ON (default on since 0.20.2),
-    every other capability reports off, G4 params show 0."""
+    """Default config: levels + short-term report ON (levels default-on since the
+    L0-L3 distillation release; G6 short-term on since 0.20.2), skills + codegraph
+    report off, G4 params show 0."""
     buf = _capture_console(monkeypatch)
-    config = MemoPadConfig()  # G6 on by default; all others off
+    config = MemoPadConfig()  # levels + shortterm on by default; skills/codegraph off
 
     doctor.print_capability_status(config)
 
@@ -59,10 +60,12 @@ def test_capability_status_default_state(monkeypatch):
     # G4 params present with their disabled value (0).
     assert "recall_max_chars_per_memory" in out
     assert "recall_timeout_ms" in out
-    # Per-flag state: G6 on, every other capability flag off.
+    # Per-flag state: levels_enabled, levels_pipeline_automatic, and
+    # shortterm_enabled are ON by default; skills_enabled and codegraph_enabled off.
+    default_on = {"levels_enabled", "levels_pipeline_automatic", "shortterm_enabled"}
     for attr, label, _ in doctor._CAPABILITY_FLAGS:
         state = _state_of(label, lines)
-        if attr == "shortterm_enabled":
+        if attr in default_on:
             assert state == "on", f"{label} should be ON by default, got {state!r}"
         else:
             assert state == "off", f"{label} should be off by default, got {state!r}"

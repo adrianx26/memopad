@@ -1,5 +1,88 @@
 ﻿# CHANGELOG
 
+## [0.21.0] - 2026-08-08
+
+### Added — Native, automatic L0–L3 distillation (code-only, skill-driven)
+
+The Tb-borrowed scaffolding (G3 scheduler, G5 provenance, G1 skills) is now
+connected to a real engine. MemoPad distils its structured L0 observations into a
+memory pyramid — L1 atomic facts, L2 scenarios, L3 persona — **natively, by
+default, automatically, with no user intervention and no external tool / API /
+key.** Distillation is pure in-app code: graph reduction + scoring + clustering
+over already-structured `- [category] content` observations. It runs
+automatically on every write (the create path + the file-watch hook nudge the
+scheduler) and is also surfaced on demand via MCP tools, a CLI command, and a
+doctor probe.
+
+- **`DistillationService`** (`services/distillation_service.py`) — the hard
+  backbone: `run_l1_pass` (extract atomic facts from distillable observations,
+  dedup by embedding-cosine when `MEMOPAD_EMBEDDINGS_ENABLED` else token-Jaccard,
+  reconfirm-or-create, confidence = category base + relation-degree bonus,
+  clamped [0,1]), `run_l2_pass` (union-find clustering over shared tag / source /
+  similarity ≥ `l2_similarity_threshold` → scenarios), `run_l3_pass` (aggregate
+  stable facts ≥ `l3_min_confidence` into one persona per project). Idempotent
+  re-runs (dedup + reconfirm bumps confidence to `max(existing, 0.9)`; scenario /
+  persona titles are stable so re-passes update in place). Fail-fast, 100%-tested.
+  State persists to `<data_dir>/distillation/project-<id>-state.json` (watermark).
+- **`FactExtractor` Protocol** — the "add-in" seam for future improvement.
+  `CodeExtractor` ships as the default. A future extractor (even an LLM one,
+  behind a flag) implements the same Protocol with no backbone changes.
+- **Versioned `distillation` Skill asset** — the soft/improvable layer. On first
+  run `ensure_distillation_skill` creates the skill from a bundled template (the
+  procedure as `[trigger]/[step]/[validation]` observations + a tunables block).
+  `load_skill_tunables` reads overrides from the skill and falls back to config
+  defaults when `skills_enabled` is off (distillation works via config defaults
+  either way). Bump `skill_version` to retune without touching code.
+- **Provenance (G5)** enforced uniformly: derived L1/L2/L3 entities carry
+  `source_entities` in `entity_metadata` (fail-fast invariant), with
+  `derived_from` relations; `drill_down` traces L3 → L1 → L0.
+- **Level-weighted ranking** in `build_context`: `relevance_score` is multiplied
+  by the configured level weight (L3=1.0, L2=0.85, L1=0.70, L0=0.40) and
+  re-sorted. Self-gates on `levels_enabled` — a no-op when off.
+- **Default ON:** `levels_enabled` and `levels_pipeline_automatic` flip to `True`.
+  Safe: provenance only constrains L1+ (every existing note is L0/unset → no-op);
+  level ranking only re-weights.
+- **Surface layer:**
+  - MCP tools — `distill_memory`, `list_facts`, `list_scenarios`, `get_persona`
+    (`mcp/tools/distill.py`, registered in `mcp/tools/__init__.py`).
+  - CLI — `memopad distill [--project] [--level L1,L2,L3] [--max-memories]
+    [--dry-run]` (`cli/commands/distill.py`, registered in `cli/main.py`).
+  - Doctor — a G3 distillation-tiers probe (counts L1/L2/L3; informational, never
+    affects exit code) + an updated G3 hint reflecting the active pipeline.
+  - HTTP endpoints — `POST /knowledge/distill`, `GET /knowledge/facts`,
+    `/scenarios`, `/persona`; `KnowledgeClient` methods for each.
+- **Wiring:** a process-wide singleton `DistillationScheduler` (lock-guarded)
+  with a `DistillationDispatcher` that builds a per-project `DistillationService`
+  via the standalone `get_distillation_service` factory. The create path and the
+  watch hook fire `scheduler.record_new_memory` (fire-and-forget,
+  `asyncio.create_task`, errors logged + degraded — never fails the write). The
+  router/helper gates on `is_pipeline_active` (`levels_enabled` AND
+  `levels_pipeline_automatic`).
+
+### Tests
+
+- `tests/services/test_distillation_service.py` (18) — L1 extract/dedup/reconfirm/
+  create, L2 clustering, L3 aggregation, idempotent cold restart, tunable loading
+  from skill, embeddings-off path, custom extractor, scheduler debounce,
+  dispatcher fault isolation.
+- `tests/services/test_context_service_level_ranking.py` (14) — level weights
+  multiply + re-sort end-to-end via `build_context`; no-op when disabled.
+- `tests/services/test_provenance_full_path.py` — `create_entity`/`update_entity`
+  reject L1 without `source_entities` when `levels_enabled` on; no-op for L0.
+- `tests/api/test_knowledge_router_distillation.py` (3) — `_schedule_distillation`
+  fires when the pipeline is active, skips when automatic/levels off.
+- `tests/sync/test_watch_service_distillation.py` (3) — watch hook fires on a
+  synced file when the flag is on, skips when off, degrades on build failure.
+- `tests/mcp/test_distill_tools.py` (6) — tool rendering for all four tools,
+  including the no-persona friendly-error path.
+- `tests/cli/test_distill_cli.py` (9) — `_parse_levels` validation, dry-run/pass
+  dispatch, invalid-level / out-of-range rejection.
+
+No regressions: pre-existing mcp/api/cli failures (Alembic MultipleHeads, CTE
+`near "?"`, permalink uniqueness, import file-path, `SyncService.__init__`
+conftest fixture) were confirmed by stashing this work and reproducing them on
+the clean 0.20.3 baseline.
+
 ## [0.20.3] - 2026-08-06
 
 ### Changed — CodeGraph (G2) search isolation

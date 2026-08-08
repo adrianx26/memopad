@@ -165,6 +165,37 @@ async def run_capability_probes(
         except Exception as e:  # informational probe — surface, don't abort
             console.print(f"[yellow]Short-term sessions probe failed: {e}[/yellow]")
 
+    # --- G3 distillation tiers: count L1/L2/L3 via the list endpoints ---
+    # Trigger: levels_enabled is on (the /knowledge/facts, /scenarios, /persona
+    # endpoints are always mounted, but distillation only produces entities when
+    # the levels pipeline is active — gating the probe on levels_enabled keeps the
+    # count meaningful and avoids noise when the feature is off).
+    # Why: gives the user a snapshot of how many distilled tiers exist, mirroring
+    #      the G1 skills count probe. The persona endpoint 404s when none exists,
+    #      so it is wrapped in its own try/except (distinct from a probe failure).
+    # Outcome: a one-line L1/L2/L3 count summary; a probe failure is reported, not
+    #          raised, and never affects the exit code.
+    if config.levels_enabled:
+        try:
+            facts = await knowledge_client.list_facts(limit=1)
+            scenarios = await knowledge_client.list_scenarios(limit=1)
+            # list_facts/list_scenarios return lists; use len() for the count
+            # (limit=1 caps the payload — we only need presence/absence here, but
+            # len() is honest about how many were returned).
+            n_facts = len(facts)
+            n_scenarios = len(scenarios)
+            try:
+                await knowledge_client.get_persona()
+                n_persona = 1
+            except ToolError:
+                n_persona = 0
+            console.print(
+                "[blue]Distillation tiers (G3):[/blue] "
+                f"L1 facts={n_facts} L2 scenarios={n_scenarios} L3 persona={n_persona}"
+            )
+        except Exception as e:  # informational probe — surface, don't abort
+            console.print(f"[yellow]Distillation tiers probe failed: {e}[/yellow]")
+
     # --- G2 / G5 / G3: config-only hints (no safe aggregate probe) ---
     # These have no cheap "count everything" endpoint (G2 find_symbol needs a
     # name; G5/G3 state is in-memory or per-write). We surface a hint instead of
@@ -183,8 +214,10 @@ async def run_capability_probes(
         )
     if config.levels_pipeline_automatic:
         console.print(
-            "[blue]Distillation scheduler (G3):[/blue] active — emits triggers; the "
-            "distiller callback is a no-op seam until the levels pipeline lands."
+            "[blue]Distillation scheduler (G3):[/blue] active — emits triggers on "
+            "every write; the code-only distiller (L1 facts → L2 scenarios → L3 "
+            "persona) runs automatically. `memopad distill` / `distill_memory` are "
+            "the on-demand surface."
         )
 
 

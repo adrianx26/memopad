@@ -182,13 +182,18 @@ class MemoPadConfig(BaseSettings):
     )
 
     # --- Levels (L0–L3) & Tb-derived memory features ---
-    # These are opt-in feature flags. All default to False so existing flows are
-    # untouched until a user explicitly enables them (MEMOPAD_LEVELS_ENABLED=true, etc.).
+    # The distillation pipeline (L0 -> L1 facts -> L2 scenarios -> L3 persona) is native and
+    # automatic: `levels_enabled` and `levels_pipeline_automatic` default ON so distillation runs
+    # without user intervention, using in-app code only (no external tool/API/key). Provenance
+    # enforcement and level-aware ranking are likewise on by default. Both are safe: provenance
+    # only constrains L1+ entities (every existing note is L0/unset = no-op) and level ranking only
+    # re-weights. The remaining features (skills, codegraph) stay opt-in (default off).
     # See `memopad-levels-implementation-plan.md` and `tb-borrow-implementation-plan.md`.
     levels_enabled: bool = Field(
-        default=False,
+        default=True,
         description="Enable L0–L3 memory levels: provenance enforcement (source_entities), "
-        "level-aware ranking, and the distillation pipeline hooks. Off = current behavior.",
+        "level-aware ranking, and the distillation pipeline hooks. Default ON — distillation is "
+        "native and automatic. Off = current (flat) behavior; safe to disable for legacy projects.",
     )
     skills_enabled: bool = Field(
         default=False,
@@ -240,11 +245,12 @@ class MemoPadConfig(BaseSettings):
         le=1.0,
     )
     levels_pipeline_automatic: bool = Field(
-        default=False,
+        default=True,
         description="Enable the reactive distillation scheduler (Tb G3): event-driven "
-        "trigger cadences, idle timeout, and warmup. Off = distillation stays manual. "
+        "trigger cadences, idle timeout, and warmup that drive automatic L0->L1->L2->L3 "
+        "distillation. Default ON (with levels_enabled) so distillation is automatic. "
         "Requires levels_enabled. The scheduler emits trigger decisions; actual distillation "
-        "is performed by a callback (default no-op until the distiller lands).",
+        "is performed by the in-app DistillationService callback (code-only, no external model).",
     )
     # --- Distillation cadences (Tb G3) ---
     # Only consulted when levels_pipeline_automatic is on. Zero means the given
@@ -278,6 +284,68 @@ class MemoPadConfig(BaseSettings):
         default=True,
         description="New-session warmup: progressively widen retrieval as the session grows "
         "(1 -> 2 -> 4 -> ... up to N) rather than cold-starting at full depth.",
+    )
+
+    # --- Distillation tunables (L0–L3 pipeline, code-only engine) ---
+    # These govern the deterministic distillation passes run by DistillationService. They are the
+    # bootstrap defaults; the `distillation` skill asset (if present in a project) can override them
+    # per-project so the procedure is improvable without code changes (bump skill_version).
+    # Level weights multiply relevance_score in build_context (plan §8.1). Higher = more trusted.
+    level_weight_l3: float = Field(
+        default=1.00,
+        description="Ranking weight for L3 (persona/core) entities in build_context.",
+        ge=0.0,
+        le=1.0,
+    )
+    level_weight_l2: float = Field(
+        default=0.85,
+        description="Ranking weight for L2 (scenario) entities in build_context.",
+        ge=0.0,
+        le=1.0,
+    )
+    level_weight_l1: float = Field(
+        default=0.70,
+        description="Ranking weight for L1 (atomic fact) entities in build_context.",
+        ge=0.0,
+        le=1.0,
+    )
+    level_weight_l0: float = Field(
+        default=0.40,
+        description="Ranking weight for L0 (raw) entities in build_context.",
+        ge=0.0,
+        le=1.0,
+    )
+    # Candidate selection: which observation categories are distillable into L1 facts.
+    distillable_categories: list[str] = Field(
+        default_factory=lambda: [
+            "definition", "rule", "constraint", "preference", "fact", "principle", "summary",
+        ],
+        description="Observation categories eligible for promotion to L1 atomic facts. Free-form "
+        "(MemoPad has no fixed canonical category set); edit the `distillation` skill to override "
+        "per-project.",
+    )
+    # Similarity thresholds for dedup/clustering. When MEMOPAD_EMBEDDINGS_ENABLED is on, similarity
+    # is embedding cosine; otherwise it degrades to token-Jaccard (mirrors hybrid_search modes).
+    dedup_similarity_threshold: float = Field(
+        default=0.92,
+        description="Similarity at/above which an L1 candidate is treated as a duplicate of an "
+        "existing L1 fact (reconfirm: bump confidence) instead of creating a new fact.",
+        ge=0.0,
+        le=1.0,
+    )
+    l2_similarity_threshold: float = Field(
+        default=0.75,
+        description="Similarity at/above which two L1 facts are joined into the same L2 scenario "
+        "cluster (also joined by shared tag or shared source_entity).",
+        ge=0.0,
+        le=1.0,
+    )
+    l3_min_confidence: float = Field(
+        default=0.70,
+        description="Minimum confidence for an L1 fact to be considered 'stable' and aggregated "
+        "into the L3 persona.",
+        ge=0.0,
+        le=1.0,
     )
 
     # --- Retrieval budget (Tb G4: per-memory cap + graceful timeout) ---

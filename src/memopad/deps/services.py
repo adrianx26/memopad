@@ -8,12 +8,14 @@ This module provides service-layer dependencies:
 """
 
 import asyncio
+from pathlib import Path
 from typing import Annotated, Any, Callable, Coroutine, Mapping, Protocol
 
 from fastapi import Depends
 from loguru import logger
 
 from memopad.deps.config import AppConfigDep
+from memopad.deps.db import SessionMakerDep
 from memopad.deps.projects import (
     ProjectConfigDep,
     ProjectConfigV2Dep,
@@ -51,6 +53,15 @@ from memopad.services.link_resolver import LinkResolver
 from memopad.services.search_service import SearchService
 from memopad.services.conflict_service import ConflictService
 from memopad.services.codegraph_service import CodeGraphService
+from memopad.services.distillation_scheduler import (
+    DistillationScheduler,
+    PipelineConfig,
+)
+from memopad.services.distillation_service import (
+    DistillationDispatcher,
+    DistillationService,
+)
+from memopad.services.embedding_service import EmbeddingService
 from memopad.services.schema_service import SchemaService
 from memopad.sync import SyncService
 
@@ -412,11 +423,13 @@ async def get_context_service(
     search_repository: SearchRepositoryDep,
     entity_repository: EntityRepositoryDep,
     observation_repository: ObservationRepositoryDep,
+    app_config: AppConfigDep,
 ) -> ContextService:
     return ContextService(
         search_repository=search_repository,
         entity_repository=entity_repository,
         observation_repository=observation_repository,
+        app_config=app_config,
     )
 
 
@@ -427,12 +440,14 @@ async def get_context_service_v2(  # pragma: no cover
     search_repository: SearchRepositoryV2Dep,
     entity_repository: EntityRepositoryV2Dep,
     observation_repository: ObservationRepositoryV2Dep,
+    app_config: AppConfigDep,
 ) -> ContextService:
     """Create ContextService for v2 API."""
     return ContextService(
         search_repository=search_repository,
         entity_repository=entity_repository,
         observation_repository=observation_repository,
+        app_config=app_config,
     )
 
 
@@ -443,12 +458,14 @@ async def get_context_service_v2_external(
     search_repository: SearchRepositoryV2ExternalDep,
     entity_repository: EntityRepositoryV2ExternalDep,
     observation_repository: ObservationRepositoryV2ExternalDep,
+    app_config: AppConfigDep,
 ) -> ContextService:
     """Create ContextService for v2 API (uses external_id)."""
     return ContextService(
         search_repository=search_repository,
         entity_repository=entity_repository,
         observation_repository=observation_repository,
+        app_config=app_config,
     )
 
 
@@ -700,4 +717,118 @@ async def get_codegraph_service_v2_external(
 
 CodeGraphServiceV2ExternalDep = Annotated[
     CodeGraphService, Depends(get_codegraph_service_v2_external)
+]
+
+
+# --- Distillation (Tb G3 engine: scheduler singleton + per-project service) ---
+
+
+# Process-wide singleton. The scheduler must survive across requests so its
+# cadence counters accumulate; it is NOT rebuilt per request. The DistillationDispatcher
+# it owns builds a fresh per-project DistillationService on each trigger (stateless).
+_distillation_scheduler_singleton: DistillationScheduler | None = None
+_distillation_init_lock: asyncio.Lock | None = None
+
+
+async def _build_distillation_service_for_project(
+    project_id: int,
+) -> DistillationService | None:
+    """Standalone per-project service factory for the dispatcher (background-task path).
+
+    Runs outside a request (the scheduler dispatches from a fire-and-forget
+    ``asyncio.create_task``), so it cannot use FastAPI DI. It resolves the project
+    from its numeric id and builds the service via the standalone factory —
+    reusing the app's existing DB session (``get_or_create_db`` is idempotent on
+    the db_path). Failures are swallowed and logged so a distillation error can
+    never propagate back through the scheduler into the write that triggered it.
+    """
+    try:
+        from memopad import db
+        from memopad.config import ConfigManager
+        from memopad.repository.project_repository import ProjectRepository
+
+        from memopad.services.distillation_factory import get_distillation_service
+
+        app_cfg = ConfigManager().config
+        _, session_maker = await db.get_or_create_db(
+            db_path=app_cfg.database_path, db_type=db.DatabaseType.FILESYSTEM
+        )
+        project = await ProjectRepository(session_maker).get_by_id(project_id)
+        if project is None:
+            logger.warning(
+                f"distillation trigger for unknown project_id={project_id}; skipping"
+            )
+            return None
+        return await get_distillation_service(project, scheduler=_distillation_scheduler_singleton)
+    except Exception as exc:  # pragma: no cover - degrade gracefully, never raise
+        logger.error(f"distillation service build failed for project {project_id}: {exc}")
+        return None
+
+
+async def get_distillation_scheduler(app_config: AppConfigDep) -> DistillationScheduler:
+    """Return the process-wide DistillationScheduler singleton.
+
+    Constructed once (lock-guarded) with a ``DistillationDispatcher`` whose service
+    factory is the standalone builder above. The dispatcher closes over the module
+    global, so it reads the singleton lazily at trigger time (after this function has
+    set it) — that breaks the scheduler↔dispatcher cycle cleanly.
+    """
+    global _distillation_scheduler_singleton, _distillation_init_lock
+    if _distillation_scheduler_singleton is not None:
+        return _distillation_scheduler_singleton
+    if _distillation_init_lock is None:
+        _distillation_init_lock = asyncio.Lock()
+    async with _distillation_init_lock:
+        if _distillation_scheduler_singleton is None:
+            pipeline_config = PipelineConfig.from_app_config(app_config)
+            dispatcher = DistillationDispatcher(_build_distillation_service_for_project)
+            _distillation_scheduler_singleton = DistillationScheduler(
+                pipeline_config, callback=dispatcher
+            )
+    return _distillation_scheduler_singleton
+
+
+DistillationSchedulerDep = Annotated[
+    DistillationScheduler, Depends(get_distillation_scheduler)
+]
+
+
+async def get_distillation_service_v2_external(
+    entity_repository: EntityRepositoryV2ExternalDep,
+    observation_repository: ObservationRepositoryV2ExternalDep,
+    relation_repository: RelationRepositoryV2ExternalDep,
+    search_service: SearchServiceV2ExternalDep,
+    entity_service: EntityServiceV2ExternalDep,
+    project_id: ProjectExternalIdPathDep,
+    app_config: AppConfigDep,
+    session_maker: SessionMakerDep,
+    scheduler: DistillationSchedulerDep,
+) -> DistillationService:
+    """Create DistillationService for v2 API (external_id project path).
+
+    Used by the manual ``/distill`` endpoint and the ``/facts`` / ``/scenarios`` /
+    ``/persona`` list endpoints. The automatic create-path trigger does NOT use this
+    — it goes through the scheduler singleton + dispatcher (standalone factory) so
+    distillation never blocks or fails the write.
+    """
+    embedding_service = EmbeddingService.maybe_create(session_maker, project_id)
+    state_path = (
+        Path(app_config.data_dir_path) / "distillation" / f"project-{project_id}-state.json"
+    )
+    return DistillationService(
+        entity_repository=entity_repository,
+        observation_repository=observation_repository,
+        relation_repository=relation_repository,
+        search_service=search_service,
+        entity_service=entity_service,
+        app_config=app_config,
+        project_id=project_id,
+        scheduler=scheduler,
+        embedding_service=embedding_service,
+        state_path=state_path,
+    )
+
+
+DistillationServiceV2ExternalDep = Annotated[
+    DistillationService, Depends(get_distillation_service_v2_external)
 ]

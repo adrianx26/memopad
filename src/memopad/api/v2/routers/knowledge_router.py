@@ -26,6 +26,8 @@ from memopad.deps import (
     FileServiceV2ExternalDep,
     ObservationRepositoryV2ExternalDep,
     CodeGraphServiceV2ExternalDep,
+    DistillationSchedulerDep,
+    DistillationServiceV2ExternalDep,
 )
 from memopad.schemas import DeleteEntitiesResponse
 from memopad.schemas.base import Entity
@@ -59,7 +61,37 @@ from memopad.services.skill_service import (
     structural_validation,
 )
 
+# --- Distillation (Tb L0-L3) ---
+from memopad.services.distillation_scheduler import is_pipeline_active
+from memopad.services.distillation_service import (
+    FACT_ENTITY_TYPE as DISTILL_FACT_TYPE,
+    SCENARIO_ENTITY_TYPE as DISTILL_SCENARIO_TYPE,
+    PERSONA_ENTITY_TYPE as DISTILL_PERSONA_TYPE,
+)
+import asyncio
+
 router = APIRouter(prefix="/knowledge", tags=["knowledge-v2"])
+
+
+def _schedule_distillation(scheduler, app_config, project_id: int) -> None:
+    """Fire-and-forget an automatic distillation pass; never fails the write.
+
+    Gated on `is_pipeline_active` (levels_enabled AND levels_pipeline_automatic) so
+    turning the flag off disables auto-distillation even though the scheduler's own
+    cadences may be non-zero. The scheduler dispatches fired triggers to the
+    DistillationDispatcher, which builds a per-project service and swallows its own
+    errors — so this only needs to guard against policy-layer failures.
+    """
+    if not is_pipeline_active(app_config):
+        return
+
+    async def _run() -> None:
+        try:
+            await scheduler.record_new_memory(project_id)
+        except Exception as exc:  # pragma: no cover - never propagate to the caller
+            logger.warning(f"distillation trigger failed for project {project_id}: {exc}")
+
+    asyncio.create_task(_run())
 
 ## Resolution endpoint
 
@@ -191,6 +223,8 @@ async def create_entity(
     search_service: SearchServiceV2ExternalDep,
     task_scheduler: TaskSchedulerDep,
     file_service: FileServiceV2ExternalDep,
+    scheduler: DistillationSchedulerDep,
+    app_config: AppConfigDep,
     fast: bool = Query(
         True, description="If true, write quickly and defer indexing to background tasks."
     ),
@@ -227,6 +261,9 @@ async def create_entity(
     content = await file_service.read_file_content(entity.file_path)
     result = result.model_copy(update={"content": content})
 
+    # Tb L0-L3: nudge the automatic distillation pipeline (fire-and-forget).
+    _schedule_distillation(scheduler, app_config, project_id)
+
     logger.info(
         f"API v2 response: endpoint='create_entity' external_id={entity.external_id}, title={result.title}, permalink={result.permalink}, status_code=201"
     )
@@ -247,6 +284,8 @@ async def update_entity_by_id(
     entity_repository: EntityRepositoryV2ExternalDep,
     task_scheduler: TaskSchedulerDep,
     file_service: FileServiceV2ExternalDep,
+    scheduler: DistillationSchedulerDep,
+    app_config: AppConfigDep,
     entity_id: str = Path(..., description="Entity external ID (UUID)"),
     fast: bool = Query(
         True, description="If true, write quickly and defer indexing to background tasks."
@@ -309,6 +348,9 @@ async def update_entity_by_id(
     content = await file_service.read_file_content(entity.file_path)
     result = result.model_copy(update={"content": content})
 
+    # Tb L0-L3: nudge the automatic distillation pipeline (fire-and-forget).
+    _schedule_distillation(scheduler, app_config, project_id)
+
     logger.info(
         f"API v2 response: external_id={entity_id}, created={created}, status_code={response.status_code}"
     )
@@ -325,6 +367,8 @@ async def edit_entity_by_id(
     entity_repository: EntityRepositoryV2ExternalDep,
     task_scheduler: TaskSchedulerDep,
     file_service: FileServiceV2ExternalDep,
+    scheduler: DistillationSchedulerDep,
+    app_config: AppConfigDep,
     entity_id: str = Path(..., description="Entity external ID (UUID)"),
     fast: bool = Query(
         True, description="If true, write quickly and defer indexing to background tasks."
@@ -390,6 +434,9 @@ async def edit_entity_by_id(
         # Always read and return file content
         content = await file_service.read_file_content(updated_entity.file_path)
         result = result.model_copy(update={"content": content})
+
+        # Tb L0-L3: nudge the automatic distillation pipeline (fire-and-forget).
+        _schedule_distillation(scheduler, app_config, project_id)
 
         logger.info(
             f"API v2 response: external_id={entity_id}, operation='{data.operation}', status_code=200"
@@ -1028,3 +1075,79 @@ async def code_context(
         "imports": ctx.imports,
         "render": ctx.render(view, max_tokens=max_tokens),
     }
+
+
+## Distillation endpoints (Tb L0-L3)
+
+
+@router.post("/distill")
+async def distill_memory(
+    project_id: ProjectExternalIdPathDep,
+    service: DistillationServiceV2ExternalDep,
+    level: str = Query(
+        "L1",
+        description="Comma-separated distillation levels to run (L1, L2, L3). "
+        "L1 distils new L0 observations into atomic facts; L2 clusters facts into "
+        "scenarios; L3 aggregates stable facts into the persona.",
+    ),
+    max_memories: int = Query(50, ge=1, le=1000, description="Max L0 entities to scan per L1 pass."),
+) -> dict:
+    """Manually trigger a distillation pass (bypasses the automatic cadence).
+
+    Runs synchronously and returns per-level counts. The automatic create-path
+    trigger is fire-and-forget; this endpoint is for on-demand / debug / CLI use.
+    """
+    levels = {part.strip().upper() for part in level.split(",") if part.strip()}
+    unknown = levels - {"L1", "L2", "L3"}
+    if unknown:
+        raise HTTPException(
+            status_code=400, detail=f"Unknown level(s): {sorted(unknown)}. Use L1, L2, L3."
+        )
+    summary: dict = {"project_id": project_id, "levels": sorted(levels)}
+    if "L1" in levels:
+        summary["l1_facts"] = await service.run_l1_pass(max_memories=max_memories)
+    if "L2" in levels:
+        summary["l2_scenarios"] = await service.run_l2_pass()
+    if "L3" in levels:
+        summary["l3_persona"] = await service.run_l3_pass()
+    return summary
+
+
+@router.get("/facts", response_model=list[EntityResponseV2])
+async def list_facts(
+    project_id: ProjectExternalIdPathDep,
+    entity_repository: EntityRepositoryV2ExternalDep,
+    limit: int = Query(200, ge=1, le=1000, description="Max facts to return."),
+) -> list[EntityResponseV2]:
+    """List distilled L1 atomic facts (entity_type=fact)."""
+    facts = await entity_repository.list_by_entity_type(DISTILL_FACT_TYPE, limit=limit)
+    return [EntityResponseV2.model_validate(f) for f in facts]
+
+
+@router.get("/scenarios", response_model=list[EntityResponseV2])
+async def list_scenarios(
+    project_id: ProjectExternalIdPathDep,
+    entity_repository: EntityRepositoryV2ExternalDep,
+    limit: int = Query(200, ge=1, le=1000, description="Max scenarios to return."),
+) -> list[EntityResponseV2]:
+    """List distilled L2 scenarios (entity_type=scenario)."""
+    scenarios = await entity_repository.list_by_entity_type(DISTILL_SCENARIO_TYPE, limit=limit)
+    return [EntityResponseV2.model_validate(s) for s in scenarios]
+
+
+@router.get("/persona", response_model=EntityResponseV2)
+async def get_persona(
+    project_id: ProjectExternalIdPathDep,
+    entity_repository: EntityRepositoryV2ExternalDep,
+) -> EntityResponseV2:
+    """Get the distilled L3 persona for this project (one per project).
+
+    Raises 404 if no persona has been distilled yet.
+    """
+    personas = await entity_repository.list_by_entity_type(DISTILL_PERSONA_TYPE, limit=1)
+    if not personas:
+        raise HTTPException(
+            status_code=404,
+            detail="No persona has been distilled yet. Run a distillation pass with level=L3.",
+        )
+    return EntityResponseV2.model_validate(personas[0])
