@@ -1,6 +1,7 @@
 ﻿"""Service for syncing files between filesystem and database."""
 
 import asyncio
+import fnmatch
 import os
 import sys
 import time
@@ -143,6 +144,19 @@ class SyncService:
         self.file_service = file_service
         # Load ignore patterns once at initialization for performance
         self._ignore_patterns = load_bmignore_patterns()
+
+        # Pre-compile ignore patterns for O(1) lookups during scan
+        self._ignore_exact: Set[str] = set()
+        self._ignore_globs: List[str] = []
+
+        for p in self._ignore_patterns:
+            # Strip slashes to match simple file/dir names
+            clean_p = p.strip("/")
+            if "*" in clean_p or "?" in clean_p or "[" in clean_p:
+                self._ignore_globs.append(clean_p)
+            else:
+                self._ignore_exact.add(clean_p)
+
         # Circuit breaker: track file failures to prevent infinite retry loops
         # Use OrderedDict for LRU behavior with bounded size to prevent unbounded memory growth
         self._file_failures: OrderedDict[str, FileFailureInfo] = OrderedDict()
@@ -1252,45 +1266,59 @@ class SyncService:
         information from directory entries. This reduces network I/O by 50% on network
         filesystems like TigrisFS by avoiding redundant stat() calls.
 
+        It uses an iterative stack-based approach with optimized ignore checks
+        to avoid recursion overhead and Path object creation for ignored files.
+
         Args:
             directory: Directory to scan
 
         Yields:
             Tuples of (absolute_file_path, stat_info) for each file
         """
-        try:
-            entries = await aiofiles.os.scandir(directory)
-        except PermissionError:
-            logger.warning(f"Permission denied scanning directory: {directory}")
-            return
+        # Stack of directories to scan (avoid recursion overhead)
+        stack: List[Path] = [directory]
 
-        results = []
-        subdirs = []
-
-        for entry in entries:
-            entry_path = Path(entry.path)
-
-            # Check ignore patterns
-            if should_ignore_path(entry_path, directory, self._ignore_patterns):
-                logger.trace(f"Ignoring path per .bmignore: {entry_path.relative_to(directory)}")
+        while stack:
+            current_dir = stack.pop()
+            try:
+                entries = await aiofiles.os.scandir(current_dir)
+            except PermissionError:
+                logger.warning(f"Permission denied scanning directory: {current_dir}")
                 continue
 
-            if entry.is_dir(follow_symlinks=False):
-                # Collect subdirectories to recurse into
-                subdirs.append(entry_path)
-            elif entry.is_file(follow_symlinks=False):
-                # Get cached stat info (no extra syscall!)
-                stat_info = entry.stat(follow_symlinks=False)
-                results.append((entry.path, stat_info))
+            subdirs_to_push = []
 
-        # Yield files from current directory
-        for file_path, stat_info in results:
-            yield (file_path, stat_info)
+            for entry in entries:
+                # Optimized ignore check using string operations (avoids Path creation)
+                name = entry.name
 
-        # Recurse into subdirectories
-        for subdir in subdirs:
-            async for result in self.scan_directory(subdir):
-                yield result
+                # 1. Fast path: exact match check (O(1))
+                if name in self._ignore_exact:
+                    continue
+
+                # 2. Glob match check (only if needed)
+                if self._ignore_globs:
+                    ignored_by_glob = False
+                    for glob in self._ignore_globs:
+                        if fnmatch.fnmatch(name, glob):
+                            ignored_by_glob = True
+                            break
+                    if ignored_by_glob:
+                        continue
+
+                # Not ignored
+                if entry.is_dir(follow_symlinks=False):
+                    # Only create Path object for directories we need to recurse into
+                    subdirs_to_push.append(Path(entry.path))
+                elif entry.is_file(follow_symlinks=False):
+                    # Get cached stat info (no extra syscall!)
+                    stat_info = entry.stat(follow_symlinks=False)
+                    yield (entry.path, stat_info)
+
+            # Push subdirs to stack in reverse order to maintain similar traversal order
+            # (though strictly not required for sync correctness)
+            for subdir in reversed(subdirs_to_push):
+                stack.append(subdir)
 
 
 async def get_sync_service(project: Project) -> SyncService:  # pragma: no cover
