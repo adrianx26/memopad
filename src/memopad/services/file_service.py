@@ -58,7 +58,7 @@ class FileService:
         # File metadata cache with TTL and size limit (Phase 1 Optimization #1)
         # Use OrderedDict for LRU eviction
         from collections import OrderedDict
-        self._metadata_cache: OrderedDict[str, Tuple[FileMetadata, float]] = OrderedDict()
+        self._metadata_cache: OrderedDict[str, Tuple[FileMetadata, float, float]] = OrderedDict()
         self._max_metadata_cache_size = 5000  # Prevent unbounded memory growth
         self._metadata_cache_ttl = 60.0  # Base TTL - can be adaptive per file
         self._cache_lock = asyncio.Lock()  # Lock for thread-safe cache operations
@@ -521,11 +521,11 @@ class FileService:
         if use_cache:
             async with self._cache_lock:
                 if cache_key in self._metadata_cache:
-                    cached_metadata, cached_time = self._metadata_cache[cache_key]
+                    cached_metadata, cached_time, cached_ttl = self._metadata_cache[cache_key]
                     current_time = time.time()
 
                     # Check if cache entry is still valid (within TTL)
-                    if current_time - cached_time < self._metadata_cache_ttl:
+                    if current_time - cached_time < cached_ttl:
                         logger.trace(f"File metadata cache hit: {cache_key}")
                         return cached_metadata
                     else:
@@ -546,8 +546,9 @@ class FileService:
         # Cache the result with current timestamp (with lock for thread safety)
         if use_cache:
             async with self._cache_lock:
-                self._metadata_cache[cache_key] = (metadata, time.time())
-                logger.trace(f"Cached file metadata: {cache_key}")
+                ttl = self._calculate_adaptive_ttl(full_path)
+                self._metadata_cache[cache_key] = (metadata, time.time(), ttl)
+                logger.trace(f"Cached file metadata: {cache_key} with ttl {ttl}")
 
         return metadata
     
@@ -619,8 +620,8 @@ class FileService:
             # Remove expired entries (TTL eviction)
             now = time.time()
             expired_keys = [
-                k for k, (_, timestamp) in self._metadata_cache.items()
-                if now - timestamp > self._metadata_cache_ttl
+                k for k, (_, timestamp, ttl) in self._metadata_cache.items()
+                if now - timestamp > ttl
             ]
 
             for key in expired_keys:
