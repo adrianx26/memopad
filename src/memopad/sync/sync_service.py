@@ -1,4 +1,4 @@
-﻿"""Service for syncing files between filesystem and database."""
+"""Service for syncing files between filesystem and database."""
 
 import asyncio
 import os
@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from memopad import db
 from memopad.config import MemoPadConfig, ConfigManager
 from memopad.file_utils import has_frontmatter
-from memopad.ignore_utils import load_bmignore_patterns, should_ignore_path
+from memopad.ignore_utils import load_bmignore_patterns, should_ignore_path, IgnoreMatcher
 from memopad.markdown import EntityParser, MarkdownProcessor
 from memopad.models import Entity, Project
 from memopad.repository import (
@@ -143,6 +143,7 @@ class SyncService:
         self.file_service = file_service
         # Load ignore patterns once at initialization for performance
         self._ignore_patterns = load_bmignore_patterns()
+        self._ignore_matcher = IgnoreMatcher(self._ignore_patterns)
         # Circuit breaker: track file failures to prevent infinite retry loops
         # Use OrderedDict for LRU behavior with bounded size to prevent unbounded memory growth
         self._file_failures: OrderedDict[str, FileFailureInfo] = OrderedDict()
@@ -1216,7 +1217,7 @@ class SyncService:
                     rel_path = abs_path.relative_to(directory).as_posix()
 
                     # Apply ignore patterns (same as scan_directory)
-                    if should_ignore_path(abs_path, directory, self._ignore_patterns):
+                    if self._ignore_matcher.match(abs_path, directory):
                         logger.trace(f"Ignoring path per .bmignore: {rel_path}")
                         continue
 
@@ -1246,11 +1247,11 @@ class SyncService:
         return file_paths
 
     async def scan_directory(self, directory: Path) -> AsyncIterator[Tuple[str, os.stat_result]]:
-        """Stream files from directory using aiofiles.os.scandir() with cached stat info.
+        """Stream files from directory using aiofiles.os.scandir() iteratively with cached stat info.
 
-        This method uses aiofiles.os.scandir() to leverage async I/O and cached stat
-        information from directory entries. This reduces network I/O by 50% on network
-        filesystems like TigrisFS by avoiding redundant stat() calls.
+        This method uses aiofiles.os.scandir() iteratively (avoiding recursion) and leverages
+        IgnoreMatcher to avoid expensive Path object creation for ignored files.
+        This significantly improves performance on large directories.
 
         Args:
             directory: Directory to scan
@@ -1258,39 +1259,45 @@ class SyncService:
         Yields:
             Tuples of (absolute_file_path, stat_info) for each file
         """
-        try:
-            entries = await aiofiles.os.scandir(directory)
-        except PermissionError:
-            logger.warning(f"Permission denied scanning directory: {directory}")
-            return
+        # Stack contains tuples of (directory_path_object, relative_path_string)
+        # For root, relative path is empty string
+        stack = [(directory, "")]
 
-        results = []
-        subdirs = []
+        while stack:
+            current_dir, current_rel = stack.pop()
 
-        for entry in entries:
-            entry_path = Path(entry.path)
-
-            # Check ignore patterns
-            if should_ignore_path(entry_path, directory, self._ignore_patterns):
-                logger.trace(f"Ignoring path per .bmignore: {entry_path.relative_to(directory)}")
+            try:
+                entries = await aiofiles.os.scandir(current_dir)
+            except PermissionError:
+                logger.warning(f"Permission denied scanning directory: {current_dir}")
                 continue
 
-            if entry.is_dir(follow_symlinks=False):
-                # Collect subdirectories to recurse into
-                subdirs.append(entry_path)
-            elif entry.is_file(follow_symlinks=False):
-                # Get cached stat info (no extra syscall!)
-                stat_info = entry.stat(follow_symlinks=False)
-                results.append((entry.path, stat_info))
+            for entry in entries:
+                name = entry.name
 
-        # Yield files from current directory
-        for file_path, stat_info in results:
-            yield (file_path, stat_info)
+                # Calculate relative path string for ignore check
+                # Using string concatenation is faster than Path / name
+                if current_rel:
+                    entry_rel = f"{current_rel}/{name}"
+                else:
+                    entry_rel = name
 
-        # Recurse into subdirectories
-        for subdir in subdirs:
-            async for result in self.scan_directory(subdir):
-                yield result
+                is_dir = entry.is_dir(follow_symlinks=False)
+
+                # Check ignore patterns using optimized matcher
+                # This avoids Path object creation for ignored files
+                if self._ignore_matcher.match_entry(name, entry_rel, is_dir):
+                    logger.trace(f"Ignoring path per .bmignore: {entry_rel}")
+                    continue
+
+                if is_dir:
+                    # Collect subdirectories to traverse
+                    # We create Path object only for valid directories we descend into
+                    stack.append((Path(entry.path), entry_rel))
+                elif entry.is_file(follow_symlinks=False):
+                    # Get cached stat info (no extra syscall!)
+                    stat_info = entry.stat(follow_symlinks=False)
+                    yield (entry.path, stat_info)
 
 
 async def get_sync_service(project: Project) -> SyncService:  # pragma: no cover
