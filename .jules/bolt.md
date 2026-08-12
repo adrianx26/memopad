@@ -1,0 +1,3 @@
+## 2025-03-02 - EntityRepository Optimization Pattern: Avoid `find_all` Eager Loading
+**Learning:** `EntityRepository.find_all()` by default eager-loads all relations and observations. Using this simply to extract a single attribute (like `file_path` for conflict detection) loads massive amounts of unnecessary data and causes severe performance/memory bottlenecks during large directory scans or bulk conflict checks.
+**Action:** When only specific entity attributes are needed for filtering or conflict detection, use targeted lightweight repository methods like `get_all_file_paths()` or `get_all_permalinks()`. If full entity objects are still needed based on that filtering, fetch them efficiently in bulk using `get_by_file_paths_batch()`.
