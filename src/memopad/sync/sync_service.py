@@ -1137,15 +1137,15 @@ class SyncService:
                 count += 1
             return count
 
-        process = await asyncio.create_subprocess_shell(
-            f'find "{directory}" -type f | wc -l',
+        process = await asyncio.create_subprocess_exec(
+            'find', str(directory), '-type', 'f',
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await process.communicate()
 
         if process.returncode != 0:
-            error_msg = stderr.decode().strip()
+            error_msg = stderr.decode(errors='replace').strip()
             logger.error(
                 f"FILE COUNT OPTIMIZATION FAILED: find command failed with exit code {process.returncode}, "
                 f"error: {error_msg}. Falling back to manual count. "
@@ -1157,7 +1157,7 @@ class SyncService:
                 count += 1
             return count
 
-        return int(stdout.strip())
+        return stdout.count(b'\n')
 
     async def _scan_directory_modified_since(
         self, directory: Path, since_timestamp: float
@@ -1190,15 +1190,15 @@ class SyncService:
         # Convert timestamp to find-compatible format
         since_date = datetime.fromtimestamp(since_timestamp).strftime("%Y-%m-%d %H:%M:%S")
 
-        process = await asyncio.create_subprocess_shell(
-            f'find "{directory}" -type f -newermt "{since_date}"',
+        process = await asyncio.create_subprocess_exec(
+            'find', str(directory), '-type', 'f', '-newermt', since_date,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await process.communicate()
 
         if process.returncode != 0:
-            error_msg = stderr.decode().strip()
+            error_msg = stderr.decode(errors='replace').strip()
             logger.error(
                 f"SCAN OPTIMIZATION FAILED: find -newermt command failed with exit code {process.returncode}, "
                 f"error: {error_msg}. Falling back to full scan. "
@@ -1209,8 +1209,9 @@ class SyncService:
 
         # Convert absolute paths to relative and filter through ignore patterns
         file_paths = []
-        for line in stdout.decode().splitlines():
-            if line:
+        for line_bytes in stdout.split(b'\n'):
+            if line_bytes:
+                line = line_bytes.decode(errors='replace')
                 try:
                     abs_path = Path(line)
                     rel_path = abs_path.relative_to(directory).as_posix()
