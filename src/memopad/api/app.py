@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.routing import APIRouter
 from loguru import logger
+from sqlalchemy.exc import IntegrityError
 
 from memopad import __version__ as version
 from memopad.api.container import ApiContainer, set_container
@@ -91,6 +92,30 @@ legacy_router.add_api_route("/projects/projects", list_projects, methods=["GET"]
 app.include_router(legacy_router)
 
 # V2 routers are the only public API surface
+
+
+@app.exception_handler(IntegrityError)
+async def integrity_exception_handler(request, exc):  # pragma: no cover
+    """Map a DB integrity violation (e.g. duplicate permalink) to HTTP 409.
+
+    The raw-insert paths (e.g. the `fast=True` entity create route via
+    `repository.create`) raise `sqlalchemy.exc.IntegrityError` directly, which
+    otherwise falls through to the generic 500 handler below with a message the
+    client cannot recognize as a conflict. Returning 409 with a detail that
+    contains "already exists" lets clients (e.g. the `assimilate` tool) detect the
+    conflict and fall back to an in-place update, instead of re-attempting the
+    duplicate insert on every retry.
+    """
+    logger.warning(
+        "DB integrity conflict",
+        url=str(request.url),
+        path=request.url.path,
+        method=request.method,
+        error=str(getattr(exc, "orig", exc)),
+    )
+    return await http_exception_handler(
+        request, HTTPException(status_code=409, detail=f"Entity already exists: {getattr(exc, 'orig', exc)}")
+    )
 
 
 @app.exception_handler(Exception)

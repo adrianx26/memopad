@@ -1,5 +1,66 @@
 ﻿# CHANGELOG
 
+## [0.21.1] - 2026-08-21
+
+### Fixed — `assimilate` intermittent write-path failures (3 failure classes)
+
+`mcp__memopad__assimilate` intermittently reported `FAILED` for individual notes when
+(re-)ingesting a GitHub repo: the note `.md` was written to disk, but the DB row insert could
+fail and leave the note absent from the knowledge graph until a later `sync_project_files`
+reconciled it. Three confirmed failure classes, all fixed with **no performance cost on the
+user-facing write path** — the fixes bound fire-and-forget *background* work and let SQLite's
+native writer-queueing work, never serialising the request's own awaited write.
+
+- **UNIQUE constraint** — a duplicate `(permalink, project_id)` insert in the `fast=True` path
+  raised `IntegrityError`, which the generic handler surfaced as HTTP **500** with a string the
+  tool's conflict predicate did not recognise → its update-in-place fallback never ran → the note
+  was marked `FAILED`, and re-assimilating the same repo re-failed the same notes.
+  - `api/app.py` now registers a dedicated `IntegrityError`→**HTTP 409** handler (before the
+    generic `Exception` handler) whose detail contains `"already exists"`, so the tool's conflict
+    predicate fires and its update-in-place fallback runs for any endpoint.
+  - `mcp/tools/assimilate/__init__.py` write loop is now **create-first + 409-driven fallback**:
+    it attempts `create_entity` first (zero extra calls on a first run), and only on a recognised
+    conflict falls back to `resolve_entity` + `update_entity(fast=False)` (operation="updated"). The
+    conflict predicate is broadened to also match `"unique constraint failed"` / `"already exists"`.
+    Output now separates `## Notes Created` / `## Notes Updated` / `## Notes Failed` with counts.
+
+- **database is locked** — SQLite WAL allows one writer at a time. Each `create_entity(fast=True)`
+  scheduled `reindex_entity` + distillation as unbounded fire-and-forget `asyncio.create_task`s;
+  during a bulk assimilate, up to 2N concurrent write transactions could pile up and a blocked
+  writer exceeded the 10s `busy_timeout`.
+  - `db.py` raises `PRAGMA busy_timeout` 10s → **30s** so SQLite's native writer queue makes a
+    blocked writer wait (typically ms) instead of erroring.
+  - `repository/repository.py` write methods (`add`/`add_all`/`create`/`create_all`/`update`/
+    `delete`/`delete_by_ids`/`delete_by_fields`) are wrapped by a `_retry_on_db_locked` decorator
+    (3 attempts, ~50–200ms backoff) that retries **only** `"database is locked"`, re-raising
+    everything else immediately. Covers the rare cross-process miss.
+
+- **QueuePool exhaustion** — `db.py` never wired the configured `db_pool_*` fields, so SQLite-fs
+  and in-memory engines fell back to SQLAlchemy's default QueuePool (size 5), exhausted by the
+  unbounded background-task herd.
+  - SQLite **filesystem** on **all** platforms → `NullPool` (was Windows-only): SQLite serialises
+    writes anyway, so a connection pool only adds an exhaustion failure mode; NullPool removes it.
+  - Postgres → real `QueuePool` sized from `config.db_pool_size` / `db_pool_overflow` /
+    `db_pool_recycle` + `pool_timeout=30`, `pool_pre_ping=True` (was `NullPool`); the previously
+    dead config fields now take effect.
+  - `deps/services.py` `LocalTaskScheduler` and `knowledge_router.py` `_schedule_distillation` now
+    run background work under a **process-wide `asyncio.Semaphore`** (`config.background_task_concurrency`,
+    default 8) so reindex / embedding / distillation share one concurrency budget and the herd that
+    caused both the lock pile-up *and* pool exhaustion stops forming at the source.
+
+### Added
+
+- `config.py`: `background_task_concurrency: int` (default 8, gt 0) — max concurrent
+  fire-and-forget background tasks (reindex / embedding / distillation).
+
+### Tests
+
+- `tests/api/test_integrity_handler.py` — the `IntegrityError`→409 handler returns 409 with
+  `"already exists"` and the underlying constraint message in the detail.
+- `tests/repository/test_write_path_hardening.py` — `_retry_on_db_locked` retries lock errors then
+  succeeds, does not retry non-lock errors, gives up after max retries; the background-task
+  semaphore is a process-wide singleton.
+
 ## [0.21.0] - 2026-08-08
 
 ### Added — Native, automatic L0–L3 distillation (code-only, skill-driven)

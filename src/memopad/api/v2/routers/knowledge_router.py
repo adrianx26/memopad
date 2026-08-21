@@ -81,15 +81,24 @@ def _schedule_distillation(scheduler, app_config, project_id: int) -> None:
     cadences may be non-zero. The scheduler dispatches fired triggers to the
     DistillationDispatcher, which builds a per-project service and swallows its own
     errors — so this only needs to guard against policy-layer failures.
+
+    The trigger runs under the process-wide background-task semaphore (shared with
+    the reindex scheduler) so a bulk write cannot pile up distillation tasks that
+    starve the SQLite write lock and the connection pool.
     """
     if not is_pipeline_active(app_config):
         return
 
+    from memopad.deps.services import get_background_task_semaphore
+
+    semaphore = get_background_task_semaphore(app_config.background_task_concurrency)
+
     async def _run() -> None:
-        try:
-            await scheduler.record_new_memory(project_id)
-        except Exception as exc:  # pragma: no cover - never propagate to the caller
-            logger.warning(f"distillation trigger failed for project {project_id}: {exc}")
+        async with semaphore:
+            try:
+                await scheduler.record_new_memory(project_id)
+            except Exception as exc:  # pragma: no cover - never propagate to the caller
+                logger.warning(f"distillation trigger failed for project {project_id}: {exc}")
 
     asyncio.create_task(_run())
 

@@ -1,5 +1,7 @@
 ﻿"""Base repository implementation."""
 
+import asyncio
+import functools
 from typing import Type, Optional, Any, Sequence, TypeVar, List, Dict, cast, Generic
 
 
@@ -15,7 +17,7 @@ from sqlalchemy import (
     delete,
 )
 from sqlalchemy.engine import CursorResult
-from sqlalchemy.exc import NoResultFound
+from sqlalchemy.exc import NoResultFound, OperationalError as SAOperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 from sqlalchemy.orm.interfaces import LoaderOption
 from sqlalchemy.sql.elements import ColumnElement
@@ -24,6 +26,38 @@ from memopad import db
 from memopad.models import Base
 
 T = TypeVar("T", bound=Base)
+
+# Retry transient SQLite write-lock contention (e.g. another process — the CLI —
+# writing to the same DB file concurrently). In-process contention is prevented
+# by bounded background-task concurrency + the 30s busy_timeout; this only covers
+# the rare cross-process miss. Retries ONLY "database is locked" (not disk I/O etc.)
+_DB_LOCKED_MAX_RETRIES = 3
+_DB_LOCKED_BASE_DELAY = 0.05  # seconds; backoff 0.05, 0.1, 0.2
+
+
+def _retry_on_db_locked(fn):
+    """Decorator: retry an async repository write on transient SQLite "database is locked".
+
+    The decorated method opens its own ``scoped_session``; each retry re-invokes it so
+    the failed transaction is rolled back (by scoped_session's except) and a fresh one
+    begins. Non-lock ``OperationalError`` (e.g. "disk I/O error") is re-raised immediately.
+    """
+
+    @functools.wraps(fn)
+    async def _wrapper(*args: Any, **kwargs: Any) -> Any:
+        for attempt in range(_DB_LOCKED_MAX_RETRIES):
+            try:
+                return await fn(*args, **kwargs)
+            except SAOperationalError as exc:
+                if "database is locked" not in str(exc).lower() or attempt == _DB_LOCKED_MAX_RETRIES - 1:
+                    raise
+                logger.debug(
+                    f"database is locked; retrying {fn.__name__} "
+                    f"(attempt {attempt + 2}/{_DB_LOCKED_MAX_RETRIES})"
+                )
+                await asyncio.sleep(_DB_LOCKED_BASE_DELAY * (2 ** attempt))
+
+    return _wrapper
 
 
 class Repository(Generic[T]):
@@ -97,6 +131,7 @@ class Repository(Generic[T]):
         result = await session.execute(query)
         return result.scalars().all()
 
+    @_retry_on_db_locked
     async def add(self, model: T) -> T:
         """
         Add a model to the repository. This will also add related objects
@@ -123,6 +158,7 @@ class Repository(Generic[T]):
                 )
             return found
 
+    @_retry_on_db_locked
     async def add_all(self, models: List[T]) -> Sequence[T]:
         """
         Add a list of models to the repository. This will also add related objects
@@ -212,6 +248,7 @@ class Repository(Generic[T]):
             logger.trace(f"No {self.Model.__name__} found")
         return entity
 
+    @_retry_on_db_locked
     async def create(self, data: dict) -> T:
         """Create a new record from a model instance."""
         logger.debug(f"Creating {self.Model.__name__} from entity_data: {data}")
@@ -243,6 +280,7 @@ class Repository(Generic[T]):
                 )
             return return_instance
 
+    @_retry_on_db_locked
     async def create_all(self, data_list: List[dict]) -> Sequence[T]:
         """Create multiple records in a single transaction."""
         logger.debug(f"Bulk creating {len(data_list)} {self.Model.__name__} instances")
@@ -268,6 +306,7 @@ class Repository(Generic[T]):
 
             return await self.select_by_ids(session, [model.id for model in model_list])  # pyright: ignore [reportAttributeAccessIssue]
 
+    @_retry_on_db_locked
     async def update(self, entity_id: int, entity_data: dict | T) -> Optional[T]:
         """Update an entity with the given data."""
         logger.debug(f"Updating {self.Model.__name__} {entity_id} with data: {entity_data}")
@@ -297,6 +336,7 @@ class Repository(Generic[T]):
                 logger.debug(f"No {self.Model.__name__} found to update: {entity_id}")
                 return None
 
+    @_retry_on_db_locked
     async def delete(self, entity_id: int) -> bool:
         """Delete an entity from the database."""
         logger.debug(f"Deleting {self.Model.__name__}: {entity_id}")
@@ -314,6 +354,7 @@ class Repository(Generic[T]):
                 logger.debug(f"No {self.Model.__name__} found to delete: {entity_id}")
                 return False
 
+    @_retry_on_db_locked
     async def delete_by_ids(self, ids: List[int]) -> int:
         """Delete records matching given IDs."""
         logger.debug(f"Deleting {self.Model.__name__} by ids: {ids}")
@@ -329,6 +370,7 @@ class Repository(Generic[T]):
             logger.debug(f"Deleted {result.rowcount} records")
             return result.rowcount
 
+    @_retry_on_db_locked
     async def delete_by_fields(self, **filters: Any) -> bool:
         """Delete records matching given field values."""
         logger.debug(f"Deleting {self.Model.__name__} by fields: {filters}")

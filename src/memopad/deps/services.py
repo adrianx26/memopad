@@ -567,14 +567,41 @@ def _log_task_failure(completed: asyncio.Task) -> None:
         logger.exception("Background task failed", error=str(exc))
 
 
+# Process-wide semaphore bounding concurrent fire-and-forget background tasks.
+#
+# `get_task_scheduler` is a per-request FastAPI dependency, so a semaphore held on
+# the LocalTaskScheduler instance would be per-request and could not bound the
+# cross-request accumulation of background writes that starves SQLite's write lock
+# and the connection pool during a bulk assimilate. This module-level singleton is
+# shared by the scheduler (reindex/sync) and by `_schedule_distillation`, so all
+# background DB-using work draws from one process-wide budget. Created lazily on
+# first use (inside the running event loop).
+_background_task_semaphore: asyncio.Semaphore | None = None
+
+
+def get_background_task_semaphore(limit: int) -> asyncio.Semaphore:
+    """Return the process-wide background-task semaphore, creating it at `limit`.
+
+    The limit is taken from the first caller; subsequent callers receive the same
+    semaphore regardless of the limit they pass (all callers read the same config
+    value, so this is consistent).
+    """
+    global _background_task_semaphore
+    if _background_task_semaphore is None:
+        _background_task_semaphore = asyncio.Semaphore(limit)
+    return _background_task_semaphore
+
+
 class LocalTaskScheduler:
     """Default scheduler that runs tasks in-process via asyncio.create_task."""
 
     def __init__(
         self,
         handlers: Mapping[str, Callable[..., Coroutine[Any, Any, None]]],
+        max_concurrent_tasks: int = 8,
     ) -> None:
         self._handlers = handlers
+        self._max_concurrent_tasks = max_concurrent_tasks
 
     def schedule(self, task_name: str, **payload: Any) -> None:
         handler = self._handlers.get(task_name)
@@ -583,7 +610,17 @@ class LocalTaskScheduler:
         # Outcome: fail fast to surface misconfiguration
         if not handler:
             raise ValueError(f"Unknown task name: {task_name}")
-        task = asyncio.create_task(handler(**payload))
+        # Bound concurrent background DB work via the process-wide semaphore so a
+        # bulk write (e.g. assimilate) cannot spawn a thundering herd of reindex /
+        # distillation tasks that starves the SQLite write lock and the pool. The
+        # task still fire-and-forgets; only its body awaits the slot.
+        semaphore = get_background_task_semaphore(self._max_concurrent_tasks)
+
+        async def _bounded(**payload_inner: Any) -> None:
+            async with semaphore:
+                await handler(**payload_inner)
+
+        task = asyncio.create_task(_bounded(**payload))
         task.add_done_callback(_log_task_failure)
 
 
@@ -592,6 +629,7 @@ async def get_task_scheduler(
     sync_service: SyncServiceV2ExternalDep,
     search_service: SearchServiceV2ExternalDep,
     project_config: ProjectConfigV2ExternalDep,
+    app_config: AppConfigDep,
 ) -> TaskScheduler:
     """Create a scheduler that maps task specs to coroutines."""
 
@@ -626,7 +664,8 @@ async def get_task_scheduler(
             "resolve_relations": _resolve_relations,
             "sync_project": _sync_project,
             "reindex_project": _reindex_project,
-        }
+        },
+        max_concurrent_tasks=app_config.background_task_concurrency,
     )
 
 

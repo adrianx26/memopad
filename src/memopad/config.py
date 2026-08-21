@@ -114,6 +114,18 @@ class MemoPadConfig(BaseSettings):
         gt=0,
     )
 
+    # Background task concurrency (all backends)
+    background_task_concurrency: int = Field(
+        default=8,
+        description=(
+            "Max concurrent fire-and-forget background tasks (reindex / embedding / "
+            "distillation). Bounds DB write contention and connection demand during bulk "
+            "writes (e.g. assimilate) so SQLite's write lock and the connection pool are "
+            "not starved by a thundering herd of background tasks."
+        ),
+        gt=0,
+    )
+
     # Watch service configuration
     sync_delay: int = Field(
         default=1000, description="Milliseconds to wait after changes before syncing", gt=0

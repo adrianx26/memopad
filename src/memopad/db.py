@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     async_scoped_session,
 )
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import NullPool, QueuePool
 
 from memopad.repository.postgres_search_repository import PostgresSearchRepository
 from memopad.repository.sqlite_search_repository import SQLiteSearchRepository
@@ -140,8 +140,12 @@ def _configure_sqlite_connection(dbapi_conn, enable_wal: bool = True) -> None:
         # Enable WAL mode for better concurrency (not supported for in-memory databases)
         if enable_wal:
             cursor.execute("PRAGMA journal_mode=WAL")
-        # Set busy timeout to handle locked databases
-        cursor.execute("PRAGMA busy_timeout=10000")  # 10 seconds
+        # Set busy timeout to handle locked databases. 30s lets SQLite's native
+        # writer queue do its job: a blocked writer waits for the lock (typically ms)
+        # instead of raising "database is locked". Matches/exceeds the aiosqlite
+        # connect timeout so the PRAGMA doesn't silently shorten it. Bounded
+        # background-task concurrency keeps the queue short, so this wait is rare.
+        cursor.execute("PRAGMA busy_timeout=30000")  # 30 seconds
         # Optimize for performance
         cursor.execute("PRAGMA synchronous=NORMAL")
         cursor.execute("PRAGMA cache_size=-128000")  # 128MB cache (increased from 64MB for better performance)
@@ -180,20 +184,21 @@ def _create_sqlite_engine(db_url: str, db_type: DatabaseType) -> AsyncEngine:
                 "isolation_level": None,  # Use autocommit mode
             }
         )
-        # Use NullPool for Windows filesystem databases to avoid connection pooling issues
-        # Important: Do NOT use NullPool for in-memory databases as it will destroy the database
-        # between connections
-        if db_type == DatabaseType.FILESYSTEM:
-            engine = create_async_engine(
-                db_url,
-                connect_args=connect_args,
-                poolclass=NullPool,  # Disable connection pooling on Windows
-                echo=False,
-            )
-        else:
-            # In-memory databases need connection pooling to maintain state
-            engine = create_async_engine(db_url, connect_args=connect_args)
+
+    # SQLite serializes writes at the DB level (one writer at a time, even in WAL),
+    # so a connection pool does not improve write throughput — it only adds a
+    # QueuePool-exhaustion failure mode under concurrent background load. Use NullPool
+    # for filesystem DBs on ALL platforms (fresh connection per checkout, no pool limit
+    # to exhaust). In-memory DBs (test-only) keep the default pool.
+    if db_type == DatabaseType.FILESYSTEM:
+        engine = create_async_engine(
+            db_url,
+            connect_args=connect_args,
+            poolclass=NullPool,  # No connection pooling — SQLite serializes writes anyway
+            echo=False,
+        )
     else:
+        # In-memory databases (test-only): default pool.
         engine = create_async_engine(db_url, connect_args=connect_args)
 
     # Enable WAL mode for better concurrency and reliability
@@ -218,12 +223,21 @@ def _create_postgres_engine(db_url: str, config: MemoPadConfig) -> AsyncEngine:
     Returns:
         Configured async engine for Postgres
     """
-    # Use NullPool connection issues.
-    # Assume connection pooler like PgBouncer handles connection pooling.
+    # Use a real connection pool sized from config (db_pool_size / db_pool_overflow /
+    # db_pool_recycle). These fields were previously defined in config but never wired
+    # in, so the engine fell back to SQLAlchemy's default QueuePool (size 5, overflow 10)
+    # — too small under concurrent background load. pool_pre_ping drops dead connections
+    # (e.g. after Neon scale-to-zero). When an external pooler (PgBouncer) is in front,
+    # set MEMOPAD_DB_POOL_SIZE low or switch to NullPool via an explicit override.
     engine = create_async_engine(
         db_url,
         echo=False,
-        poolclass=NullPool,  # No pooling - fresh connection per request
+        poolclass=QueuePool,
+        pool_size=config.db_pool_size,
+        max_overflow=config.db_pool_overflow,
+        pool_recycle=config.db_pool_recycle,
+        pool_timeout=30,
+        pool_pre_ping=True,
         connect_args={
             # Disable statement cache to avoid issues with prepared statements on reconnect
             "statement_cache_size": 0,
@@ -238,7 +252,11 @@ def _create_postgres_engine(db_url: str, config: MemoPadConfig) -> AsyncEngine:
             },
         },
     )
-    logger.debug("Created Postgres engine with NullPool (no connection pooling)")
+    logger.debug(
+        f"Created Postgres engine with QueuePool "
+        f"(size={config.db_pool_size}, overflow={config.db_pool_overflow}, "
+        f"recycle={config.db_pool_recycle})"
+    )
 
     return engine
 

@@ -211,90 +211,93 @@ async def _assimilate_impl(
 
             knowledge_client = KnowledgeClient(client, active_project.external_id)
 
-            stored: list[str] = []
+            created: list[str] = []
+            updated: list[str] = []
+            failed: list[str] = []
             for title, content in notes_to_write:
+                entity = Entity(
+                    title=title,
+                    directory=directory,
+                    entity_type="note",
+                    content_type="text/markdown",
+                    content=content,
+                    entity_metadata={"tags": ["assimilated", domain]},
+                )
+                file_path = f"{directory}/{title}.md"
                 try:
-                    entity = Entity(
-                        title=title,
-                        directory=directory,
-                        entity_type="note",
-                        content_type="text/markdown",
-                        content=content,
-                        entity_metadata={"tags": ["assimilated", domain]},
-                    )
                     try:
                         result = await knowledge_client.create_entity(
                             entity.model_dump(), fast=True
                         )
+                        operation = "created"
                     except Exception as e:
-                        # Trigger: KnowledgeClient may raise either an httpx.HTTPStatusError
-                        #          (HTTP 409) or a domain-level "already exists" error.
-                        # Why: prefer typed status check; fall back to message match only when
-                        #      the typed path doesn't apply (e.g. service-layer exception).
+                        # Trigger: the create hit a duplicate (permalink/title/path).
+                        # Why: the server maps IntegrityError -> HTTP 409 with a detail
+                        #      containing "already exists"; call_post wraps that in a
+                        #      ToolError whose __cause__ is the original HTTPStatusError
+                        #      (ToolError itself has no .response, so the old typed check
+                        #      on `e.response` was dead). Detect the conflict via the
+                        #      cause's status, with message-substring fallback, then update
+                        #      in place instead of failing the note. Create-first (vs
+                        #      pre-resolve) keeps the common first-run path at one call per
+                        #      note; the fallback only runs on re-assimilation of existing
+                        #      notes.
                         is_conflict = False
-                        status = getattr(getattr(e, "response", None), "status_code", None)
+                        cause = getattr(e, "__cause__", None)
+                        status = getattr(getattr(cause, "response", None), "status_code", None)
                         if status == 409:
                             is_conflict = True
                         else:
                             msg_lower = str(e).lower()
-                            if "conflict" in msg_lower or "already exists" in msg_lower:
+                            if (
+                                "conflict" in msg_lower
+                                or "already exists" in msg_lower
+                                or "unique constraint failed" in msg_lower
+                            ):
                                 is_conflict = True
 
-                        if is_conflict:
-                            if entity.permalink:
-                                try:
-                                    entity_id = await knowledge_client.resolve_entity(
-                                        entity.permalink
-                                    )
-                                    result = await knowledge_client.update_entity(
-                                        entity_id, entity.model_dump(), fast=False
-                                    )
-                                    global_logger.info(
-                                        f"assimilate: updated existing note "
-                                        f"'{title}' at {result.permalink}"
-                                    )
-
-                                    # Log file update to assimilate logger
-                                    file_path = f"{directory}/{title}.md"
-                                    assimilate_logger.log_file_saved(
-                                        title=title,
-                                        file_path=file_path,
-                                        permalink=result.permalink,
-                                        directory=directory,
-                                        operation="updated",
-                                        content_length=len(content),
-                                    )
-                                except Exception as update_err:
-                                    global_logger.error(
-                                        f"assimilate: update failed for '{title}': {update_err}"
-                                    )
-                                    raise update_err
-                            else:
-                                raise
-                        else:
+                        if not is_conflict or not entity.permalink:
                             raise
-                    stored.append(f"- {title}: {result.permalink}")
-                    global_logger.info(
-                        f"assimilate: stored note '{title}' at {result.permalink}"
-                    )
+
+                        entity_id = await knowledge_client.resolve_entity(entity.permalink)
+                        result = await knowledge_client.update_entity(
+                            entity_id, entity.model_dump(), fast=False
+                        )
+                        operation = "updated"
+                        global_logger.info(
+                            f"assimilate: updated existing note '{title}' at {result.permalink}"
+                        )
 
                     # Log file save to assimilate logger
-                    file_path = f"{directory}/{title}.md"
                     assimilate_logger.log_file_saved(
                         title=title,
                         file_path=file_path,
                         permalink=result.permalink,
                         directory=directory,
-                        operation="created",
+                        operation=operation,
                         content_length=len(content),
                     )
+
+                    line = f"- {title}: {result.permalink}"
+                    if operation == "updated":
+                        updated.append(line)
+                    else:
+                        created.append(line)
+                        global_logger.info(
+                            f"assimilate: stored note '{title}' at {result.permalink}"
+                        )
                 except Exception as e:
-                    stored.append(f"- {title}: FAILED ({e})")
+                    permalink = entity.permalink or "?"
+                    failed.append(f"- {title} [{permalink}]: FAILED — {type(e).__name__}: {e}")
                     global_logger.error(f"assimilate: failed to store note '{title}': {e}")
                     assimilate_logger.log_error(
                         error_type="save_failed",
                         message=str(e),
-                        details={"title": title, "directory": directory},
+                        details={
+                            "title": title,
+                            "directory": directory,
+                            "permalink": permalink,
+                        },
                     )
 
         # Complete logging
@@ -305,17 +308,29 @@ async def _assimilate_impl(
         )
 
         # Build summary
+        notes_created = len(created)
+        notes_updated = len(updated)
+        notes_failed = len(failed)
         summary_lines = [
             "# Assimilation Complete\n",
             f"source: {url}",
             f"project: {active_project.name}",
             f"items_processed: {len(data['pages'])}",
             f"github_links_found: {len(data['all_github_links'])}",
-            f"notes_stored: {len(notes_to_write)}",
+            f"notes_stored: {notes_created + notes_updated}",
+            f"notes_created: {notes_created}",
+            f"notes_updated: {notes_updated}",
+            f"notes_failed: {notes_failed}",
             f"directory: {directory}",
             "\n## Notes Created\n",
         ]
-        summary_lines.extend(stored)
+        summary_lines.extend(created)
+        if updated:
+            summary_lines.append(f"\n## Notes Updated ({notes_updated})\n")
+            summary_lines.extend(updated)
+        if failed:
+            summary_lines.append(f"\n## Notes Failed ({notes_failed})\n")
+            summary_lines.extend(failed)
 
         if data["all_github_links"]:
             summary_lines.append(f"\n## GitHub Links ({len(data['all_github_links'])})\n")
