@@ -124,3 +124,69 @@ async def test_add_categories_endpoint_structure():
     assert add_route is not None
     # Should be a POST route
     assert "POST" in add_route.methods
+
+
+# --- Regression: endpoint annotation imports --------------------------------
+#
+# Python 3.14 defers annotation evaluation (PEP 649), so a route handler that
+# references an unimported name (e.g. ``Optional``) imports cleanly on 3.14 but
+# crashes with ``NameError`` on 3.11/3.12/3.13 where annotations are eager at def
+# time — breaking the whole CLI/API/MCP server on the installed (3.11) env even
+# though dev (3.14) sees nothing. Resolve every endpoint's type hints explicitly
+# to force eager evaluation on any Python version; an undefined name raises.
+
+import typing
+
+
+def test_knowledge_router_endpoint_annotations_resolve():
+    """Every route handler annotation must resolve to a real type.
+
+    Catches the v0.21.2 class of bug where an endpoint used a typing name
+    (``Optional``, ``List``) in a parameter annotation without importing it.
+    """
+    failures: list[str] = []
+    for route in knowledge_router.routes:
+        endpoint = getattr(route, "endpoint", None)
+        if endpoint is None:
+            continue
+        try:
+            typing.get_type_hints(endpoint)
+        except (NameError, AttributeError) as exc:
+            failures.append(f"{getattr(route, 'path', '?')}: {type(exc).__name__}: {exc}")
+    assert not failures, (
+        "endpoint annotations reference undefined names (missing import) — "
+        "these import fine under 3.14 lazy annotations but NameError on 3.11:\n"
+        + "\n".join(failures)
+    )
+
+
+def test_add_categories_categories_param_is_nullable_list_of_str():
+    """The /add-categories `categories` body param accepts ``list[str] | None``.
+
+    Guards against the v0.21.2 regression where it was ``Optional[List[str]]``
+    with neither ``Optional`` nor ``List`` imported (NameError on 3.11). The
+    client sends ``{"categories": [...]}``; the param must resolve to a real
+    nullable list-of-strings type, not an undefined name.
+    """
+    add_route = next(
+        (r for r in knowledge_router.routes if getattr(r, "path", "").endswith("/add-categories")),
+        None,
+    )
+    assert add_route is not None
+    hints = typing.get_type_hints(add_route.endpoint)
+    cats_type = hints["categories"]
+
+    args = typing.get_args(cats_type)
+    assert args, f"categories annotation {cats_type!r} is not a nullable type"
+    assert any(a is type(None) for a in args), (
+        f"categories annotation {cats_type!r} is not nullable"
+    )
+    # Accept either the builtin ``list[str]`` or ``typing.List[str]`` member —
+    # both share the same origin ``list`` on 3.9+.
+    list_members = [
+        a for a in args
+        if typing.get_origin(a) is list and typing.get_args(a) == (str,)
+    ]
+    assert list_members, (
+        f"categories annotation {cats_type!r} does not accept a list[str]"
+    )

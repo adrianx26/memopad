@@ -1,5 +1,38 @@
 ﻿# CHANGELOG
 
+## [0.21.3] - 2026-08-22
+
+### Fixed — `NameError` on import of the knowledge router (Python ≤3.13 / installed 3.11 env)
+
+- **`api/v2/routers/knowledge_router.py`:** the `POST /add-categories` endpoint
+  declared `categories: Optional[List[str]] = Body(...)` (introduced in 0.21.2)
+  but the file imports **neither** `Optional` **nor** `List` from `typing`, and the
+  module has no `from __future__ import annotations`. Under Python 3.14 (the dev
+  env) PEP 649 defers annotation evaluation, so the file imports cleanly and the
+  bug is invisible. Under Python 3.11 (the **installed** env, per
+  `lib/python3.11/site-packages/`) annotations are eager — the `def` evaluates
+  `Optional[List[str]]` at module-import time and raises
+  `NameError: name 'Optional' is not defined`, which breaks the **entire** `memopad`
+  CLI, the `mp` binary, the API, and the MCP server (any import of the knowledge
+  router pulls it in). Reported as Patch 5 in the source-patch guide. The param is
+  now `categories: list[str] | None = Body(None, embed=True, ...)`, matching the
+  lowercase-builtin idiom already used by every other distillation endpoint in the
+  same file (`list[EntityResponseV2]`, `dict`) and requiring no new import. Valid
+  from Python 3.10 (`requires-python = ">=3.10"`), and a real nullable list-of-strings
+  type, so FastAPI still parses the client's `{"categories": [...]}` wrapper the
+  same way.
+
+### Tests — regression guard for the 3.14-masks-3.11 annotation class
+
+- `tests/api/test_knowledge_router_distillation.py` — added
+  `test_knowledge_router_endpoint_annotations_resolve` (resolves
+  `typing.get_type_hints` on every route handler; an undefined annotation name
+  raises `NameError`, failing the test on **any** Python version — it forces the
+  eager evaluation that 3.11 does at import time, so the bug is now caught in the
+  3.14 dev suite, not only on the installed 3.11 env) and
+  `test_add_categories_categories_param_is_nullable_list_of_str` (locks the
+  `categories` param's contract as a nullable `list[str]`).
+
 ## [0.21.2] - 2026-08-22
 
 ### Fixed — land the site-package patches in source (4 patches + plumbing)

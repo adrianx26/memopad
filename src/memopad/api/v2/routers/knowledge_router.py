@@ -1202,7 +1202,7 @@ async def discover_categories(
 async def add_observation_categories(
     project_id: ProjectExternalIdPathDep,
     service: DistillationServiceV2ExternalDep,
-    categories: Optional[List[str]] = Body(None, embed=True, description="Categories to add. If omitted, auto-discovers unknowns."),
+    categories: list[str] | None = Body(None, embed=True, description="Categories to add. If omitted, auto-discovers unknowns."),
 ) -> dict:
     """Add observation categories to the distillable set.
 
