@@ -36,9 +36,6 @@ from memopad.services.search_service import SearchService
 # Circuit breaker configuration
 MAX_CONSECUTIVE_FAILURES = 3
 
-# Parallel sync configuration
-MAX_CONCURRENT_SYNCS = 10  # Limit concurrent file operations to prevent resource exhaustion
-
 
 
 @dataclass
@@ -325,9 +322,20 @@ class SyncService:
         for path in report.deleted:
             await self.handle_delete(path)
 
-        # Sync new and modified files in parallel with controlled concurrency
-        # Create semaphore to limit concurrent operations
-        semaphore = asyncio.Semaphore(MAX_CONCURRENT_SYNCS)
+        # Sync new and modified files in parallel with controlled concurrency.
+        # Use the process-wide background-task semaphore (shared with the
+        # reindex/distillation scheduler and the API create-path trigger) instead
+        # of a per-call Semaphore so ALL background writers share ONE bounded
+        # budget against the single SQLite WAL write lock. A separate per-call
+        # budget here previously let ~10 sync writers pile on top of up to 8
+        # distillation/reindex writers — dual uncoordinated budgets that, with
+        # the unbounded watch-distillation herd, starved the lock past
+        # busy_timeout ("database is locked", BUG 6/7 root cause).
+        from memopad.deps.services import get_background_task_semaphore
+
+        semaphore = get_background_task_semaphore(
+            self.app_config.background_task_concurrency
+        )
         
         # Build tasks for all new files
         new_tasks = [
@@ -356,7 +364,8 @@ class SyncService:
             logger.info(
                 f"Starting parallel sync: {len(new_tasks)} new files, "
                 f"{len(modified_tasks)} modified files "
-                f"(max {MAX_CONCURRENT_SYNCS} concurrent)"
+                f"(max {self.app_config.background_task_concurrency} concurrent, "
+                f"shared background budget)"
             )
             
             all_tasks = new_tasks + modified_tasks

@@ -1,5 +1,68 @@
 ﻿# CHANGELOG
 
+## [0.21.5] - 2026-08-22
+
+### Fixed — root cause of `database is locked`: unify all background writers under one shared budget (BUG 6/7)
+
+The 0.21.4 retry made the CLI's bulk `INSERT INTO search_index` lock-tolerant, but
+it treated the symptom (gave the writer more time to wait out contention). This
+release fixes the **cause** of the contention itself.
+
+**Root cause (investigated this release):** the MCP server ran background
+writers under **three uncoordinated budgets**, all serializing on the single
+SQLite/WAL write lock:
+
+1. `sync_service.sync` — a per-call `asyncio.Semaphore(MAX_CONCURRENT_SYNCS=10)`;
+2. reindex / distillation tasks (router `_schedule_distillation` and
+   `LocalTaskScheduler`) — the process-wide `get_background_task_semaphore`
+   (default `background_task_concurrency=8`);
+3. **watch-triggered distillation** — a raw `asyncio.create_task(
+   scheduler.record_new_memory(...))` with **no semaphore at all**.
+
+A CLI `distill --bulk` writing ~1,167 fact files into the vault made the file
+watcher fire one distillation pass per batch with no bound — a thundering herd of
+concurrent writers. Combined with the separate sync budget (~10) and the shared
+budget (~8), the write lock was continuously re-acquired, starving the CLI's
+separate-process `INSERT` past the 30s `busy_timeout` (and past all 6 bulk
+retries) → `database is locked` on the last entity. Empirically confirmed this
+release: `busy_timeout=30000`, `journal_mode=wal`, `synchronous=NORMAL` are all
+applied correctly, and **no** write path holds a single transaction across slow
+non-DB work (file I/O and ONNX embedding happen outside sessions) — so the error
+is genuinely sustained multi-writer contention, not a stuck transaction. (Also
+corrected the BUG 6 doc hypothesis: the CLI *does* have `busy_timeout`, so the
+error truly means a lock held >30s.)
+
+**Fix — finish the half-done unification the code comments already described:**
+
+- **`sync/watch_service.py`:** the watch path's fire-and-forget distillation
+  trigger now runs under the process-wide `get_background_task_semaphore`
+  (wrapped in `async with semaphore`), mirroring the router's
+  `_schedule_distillation` exactly. Closes the unbounded herd — the worst
+  amplifier.
+- **`sync/sync_service.py`:** `sync()` now gates parallel file syncs on the
+  **same** shared `get_background_task_semaphore` instead of a per-call
+  `asyncio.Semaphore(MAX_CONCURRENT_SYNCS)`. The separate `MAX_CONCURRENT_SYNCS`
+  constant is removed. Every background writer (sync, reindex, distillation,
+  API-triggered, watch-triggered) now shares ONE bounded budget
+  (`background_task_concurrency`, default 8) against the single WAL lock.
+
+This is the durable, cross-backend-safe root-cause fix: no fragile cross-process
+lock protocol, no behavior change for Postgres (MVCC handles concurrent writers;
+a single conservative budget is fine for background work), and the existing
+0.21.4 retry now operates on a system where contention is bounded and transient
+rather than an unbounded cascade — so bulk runs no longer race an exploding herd.
+Tunable via `MEMOPAD_BACKGROUND_TASK_CONCURRENCY` for deployments that want an
+even tighter write budget.
+
+### Tests
+
+- `tests/sync/test_write_budget_unification.py` — structural regression guards
+  asserting `sync_service.sync` and `watch_service.handle_changes` keep
+  referencing the shared `get_background_task_semaphore` (no regression to a
+  local per-call semaphore or an unbounded `create_task(record_new_memory)`),
+  mirroring the existing `test_search_repository_base_writes_are_bulk_retry_wrapped`
+  style.
+
 ## [0.21.4] - 2026-08-22
 
 ### Fixed — bulk CLI distillation loses its final entity to `database is locked` (BUG 6/7)

@@ -627,7 +627,31 @@ class WatchService:
         ):
             try:
                 scheduler = await self._get_distillation_scheduler()
-                asyncio.create_task(scheduler.record_new_memory(project.id))
+                # Run under the process-wide background-task semaphore (shared with
+                # the reindex scheduler and the API create-path trigger). Without this
+                # a burst of watch batches — e.g. a CLI `distill --bulk` writing many
+                # fact files — spawns one fire-and-forget distillation pass per batch
+                # with NO bound, a thundering herd of concurrent writers that starves
+                # the single SQLite WAL write lock past busy_timeout and surfaces as
+                # "database is locked" (BUG 6/7 root cause). Mirrors the router's
+                # `_schedule_distillation` exactly so every writer shares one budget.
+                from memopad.deps.services import get_background_task_semaphore
+
+                semaphore = get_background_task_semaphore(
+                    self.app_config.background_task_concurrency
+                )
+
+                async def _run_watch_distill() -> None:
+                    async with semaphore:
+                        try:
+                            await scheduler.record_new_memory(project.id)
+                        except Exception as exc:  # never propagate to the caller
+                            logger.warning(
+                                f"distillation watch hook failed "
+                                f"(file sync already done): {exc}"
+                            )
+
+                asyncio.create_task(_run_watch_distill())
             except Exception as e:  # explicit degradation, not a silent fallback
                 logger.warning(
                     f"distillation watch hook failed (file sync already done): {e}"
