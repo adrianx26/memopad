@@ -43,10 +43,12 @@ from memopad.mcp.tools.skill import (
     validate_skill,
 )
 from memopad.mcp.tools.distill import (
+    add_categories,
+    discover_categories,
     distill_memory,
+    get_persona,
     list_facts,
     list_scenarios,
-    get_persona,
 )
 from memopad.mcp.tools.shortterm import (
     add_session_ref,
@@ -66,6 +68,7 @@ from memopad.mcp.tools.sync import sync_project_files
 from memopad.mcp.tools.chatgpt_tools import search, fetch
 
 __all__ = [
+    "add_categories",
     "add_session_ref",
     "add_session_step",
     "assimilate",
@@ -80,6 +83,7 @@ __all__ = [
     "daily_note",
     "delete_note",
     "delete_project",
+    "discover_categories",
     "distill_memory",
     "drill_down",
     "drill_down_session",

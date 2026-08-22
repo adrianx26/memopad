@@ -331,10 +331,15 @@ class MemoPadConfig(BaseSettings):
     distillable_categories: list[str] = Field(
         default_factory=lambda: [
             "definition", "rule", "constraint", "preference", "fact", "principle", "summary",
+            # Real instances use these free-form L0 categories too; the narrow 7-item
+            # default above silently matched nothing for them, so CodeExtractor yielded
+            # 0 facts with no crash. Widening the shipped default makes the common case
+            # distil automatically. Per-project overrides live in the `distillation` skill.
+            "note", "tag", "topic", "stub", "general", "VERIFIED", "source", "concepts", "algorithms",
         ],
         description="Observation categories eligible for promotion to L1 atomic facts. Free-form "
-        "(MemoPad has no fixed canonical category set); edit the `distillation` skill to override "
-        "per-project.",
+        "(MemoPad has no fixed canonical category set); comma-separated compound categories "
+        "match if ANY component is listed. Edit the `distillation` skill to override per-project.",
     )
     # Similarity thresholds for dedup/clustering. When MEMOPAD_EMBEDDINGS_ENABLED is on, similarity
     # is embedding cosine; otherwise it degrades to token-Jaccard (mirrors hybrid_search modes).

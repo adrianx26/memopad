@@ -1,6 +1,101 @@
 ﻿# CHANGELOG
 
-## [0.21.1] - 2026-08-21
+## [0.21.2] - 2026-08-22
+
+### Fixed — land the site-package patches in source (4 patches + plumbing)
+
+MemoPad is installed via `uv tool install git+https://github.com/adrianx26/memopad`,
+so every `uv tool install --upgrade` replaces the installed package files and
+**wipes any hand-applied source patches**. Four operational patches had been
+maintained by hand in site-packages (documented in `memopad-source-patch-guide.md`)
+and re-applied after every upgrade. They are now landed in the repo source so they
+ship from the package; the manual re-apply procedure is retired for these.
+
+- **P1 — embedding CPU storm (`embedding_service.py`):** `FastEmbedProvider`
+  built `TextEmbedding()` with no `threads=` argument, so onnxruntime defaulted
+  `intra_op_num_threads=0` (all cores) and a single `embed()` call spawned a
+  RUNNABLE thread per core even when idle — starving the event loop and causing
+  the MCP keepalive/reconnect storm (1,763 stdio restarts/day → 0 after the fix).
+  `OMP_NUM_THREADS` does not affect onnxruntime (it has its own `SessionOptions`
+  pool). The constructor now reads `MEMOPAD_EMBED_THREADS` (default `1`) and caps
+  the thread pool.
+
+- **P2 — `CodeExtractor` category matching (`distillation_service.py`, `config.py`):**
+  distillable-category selection was an exact string match, with two silent-failure
+  modes that left `distill_memory` returning `L1 facts: 0` with no crash:
+  (1) real instances use free-form L0 categories (`note`, `tag`, `topic`, `stub`,
+  `general`, `VERIFIED`, `source`, `concepts`, `algorithms`, …) that the narrow
+  shipped 7-item default did not list; (2) observations can carry comma-separated
+  compound categories (`"config_docs, algorithms"`) that never matched the whole
+  string. `CodeExtractor.extract` now splits each category on commas and matches
+  if **any component** is distillable, using the matched component for confidence
+  and the downstream category label. The `distillable_categories` default in
+  `config.py` is widened to cover the common L0 categories. The pre-existing
+  `unknown_category_policy` (`skip` / `include` / `include_low`) is retained as an
+  opt-in power-user override on the unmatched (no-component) path.
+
+- **P3 — distillation cold-start / backfill (`distillation_service.py`):** two
+  defects in `run_l1_pass`. (a) `state = self._state.load()` was assigned only
+  inside the incremental `else` branch, so the `all_entities=True` bulk path
+  crashed with `UnboundLocalError` at the watermark save (the bulk/cold-start
+  escape hatch was broken). (b) The fallback was manual-only (a caller had to
+  pass `all_entities=True`); the scheduler-driven `handle_trigger` never did, so a
+  stuck watermark left L1 permanently empty even with thousands of L0 entities.
+  The watermark load is now hoisted above the branch, and the incremental path
+  **self-heals**: when the watermark scan is empty *and* L1 is still empty *and*
+  a full scan surfaces eligible L0 entities, it falls back to a full scan
+  automatically. Once L1 is populated, an empty watermark scan is a normal idle
+  tick and stays a cheap no-op (no full re-scan). L2/L3 were unaffected (they
+  already scan the full L1 fact set every pass).
+
+- **`discover_observation_categories` / `add_unknown_categories` (`distillation_service.py`):**
+  `discover_observation_categories` referenced `Observation` without importing it
+  (`NameError` on every call, breaking discover + the auto-discover add path), built
+  a `sqlalchemy.select` with a fragile `.where(True)` when nothing was derived yet,
+  and counted raw compound categories as atomic strings. It now imports
+  `Observation`, only applies the derived-entity filter when there is something to
+  filter, and splits compound categories into their components. (These two methods
+  remain opt-in tooling; the common case now works automatically via P2's
+  comma-split + widened default.)
+
+### Fixed — plumbing of the distillation CLI/MCP/API surface
+
+- **CLI command-name regression (`cli/commands/distill.py`):** converting the flat
+  `memopad distill` command to a Typer group left the default command unnamed, so
+  users had to invoke `memopad distill cmd-distill`. The default pass is now a
+  `@distill_app.callback(invoke_without_command=True)`, so `memopad distill --bulk`
+  / `--dry-run` / `--level L1,L2,L3` work as the documented default invocation, with
+  `discover-categories` / `add-categories` as named subcommands.
+
+- **`POST /add-categories` body parsing (`api/v2/routers/knowledge_router.py`):**
+  the endpoint declared `categories: Optional[List[str]] = Body(None)` (default
+  `embed=False`, expecting the body to *be* the list) while the MCP client / CLI
+  send a `{"categories": [...]}` wrapper — so the request failed validation. The
+  param is now `Body(None, embed=True)` to match the wrapper (and `{}` / omitted
+  still resolves to `None` → auto-discover).
+
+### Tests
+
+- `tests/services/test_distillation_service.py` — fixed `test_l1_skips_non_distillable_categories`
+  (its `"note"` category became distillable after widening the default; switched to
+  a genuinely-unknown `"diary"`), and `test_discover_observation_categories_excludes_derived_entities`
+  (the L0 had only a non-distillable category so L1 created no fact; added a
+  distillable observation so a derived entity exists to exclude). Added four new
+  tests: comma-separated compound-category matching in `CodeExtractor`; end-to-end
+  distillation of a compound-category observation; the self-healing fallback
+  (stuck watermark → full scan); and the guard that a populated L1 does **not**
+  self-heal (idle ticks stay cheap). The file went from 10 failing → 0 failing.
+- `tests/api/test_knowledge_router_distillation.py` — replaced the broken
+  `test_distill_endpoint_accepts_bulk_param` (called a nonexistent
+  `MemoPadConfig.database_engine()` and inspected `co_varnames` as dicts) with a
+  correct route-signature check; removed the dead DB fixtures/imports.
+
+### Notes
+
+- The historical `keepalive_interval` (the guide's speculative "Patch 4") was never
+  found in source; the real fix was P1's thread cap, so it is not applied.
+- No behavior change for existing installs that distillable_categories already
+  covered; the widening only adds categories that were previously silently dropped.
 
 ### Fixed — `assimilate` intermittent write-path failures (3 failure classes)
 

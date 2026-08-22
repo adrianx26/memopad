@@ -1,7 +1,7 @@
 <!-- mcp-name: io.github.basicmachines-co/memopad -->
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![PyPI version](https://badge.fury.io/py/memopad.svg)](https://badge.fury.io/py/memopad)
-[![Version](https://img.shields.io/badge/version-0.21.1-blue.svg)](#memopad)
+[![Version](https://img.shields.io/badge/version-0.21.2-blue.svg)](#memopad)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![Tests](https://github.com/adrianx26/memopad/workflows/Tests/badge.svg)](https://github.com/adrianx26/memopad/actions)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
@@ -437,6 +437,33 @@ add_session_ref / add_session_step / get_session_context / drill_down_session / 
 index_code / find_symbol / impact_path / code_context - Index & query source code in the knowledge graph
 ```
 
+**Distillation (L0→L3, `levels_enabled`):** MemoPad distils structured L0
+observations into L1 atomic facts → L2 scenarios → an L3 persona, natively and
+automatically on every write. Drive it on demand from the CLI (pure in-app code,
+no external model/API/key):
+
+```bash
+memopad distill                       # incremental L1 pass (default)
+memopad distill --bulk                 # cold-start / backfill: process ALL L0 entities
+memopad distill --level L1,L2,L3       # run multiple levels
+memopad distill --dry-run              # read-only: print current L1/L2/L3 counts
+
+memopad distill discover-categories    # show observation categories present vs distillable
+memopad distill add-categories -c policy,guideline   # widen the distillable set
+memopad distill add-categories --auto               # auto-add all unknown categories
+```
+
+Observation categories are free-form (MemoPad has no fixed canonical set) and
+**comma-separated compound categories match if any component is distillable**
+(e.g. `config_docs, algorithms` matches when `algorithms` is distillable). The
+shipped default covers the common L0 categories; edit the `distillation` skill
+asset to override per-project. A stuck watermark (L1 permanently empty though
+L0 entities exist) **self-heals**: an incremental pass with an empty watermark
+scan and empty L1 falls back to a full scan automatically — no manual `--bulk`
+required. The same surface is available over MCP (`distill_memory`,
+`discover_categories`, `add_categories`) and the v2 API (`POST /distill?bulk=`,
+`GET /discover-categories`, `POST /add-categories`).
+
 > The new tools are MCP-only (no `memopad tool` CLI wrappers), consistent with other
 > feature-flagged tools like `canvas`. Enable each via its config flag to use.
 
@@ -587,6 +614,12 @@ The `semantic_search` MCP tool then accepts `mode="semantic" | "hybrid" | "fts"`
 Hybrid mode fuses keyword and embedding rankings via Reciprocal Rank Fusion
 (RRF) — robust across precise term lookups and conceptual queries without
 weight tuning.
+
+> **CPU usage:** `fastembed`/onnxruntime defaults its intra-op thread pool to *all*
+> cores, which can starve the event loop on CPU-only boxes (the historical MCP
+> keepalive/reconnect storm). MemoPad caps this to 1 thread by default; override
+> with `MEMOPAD_EMBED_THREADS=<n>` (e.g. `2`). `OMP_NUM_THREADS` has no effect —
+> onnxruntime uses its own `SessionOptions` pool.
 
 See [plans/PLAN.md](plans/PLAN.md) §2.4 for the full integration roadmap.
 

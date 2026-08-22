@@ -1,4 +1,4 @@
-﻿"""Typed client for knowledge/entity API operations.
+"""Typed client for knowledge/entity API operations.
 
 Encapsulates all /v2/projects/{project_id}/knowledge/* endpoints.
 """
@@ -369,19 +369,60 @@ class KnowledgeClient:
 
     # --- Distillation (Tb L0-L3) ---
 
-    async def distill_memory(self, level: str = "L1", *, max_memories: int = 50) -> dict:
+    async def distill_memory(
+        self,
+        level: str = "L1",
+        *,
+        max_memories: int = 50,
+        bulk: bool = False,
+    ) -> dict:
         """Manually trigger a distillation pass (L1 facts / L2 scenarios / L3 persona).
 
         Args:
             level: Comma-separated levels to run (e.g. "L1", "L1,L2,L3").
             max_memories: Max L0 entities to scan per L1 pass.
+            bulk: If True, process ALL existing L0 entities (cold-start / backfill).
+                  Default False = incremental mode (only updated-since-watermark).
 
         Returns:
             Dict with per-level counts (l1_facts, l2_scenarios, l3_persona).
         """
-        params = {"level": level, "max_memories": max_memories}
+        params = {"level": level, "max_memories": max_memories, "bulk": bulk}
         response = await call_post(
             self.http_client, f"{self._base_path}/distill", params=params
+        )
+        return response.json()
+
+    async def discover_categories(self) -> dict:
+        """Discover all observation categories and identify which are distillable.
+
+        Returns a report showing all observed categories with counts, which are
+        already in the distillable set, and which are not (candidates for inclusion).
+
+        Returns:
+            Dict with total_categories, distillable, unknown,
+            all_categories_with_counts, current_distillable_config.
+        """
+        response = await call_get(
+            self.http_client, f"{self._base_path}/discover-categories"
+        )
+        return response.json()
+
+    async def add_categories(self, categories: list[str] | None = None) -> dict:
+        """Add observation categories to the distillable set.
+
+        Args:
+            categories: List of category names to add. If None or omitted,
+                        auto-discovers all unknown categories and adds them.
+
+        Returns:
+            Dict with added (list), skipped (already present),
+            updated_skill (bool), new_distillable_count.
+        """
+        response = await call_post(
+            self.http_client,
+            f"{self._base_path}/add-categories",
+            json={"categories": categories} if categories is not None else {},
         )
         return response.json()
 

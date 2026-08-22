@@ -225,7 +225,15 @@ class CodeExtractor:
     Selects observations whose category is in ``categories`` (the distillable set)
     and emits one candidate per observation. Confidence = category base + a small
     relation-degree bonus on the source entity (capped), clamped to [0, 1].
+
+    Unknown categories are handled via ``unknown_category_policy``:
+      - "skip" (default): ignore observations with unknown categories.
+      - "include": include them at DEFAULT_BASE_CONFIDENCE.
+      - "include_low": include them at a lower confidence (DEFAULT_BASE_CONFIDENCE * 0.7).
     """
+
+    def __init__(self, *, unknown_category_policy: str = "skip"):
+        self.unknown_category_policy = unknown_category_policy
 
     async def extract(
         self,
@@ -242,17 +250,37 @@ class CodeExtractor:
         bonus = min(DEGREE_BONUS_MAX, max(0, degree) * DEGREE_BONUS_STEP)
         out: List[FactCandidate] = []
         for obs in observations or []:
-            if obs.category not in cats:
-                continue
+            # Comma-separated compound categories (e.g. "config_docs, algorithms")
+            # match if ANY component is in the distillable set; the matched component
+            # drives base confidence + the downstream category label. An exact
+            # `obs.category not in cats` check silently dropped these.
+            obs_cats = {c.strip() for c in str(obs.category or "").split(",") if c.strip()}
+            matched = obs_cats & cats
+            if matched:
+                matched_cat = max(
+                    matched,
+                    key=lambda c: CATEGORY_BASE_CONFIDENCE.get(c, DEFAULT_BASE_CONFIDENCE),
+                )
+                base = CATEGORY_BASE_CONFIDENCE.get(matched_cat, DEFAULT_BASE_CONFIDENCE)
+                cand_category = matched_cat
+            else:
+                # No component is distillable: apply the unknown-category policy.
+                if self.unknown_category_policy == "skip":
+                    continue
+                elif self.unknown_category_policy == "include_low":
+                    base = DEFAULT_BASE_CONFIDENCE * 0.7
+                else:  # "include"
+                    base = DEFAULT_BASE_CONFIDENCE
+                # Preserve the original (possibly compound) category for provenance.
+                cand_category = obs.category or "note"
             text = (obs.content or "").strip()
             if not text:
                 continue
-            base = CATEGORY_BASE_CONFIDENCE.get(obs.category, DEFAULT_BASE_CONFIDENCE)
             out.append(
                 FactCandidate(
-                    title=_title_from_text(text, src_perm, obs.category),
+                    title=_title_from_text(text, src_perm, cand_category),
                     text=text,
-                    category=obs.category,
+                    category=cand_category,
                     source_permalink=src_perm,
                     source_entity_id=entity.id,
                     tags=list(obs.tags or []),
@@ -432,23 +460,216 @@ class DistillationService:
         await self.search_service.index_entity(entity)
         logger.info(f"created `distillation` skill asset (entity {entity.id})")
 
+    # --- Category discovery ---
+
+    async def discover_observation_categories(self) -> dict:
+        """Discover all observation categories and their counts across L0 entities.
+
+        Returns a dict mapping category -> count, excluding already-distilled entity types
+        (fact, scenario, persona). This is useful for cold-start to understand what
+        categories exist in the database that may not be in distillable_categories.
+
+        The returned dict also includes:
+          - "distillable": list of categories already in distillable_categories
+          - "unknown": list of categories NOT in distillable_categories (candidates for inclusion)
+        """
+        await self.ensure_distillation_skill()
+        tunables = await self.load_skill_tunables()
+        known_cats = set(tunables["distillable_categories"])
+
+        # Get all distinct observation categories, excluding distilled entity types.
+        # We query observations and filter out derived (L1/L2/L3) entity IDs.
+        from sqlalchemy import select as sa_select
+
+        from memopad.models import Observation
+
+        # IDs of already-distilled entities (L1/L2/L3) — their observations carry
+        # derived metadata (category="fact"/etc), not L0 evidence to discover.
+        fact_entities = await self.entity_repository.list_by_entity_type(
+            FACT_ENTITY_TYPE, limit=100000
+        )
+        scenario_entities = await self.entity_repository.list_by_entity_type(
+            SCENARIO_ENTITY_TYPE, limit=100000
+        )
+        persona_entities = await self.entity_repository.list_by_entity_type(
+            PERSONA_ENTITY_TYPE, limit=100000
+        )
+        derived_ids = {e.id for e in fact_entities + scenario_entities + persona_entities}
+
+        # Query all observations from non-derived entities (skip the filter entirely
+        # when there is nothing derived yet — the common cold-start case).
+        query = sa_select(Observation.category, Observation.entity_id)
+        if derived_ids:
+            query = query.where(Observation.entity_id.not_in(list(derived_ids)))
+        result = await self.observation_repository.execute_query(query, use_query_options=False)
+        rows = result.all()
+
+        category_counts: dict[str, int] = {}
+        for row in rows:
+            cat, entity_id = row[0], row[1]
+            # Skip observations from derived entities (safety net)
+            if entity_id in derived_ids:
+                continue
+            # Comma-separated compound categories: count each component so the
+            # report surfaces real tokens, not the full compound string.
+            for token in str(cat or "").split(","):
+                token = token.strip()
+                if token:
+                    category_counts[token] = category_counts.get(token, 0) + 1
+
+        distillable = sorted([c for c in category_counts if c in known_cats])
+        unknown = sorted([c for c in category_counts if c not in known_cats])
+
+        return {
+            "all": category_counts,
+            "distillable": distillable,
+            "unknown": unknown,
+            "total_categories": len(category_counts),
+        }
+
+    async def add_unknown_categories(
+        self, categories: Optional[Sequence[str]] = None, confidence: float = DEFAULT_BASE_CONFIDENCE
+    ) -> dict:
+        """Add one or more observation categories to the distillable set.
+
+        This updates both the in-memory tunables (for this pass) and persists them
+        via the `distillation` skill asset if skills are enabled, so future passes
+        also include these categories.
+
+        Args:
+            categories: List of category names to add. If None, auto-discovers unknowns.
+            confidence: Base confidence for facts from these new categories (0-1).
+
+        Returns:
+            Dict with "added" (list), "skipped" (already present), and "updated_skill" bool.
+        """
+        await self.ensure_distillation_skill()
+        tunables = await self.load_skill_tunables()
+        existing_cats = set(tunables["distillable_categories"])
+
+        if categories is None:
+            # Auto-discover unknowns
+            discovery = await self.discover_observation_categories()
+            categories_to_add = discovery.get("unknown", [])
+        else:
+            categories_to_add = list(categories)
+
+        added: List[str] = []
+        skipped: List[str] = []
+        for cat in categories_to_add:
+            if cat in existing_cats or not cat.strip():
+                skipped.append(cat)
+                continue
+            # Add to config's distillable_categories list
+            if cat not in self.app_config.distillable_categories:
+                self.app_config.distillable_categories = list(
+                    self.app_config.distillable_categories
+                ) + [cat]
+            added.append(cat)
+
+        # If skills are enabled, update the distillation skill's tunables
+        updated_skill = False
+        if self.app_config and self.app_config.skills_enabled:
+            try:
+                skills = await self.entity_repository.list_by_entity_type(
+                    SKILL_ENTITY_TYPE, limit=200
+                )
+                skill = next(
+                    (s for s in skills if s.title == DISTILLATION_SKILL_TITLE), None
+                )
+                if skill is not None:
+                    tunables_block = (skill.entity_metadata or {}).get("tunables") or {}
+                    current_cats = set(tunables_block.get("distillable_categories", []))
+                    for cat in added:
+                        current_cats.add(cat)
+                    # Update confidence for new categories
+                    new_tunables = dict(tunables_block)
+                    new_tunables["distillable_categories"] = sorted(current_cats)
+                    schema = EntitySchema(
+                        title=DISTILLATION_SKILL_TITLE,
+                        directory=SKILL_DIR,
+                        entity_type=SKILL_ENTITY_TYPE,
+                        entity_metadata={
+                            **skill.entity_metadata,
+                            "tunables": new_tunables,
+                        },
+                    )
+                    await self.entity_service.create_or_update_entity(schema)
+                    updated_skill = True
+            except Exception as e:
+                logger.warning(f"add_unknown_categories: skill update failed ({e})")
+
+        return {
+            "added": added,
+            "skipped": skipped,
+            "updated_skill": updated_skill,
+            "new_distillable_count": len(self.app_config.distillable_categories),
+        }
+
     # --- L1 pass ---
 
-    async def run_l1_pass(self, max_memories: int) -> int:
-        """Distil new L0 observations into L1 atomic facts. Returns facts written."""
+    async def run_l1_pass(
+        self, max_memories: int = 50, *, all_entities: bool = False
+    ) -> int:
+        """Distil new L0 observations into L1 atomic facts. Returns facts written.
+
+        Args:
+            max_memories: Max entities to scan per pass (used when all_entities=False).
+            all_entities: If True, process ALL L0 entities regardless of watermark
+                         (cold-start / bulk mode). The watermark is set at the end.
+        """
         await self.ensure_distillation_skill()
         self._embed_cache.clear()
         tunables = await self.load_skill_tunables()
         categories = set(tunables["distillable_categories"])
         dedup_threshold = float(tunables["dedup_similarity_threshold"])
 
+        # Load the watermark once for both paths so the save below always works
+        # (the bulk path used to skip this and crash with UnboundLocalError).
         state = self._state.load()
         since = _parse_dt(state.get("last_l1_at"))
-        l0_entities = await self.entity_repository.find_updated_since(
-            since, limit=max_memories
-        )
+
+        # Select entities to process
+        if all_entities:
+            # Cold-start / bulk mode: scan ALL L0 entities (no watermark filter)
+            # find_updated_since(None) = no time filter, returns all entities up to limit
+            l0_entities = await self.entity_repository.find_updated_since(
+                None, limit=100000
+            )
+            logger.info(
+                f"L1 pass [BULK]: scanning {len(l0_entities)} total L0 entities "
+                f"(project {self.project_id})"
+            )
+        else:
+            # Incremental mode: only process entities updated since last watermark.
+            l0_entities = await self.entity_repository.find_updated_since(
+                since, limit=max_memories
+            )
 
         existing = await self._load_facts_with_text()
+
+        # Self-healing: a stuck/empty watermark scan leaves L1 permanently empty
+        # even when eligible L0 entities exist (the watermark advanced past every
+        # L0 without distilling them, or never advanced). When the incremental scan
+        # found nothing AND L1 is still empty, fall back to a full scan so the pass
+        # recovers on its own — no manual `all_entities=True` required. Once L1 is
+        # non-empty, an empty watermark scan is a normal idle tick and stays cheap.
+        if not all_entities and not l0_entities and not existing:
+            full_scan = await self.entity_repository.find_updated_since(
+                None, limit=max_memories
+            )
+            eligible = [
+                e for e in full_scan
+                if entity_level(e.entity_metadata or {}) not in DERIVED_LEVELS
+            ]
+            if eligible:
+                logger.info(
+                    f"L1 pass [SELF-HEAL]: watermark scan empty, falling back to "
+                    f"full scan ({len(eligible)} eligible L0 entities) "
+                    f"(project {self.project_id})"
+                )
+                l0_entities = full_scan
+
         created = 0
         reconfirmed = 0
         now = self._clock()

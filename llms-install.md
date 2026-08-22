@@ -101,6 +101,26 @@ memopad import chatgpt path/to/conversations.json
 memopad import memory-json path/to/memory.json
 ```
 
+### Distillation (L0→L3 memory pyramid)
+
+MemoPad automatically distils structured observations into L1 atomic facts → L2
+scenarios → an L3 persona on every write (pure in-app code, no external model). You
+can also drive it on demand or backfill an existing knowledge base:
+
+```bash
+memopad distill                 # incremental pass (default)
+memopad distill --bulk          # cold-start / backfill: process ALL existing notes
+memopad distill --dry-run       # read-only: show current L1/L2/L3 counts
+memopad distill discover-categories   # show which observation categories are distillable
+memopad distill add-categories --auto  # widen the distillable set to all unknown categories
+```
+
+Observation categories are free-form; comma-separated compound categories match if
+any component is distillable. A stuck watermark (L1 empty though notes exist)
+self-heals — no manual `--bulk` needed. Enable the pipeline with
+`levels_enabled: true` (and `levels_pipeline_automatic: true` for the auto cadence)
+in `~/memopad/config.json`.
+
 ## Troubleshooting
 
 If you encounter issues:

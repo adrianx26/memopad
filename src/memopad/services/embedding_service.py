@@ -83,7 +83,13 @@ class FastEmbedProvider:
 
         self.model_name = model_name
         # The first call downloads the model (~30MB for bge-small) and caches it.
-        self._model = TextEmbedding(model_name=model_name)
+        # Cap onnxruntime's intra-op thread pool: without `threads=` it defaults
+        # to 0 (ALL cores), so a single embed() call spawns a RUNNABLE thread per
+        # core and starves the event loop -> MCP keepalive storm + repeated stdio
+        # subprocess restarts. OMP_NUM_THREADS does NOT affect onnxruntime; it has
+        # its own SessionOptions pool. MEMOPAD_EMBED_THREADS overrides (default 1).
+        embed_threads = int(os.environ.get("MEMOPAD_EMBED_THREADS", "1"))
+        self._model = TextEmbedding(model_name=model_name, threads=embed_threads)
         # We only learn the true dim after the first inference; assume default
         # for the canonical model and validate once on first use.
         self.dim = EMBEDDING_DIM_DEFAULT

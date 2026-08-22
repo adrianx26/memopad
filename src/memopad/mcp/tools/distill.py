@@ -27,13 +27,18 @@ from memopad.mcp.server import mcp
         "observations into atomic facts; L2 clusters facts into scenarios; L3 "
         "aggregates stable facts into the persona. Distillation also runs "
         "automatically on every write — this tool is for on-demand / debug use. "
-        "Pure in-app code (no external model/API/key)."
+        "Pure in-app code (no external model/API/key).\n\n"
+        "Use bulk=True to process ALL existing L0 entities (cold-start/backfill mode). "
+        "After bulk mode completes, the watermark is set so future incremental passes "
+        "only process new/changed entities. Use discover_categories() first to see what "
+        "observation categories exist in your database that may need to be added."
     ),
 )
 async def distill_memory(
     level: str = "L1",
     project: Optional[str] = None,
     max_memories: int = 50,
+    bulk: bool = False,
     context: Context | None = None,
 ) -> str:
     """Trigger a distillation pass for the given levels.
@@ -43,6 +48,8 @@ async def distill_memory(
             (e.g. "L1,L2,L3"). Default "L1".
         project: Project name. Optional — server resolves the default.
         max_memories: Max L0 entities to scan per L1 pass (1–1000). Default 50.
+        bulk: If True, process ALL existing L0 entities (cold-start/backfill mode).
+              Default False = incremental (only updated-since-watermark).
         context: Optional FastMCP context.
 
     Returns:
@@ -51,13 +58,15 @@ async def distill_memory(
     async with get_client() as client:
         active_project = await get_active_project(client, project, context)
         logger.info(
-            f"MCP tool call tool=distill_memory level={level} project={active_project.name}"
+            f"MCP tool call tool=distill_memory level={level} project={active_project.name} bulk={bulk}"
         )
 
         from memopad.mcp.clients import KnowledgeClient
 
         knowledge_client = KnowledgeClient(client, active_project.external_id)
-        data = await knowledge_client.distill_memory(level, max_memories=max_memories)
+        data = await knowledge_client.distill_memory(
+            level, max_memories=max_memories, bulk=bulk
+        )
 
     lines = ["# Distillation pass complete", ""]
     if "l1_facts" in data:
@@ -203,4 +212,152 @@ async def get_persona(
     content = persona.get("content") or ""
     if content:
         lines.append(content)
+    return add_project_metadata("\n".join(lines), active_project.name)
+
+
+@mcp.tool(
+    description=(
+        "Discover all observation categories in the project's L0 entities and identify "
+        "which are already distillable vs which need to be added. Returns a report with: "
+        "- All distinct categories found (with counts)\n"
+        "- Categories already in the distillable set\n"
+        "- Categories NOT yet distillable (candidates for inclusion).\n\n"
+        "Use this before running a bulk distillation pass to understand what types of "
+        "observations exist that may need to be added to the pipeline."
+    ),
+)
+async def discover_categories(
+    project: Optional[str] = None,
+    context: Context | None = None,
+) -> str:
+    """Discover observation categories and identify which are distillable.
+
+    Args:
+        project: Project name. Optional — server resolves the default.
+        context: Optional FastMCP context.
+
+    Returns:
+        A markdown report showing all observed categories, their counts,
+        and which are already/distinctly in the distillable set.
+    """
+    async with get_client() as client:
+        active_project = await get_active_project(client, project, context)
+        logger.info(
+            f"MCP tool call tool=discover_categories project={active_project.name}"
+        )
+
+        from memopad.mcp.clients import KnowledgeClient
+
+        knowledge_client = KnowledgeClient(client, active_project.external_id)
+        report = await knowledge_client.discover_categories()
+
+    lines = [
+        f"# Category Discovery — {active_project.name}",
+        "",
+        f"**Total distinct categories:** {report.get('total_categories', 'N/A')}",
+        "",
+    ]
+
+    current_config = report.get("current_distillable_config", [])
+    if current_config:
+        lines.append("**Current distillable config:**")
+        for cat in current_config:
+            lines.append(f"- `{cat}`")
+        lines.append("")
+
+    distillable = report.get("distillable", [])
+    unknown = report.get("unknown", [])
+    counts = report.get("all_categories_with_counts", {})
+
+    if distillable:
+        lines.append(f"**Already distillable ({len(distillable)}):**")
+        for cat in distillable:
+            count = counts.get(cat, "?")
+            lines.append(f"- ✓ `{cat}` (count: {count})")
+        lines.append("")
+
+    if unknown:
+        lines.append(f"**Unknown / not yet distillable ({len(unknown)}):**")
+        for cat in unknown:
+            count = counts.get(cat, "?")
+            lines.append(f"- ✗ `{cat}` (count: {count})")
+        lines.append("")
+        lines.append(
+            f"Add with `add_categories(categories=['{unknown[0]}', ...])` or "
+            f"`add_categories()` to auto-add all unknowns."
+        )
+
+    if not distillable and not unknown:
+        lines.append("No observation categories found in the database.")
+
+    return add_project_metadata("\n".join(lines), active_project.name)
+
+
+@mcp.tool(
+    description=(
+        "Add one or more observation categories to the distillable set. When called "
+        "without a list, auto-discovers all unknown (non-distillable) categories and "
+        "adds them. This updates both the in-memory config and the distillation skill "
+        "asset (if skills are enabled).\n\n"
+        "Use discover_categories() first to see what needs adding."
+    ),
+)
+async def add_categories(
+    categories: Optional[list[str]] = None,
+    project: Optional[str] = None,
+    context: Context | None = None,
+) -> str:
+    """Add observation categories to the distillable set.
+
+    Args:
+        categories: List of category names to add. If omitted, auto-discovers all
+                    unknown categories and adds them.
+        project: Project name. Optional — server resolves the default.
+        context: Optional FastMCP context.
+
+    Returns:
+        A markdown summary showing added/skipped categories and new total count.
+    """
+    async with get_client() as client:
+        active_project = await get_active_project(client, project, context)
+        logger.info(
+            f"MCP tool call tool=add_categories project={active_project.name} "
+            f"categories={categories}"
+        )
+
+        from memopad.mcp.clients import KnowledgeClient
+
+        knowledge_client = KnowledgeClient(client, active_project.external_id)
+        result = await knowledge_client.add_categories(categories)
+
+    added = result.get("added", [])
+    skipped = result.get("skipped", [])
+    updated_skill = result.get("updated_skill", False)
+    new_count = result.get("new_distillable_count")
+
+    lines = ["# Category Update — " + active_project.name, ""]
+
+    if added:
+        lines.append(f"**Added ({len(added)}):**")
+        for cat in added:
+            lines.append(f"- `+ {cat}`")
+        lines.append("")
+
+    if skipped:
+        lines.append(f"**Skipped (already present) ({len(skipped)}):**")
+        for cat in skipped:
+            lines.append(f"- `~ {cat}`")
+        lines.append("")
+
+    if not added and not skipped:
+        lines.append("No categories to add.")
+
+    if updated_skill:
+        lines.append(
+            "*Distillation skill asset was updated with new categories.*"
+        )
+
+    if new_count is not None:
+        lines.append(f"**Total distillable categories now: {new_count}**")
+
     return add_project_metadata("\n".join(lines), active_project.name)

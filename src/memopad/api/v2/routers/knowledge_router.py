@@ -1,4 +1,4 @@
-﻿"""V2 Knowledge Router - External ID-based entity operations.
+"""V2 Knowledge Router - External ID-based entity operations.
 
 This router provides external_id (UUID) based CRUD operations for entities,
 using stable string UUIDs that won't change with file moves or database migrations.
@@ -10,7 +10,7 @@ Key improvements:
 - Simplified caching strategies
 """
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, Response, Path, Query
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, Response, Path, Query, Body
 from loguru import logger
 
 from memopad.deps import (
@@ -1100,11 +1100,20 @@ async def distill_memory(
         "scenarios; L3 aggregates stable facts into the persona.",
     ),
     max_memories: int = Query(50, ge=1, le=1000, description="Max L0 entities to scan per L1 pass."),
+    bulk: bool = Query(
+        False,
+        description="If True, process ALL existing L0 entities (cold-start / backfill). "
+        "Default False = incremental mode (only entities updated since last watermark).",
+    ),
 ) -> dict:
     """Manually trigger a distillation pass (bypasses the automatic cadence).
 
     Runs synchronously and returns per-level counts. The automatic create-path
     trigger is fire-and-forget; this endpoint is for on-demand / debug / CLI use.
+
+    Use `bulk=true` to run a one-time cold-start that processes ALL existing L0
+    entities (not just updated-since-watermark). After bulk mode completes, the
+    watermark is set so future incremental passes only process new/changed entities.
     """
     levels = {part.strip().upper() for part in level.split(",") if part.strip()}
     unknown = levels - {"L1", "L2", "L3"}
@@ -1112,9 +1121,11 @@ async def distill_memory(
         raise HTTPException(
             status_code=400, detail=f"Unknown level(s): {sorted(unknown)}. Use L1, L2, L3."
         )
-    summary: dict = {"project_id": project_id, "levels": sorted(levels)}
+    summary: dict = {"project_id": project_id, "levels": sorted(levels), "bulk": bulk}
     if "L1" in levels:
-        summary["l1_facts"] = await service.run_l1_pass(max_memories=max_memories)
+        summary["l1_facts"] = await service.run_l1_pass(
+            max_memories=max_memories, all_entities=bulk
+        )
     if "L2" in levels:
         summary["l2_scenarios"] = await service.run_l2_pass()
     if "L3" in levels:
@@ -1160,3 +1171,46 @@ async def get_persona(
             detail="No persona has been distilled yet. Run a distillation pass with level=L3.",
         )
     return EntityResponseV2.model_validate(personas[0])
+
+
+@router.get("/discover-categories")
+async def discover_categories(
+    project_id: ProjectExternalIdPathDep,
+    service: DistillationServiceV2ExternalDep,
+) -> dict:
+    """Discover all observation categories and identify which are distillable.
+
+    Returns a report showing:
+      - All observed categories with counts
+      - Which categories are already in distillable_categories
+      - Which categories are NOT yet distillable (candidates for inclusion)
+
+    This is useful for cold-start to understand what observation types exist
+    in the database that may need to be added to the distillation pipeline.
+    """
+    discovery = await service.discover_observation_categories()
+    return {
+        "total_categories": discovery["total_categories"],
+        "distillable": discovery["distillable"],
+        "unknown": discovery["unknown"],
+        "all_categories_with_counts": discovery["all"],
+        "current_distillable_config": list(service.app_config.distillable_categories),
+    }
+
+
+@router.post("/add-categories")
+async def add_observation_categories(
+    project_id: ProjectExternalIdPathDep,
+    service: DistillationServiceV2ExternalDep,
+    categories: Optional[List[str]] = Body(None, embed=True, description="Categories to add. If omitted, auto-discovers unknowns."),
+) -> dict:
+    """Add observation categories to the distillable set.
+
+    When called without `categories`, automatically discovers all non-distillable
+    categories and adds them. When called with specific category names, only those
+    are added.
+
+    Returns: added (list), skipped (already present), updated_skill (bool).
+    """
+    result = await service.add_unknown_categories(categories=categories)
+    return result
