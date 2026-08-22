@@ -31,6 +31,9 @@ enable any compatible LLM to read and write to your local knowledge base.
 # Install with uv (recommended)
 uv tool install memopad
 
+# Verify the install works (must print "MemoPad version: …", not a traceback)
+memopad --version
+
 # Configure Claude Desktop (edit ~/Library/Application Support/Claude/claude_desktop_config.json)
 # Add this to your config:
 {

@@ -1,10 +1,23 @@
 @echo off
 REM Memopad MCP Server Installation Script for Windows
 REM Double-click to run
+REM
+REM DEPRECATED - this legacy script installs the old standalone server.py
+REM (memopad_server_fixed.py) model. The current MemoPad package is installed as
+REM a uv tool and run via "memopad mcp", not "python server.py". Prefer:
+REM     uv tool install memopad
+REM     memopad --version
+REM     memopad mcp --transport stdio
+REM and configure your MCP client to run "memopad mcp" (see ..\llms-install.md
+REM and ..\install_mcp.ps1). This script is retained only for the legacy
+REM standalone distribution in this files\ directory.
 
 echo ========================================
 echo Memopad MCP Server Installation
 echo ========================================
+echo.
+echo WARNING: This is the DEPRECATED legacy install (standalone server.py).
+echo          Prefer:  uv tool install memopad  +  memopad mcp  (see ..\llms-install.md)
 echo.
 
 REM Set installation directory

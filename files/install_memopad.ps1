@@ -1,9 +1,23 @@
 # Memopad MCP Server Installation Script for Windows
 # Run this script in PowerShell
+#
+# DEPRECATED — this legacy script installs the old standalone `server.py`
+# (memopad_server_fixed.py) model. The current MemoPad package is installed as
+# a uv tool and run via `memopad mcp`, not `python server.py`. Prefer the modern
+# install path:
+#     uv tool install memopad
+#     memopad --version        # verify
+#     memopad mcp --transport stdio
+# and configure your MCP client to run `memopad mcp` (see ../llms-install.md and
+# ../install_mcp.ps1). This script is retained only for the legacy standalone
+# distribution in this `files/` directory.
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "Memopad MCP Server Installation" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "WARNING: This is the DEPRECATED legacy install (standalone server.py)." -ForegroundColor Yellow
+Write-Host "         Prefer:  uv tool install memopad  +  memopad mcp   (see ../llms-install.md)" -ForegroundColor Yellow
 Write-Host ""
 
 # Set installation directory

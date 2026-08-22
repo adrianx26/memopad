@@ -30,6 +30,21 @@ if (-not $memopadPath) {
 
 Write-Host "Found memopad at: $memopadPath" -ForegroundColor Cyan
 
+# Verify the install actually works. A "successful" `uv tool install` is not a
+# working install: a broken package (e.g. an unimported name in a router, which
+# only errors at runtime on the installed Python) would still report success.
+# `memopad --version` exercises the CLI import chain — if it prints a version
+# instead of a traceback, the package is usable.
+Write-Host "Verifying install..." -ForegroundColor Green
+$versionOutput = & $memopadPath --version 2>&1
+if ($LASTEXITCODE -ne 0 -or ($versionOutput -join "`n") -match "Error|Traceback|Exception") {
+    Write-Host "Error: memopad installed but failed to start:" -ForegroundColor Red
+    Write-Host $versionOutput -ForegroundColor Red
+    Write-Host "The package is broken (likely an import error). Reinstall or report the issue." -ForegroundColor Red
+    exit 1
+}
+Write-Host "OK: $($versionOutput | Select-Object -First 1)" -ForegroundColor Green
+
 # Configure Antigravity
 $configPath = Join-Path $env:USERPROFILE ".gemini\antigravity\mcp_config.json"
 Write-Host "Checking Antigravity configuration at: $configPath"

@@ -32,6 +32,32 @@
   3.14 dev suite, not only on the installed 3.11 env) and
   `test_add_categories_categories_param_is_nullable_list_of_str` (locks the
   `categories` param's contract as a nullable `list[str]`).
+- The same `get_type_hints` sweep was run across the full CLI + API + MCP import
+  chain (`cli.main`/`cli.app`/`cli.container`/`cli.commands.*`, `api.app`,
+  `knowledge_router`, `mcp.server`, `mcp.tools.*`) at module, class, and function
+  level — no other latent annotation `NameError`s (the only non-target hits were
+  pydantic-synthesized `BaseModel` methods on `MemoPadConfig`, pre-existing, not
+  our code, and they do not break import on 3.11).
+
+### Install scripts & docs — verify the install actually works
+
+The 0.21.2 bug shipped because a "successful" `uv tool install` reported success
+even though the package crashed at runtime. The install path now gates on a
+`memopad --version` smoke check that exercises the CLI import chain — the exact
+check that would have caught the `Optional` `NameError` at install time.
+
+- `install_mcp.ps1`, `install_mcp_antigravity.ps1` — after `uv tool install .`,
+  run `memopad --version`; if it exits non-zero or prints a `Error`/`Traceback`/
+  `Exception`, the script fails with a clear "package is broken (likely an import
+  error)" message instead of silently configuring a dead MCP server.
+- `llms-install.md` — added a "verify the install" step (`memopad --version` must
+  print `MemoPad version: …`, not a traceback) between install and MCP config.
+- `README.md` Quick Start — added the `memopad --version` verify line after
+  `uv tool install memopad`.
+- `files/install.bat`, `files/install_memopad.ps1` (legacy standalone `server.py`
+  distribution) — added a deprecation banner pointing to the modern
+  `uv tool install memopad` + `memopad mcp` path, so users who find the legacy
+  bundle don't follow the dead `python server.py` flow.
 
 ## [0.21.2] - 2026-08-22
 

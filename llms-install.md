@@ -17,6 +17,19 @@ uv tool install memopad
 pip install memopad
 ```
 
+After installing, verify the package actually works — a "successful" install is
+not a working install (a broken package can install cleanly but fail to start):
+
+```bash
+memopad --version
+```
+
+This must print `MemoPad version: …`. If it prints a traceback / `NameError` /
+`ModuleNotFoundError` instead, the package is broken — reinstall or report the
+issue before configuring MCP. This catches the class of bug where a router
+references an unimported name that only errors at runtime on the installed
+Python.
+
 ### 2. Configure MCP Server
 
 Add the following to your config:
