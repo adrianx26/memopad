@@ -39,7 +39,11 @@ class SyncReportResponse(BaseModel):
     skipped_files: List[SkippedFileResponse] = Field(
         default_factory=list, description="Files skipped due to repeated failures"
     )
-    total: int = Field(description="Total number of changes")
+    # Default 0 (not "required"): total is a derived count of changes, so an
+    # absent value means "no changes". Keeping it optional prevents a pydantic
+    # ValidationError ("total field required") on edge response shapes where the
+    # field isn't populated — clients mis-read that as a sync failure.
+    total: int = Field(default=0, description="Total number of changes")
 
     @classmethod
     def from_sync_report(cls, report: "SyncReport") -> "SyncReportResponse":

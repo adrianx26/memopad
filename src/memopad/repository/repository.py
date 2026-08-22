@@ -22,42 +22,76 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 from sqlalchemy.orm.interfaces import LoaderOption
 from sqlalchemy.sql.elements import ColumnElement
 
-from memopad import db
-from memopad.models import Base
-
-T = TypeVar("T", bound=Base)
-
 # Retry transient SQLite write-lock contention (e.g. another process — the CLI —
-# writing to the same DB file concurrently). In-process contention is prevented
-# by bounded background-task concurrency + the 30s busy_timeout; this only covers
-# the rare cross-process miss. Retries ONLY "database is locked" (not disk I/O etc.)
+# writing to the same DB file concurrently). Retries ONLY "database is locked"
+# (not disk I/O etc.); in-process contention is also bounded by the 30s
+# busy_timeout + the background-task semaphore, so this covers the cross-process
+# miss where busy_timeout elapses while the other writer still holds the lock.
+#
+# Two budgets: a FAST one for hot CRUD writes (base Repository), and a BULK one
+# for search-index writes that can race a long-lived MCP server during a CLI
+# `distill --bulk` / reindex. The fast budget's 0.05s backoff re-fails instantly
+# while the lock is still held past busy_timeout — which is exactly how a bulk
+# run lost its final `INSERT INTO search_index` and exited with an error
+# instead of a clean "complete" footer (BUG 6). The bulk budget gives the lock
+# holder time to finish and release. Bulk indexing is fire-and-forget on the
+# API/MCP hot path (it cannot block a response) and awaited inline only on the
+# CLI bulk path, where waiting is the desired behavior — so the larger budget
+# never slows interactive writes.
+#
+# Defined before the `memopad` imports below on purpose: `memopad.db` pulls in
+# the search repositories, which import `retry_on_db_locked_bulk` from this
+# module — so it must already exist when that import chain runs.
 _DB_LOCKED_MAX_RETRIES = 3
 _DB_LOCKED_BASE_DELAY = 0.05  # seconds; backoff 0.05, 0.1, 0.2
+_DB_LOCKED_BULK_MAX_RETRIES = 6
+_DB_LOCKED_BULK_BASE_DELAY = 1.0  # seconds; exponential 1, 2, 4, 8, 16
 
 
-def _retry_on_db_locked(fn):
-    """Decorator: retry an async repository write on transient SQLite "database is locked".
+def _make_db_locked_retry(max_retries: int, base_delay: float):
+    """Build an async decorator that retries transient SQLite "database is locked".
 
-    The decorated method opens its own ``scoped_session``; each retry re-invokes it so
-    the failed transaction is rolled back (by scoped_session's except) and a fresh one
-    begins. Non-lock ``OperationalError`` (e.g. "disk I/O error") is re-raised immediately.
+    The decorated method opens its own ``scoped_session``; each retry re-invokes it
+    so the failed transaction is rolled back (by scoped_session's except) and a fresh
+    one begins. Non-lock ``OperationalError`` (e.g. "disk I/O error") is re-raised
+    immediately. ``max_retries`` is the total number of attempts (1 = no retry).
     """
 
-    @functools.wraps(fn)
-    async def _wrapper(*args: Any, **kwargs: Any) -> Any:
-        for attempt in range(_DB_LOCKED_MAX_RETRIES):
-            try:
-                return await fn(*args, **kwargs)
-            except SAOperationalError as exc:
-                if "database is locked" not in str(exc).lower() or attempt == _DB_LOCKED_MAX_RETRIES - 1:
-                    raise
-                logger.debug(
-                    f"database is locked; retrying {fn.__name__} "
-                    f"(attempt {attempt + 2}/{_DB_LOCKED_MAX_RETRIES})"
-                )
-                await asyncio.sleep(_DB_LOCKED_BASE_DELAY * (2 ** attempt))
+    def _decorator(fn):
+        @functools.wraps(fn)
+        async def _wrapper(*args: Any, **kwargs: Any) -> Any:
+            for attempt in range(max_retries):
+                try:
+                    return await fn(*args, **kwargs)
+                except SAOperationalError as exc:
+                    if (
+                        "database is locked" not in str(exc).lower()
+                        or attempt == max_retries - 1
+                    ):
+                        raise
+                    logger.debug(
+                        f"database is locked; retrying {fn.__name__} "
+                        f"(attempt {attempt + 2}/{max_retries})"
+                    )
+                    await asyncio.sleep(base_delay * (2 ** attempt))
 
-    return _wrapper
+        return _wrapper
+
+    return _decorator
+
+
+# Fast-path decorator for hot CRUD writes (base Repository). Kept under the
+# original name/behaviour so existing call sites and tests are unchanged.
+_retry_on_db_locked = _make_db_locked_retry(_DB_LOCKED_MAX_RETRIES, _DB_LOCKED_BASE_DELAY)
+# Bulk decorator for search-index writes that can race a long-held cross-process lock.
+retry_on_db_locked_bulk = _make_db_locked_retry(
+    _DB_LOCKED_BULK_MAX_RETRIES, _DB_LOCKED_BULK_BASE_DELAY
+)
+
+from memopad import db  # noqa: E402
+from memopad.models import Base  # noqa: E402
+
+T = TypeVar("T", bound=Base)
 
 
 class Repository(Generic[T]):

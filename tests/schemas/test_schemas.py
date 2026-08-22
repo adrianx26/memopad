@@ -551,3 +551,20 @@ class TestObservationContentLength:
 
         obs = Observation(category="test", content="  some content  ")
         assert obs.content == "some content"
+
+
+def test_sync_report_response_total_defaults_to_zero():
+    """`total` is optional (defaults to 0), not a required field.
+
+    Regression guard: clients used to hit a pydantic ValidationError ("total
+    field required") on edge response shapes that didn't populate `total`,
+    mis-reading a successful sync as a failure. `total` is a derived count of
+    changes, so an absent value means "no changes".
+    """
+    from memopad.schemas.sync_report import SyncReportResponse
+
+    # Constructing without `total` must not raise.
+    report = SyncReportResponse()
+    assert report.total == 0
+    # And an explicit value is still honoured.
+    assert SyncReportResponse(total=5).total == 5

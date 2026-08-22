@@ -47,14 +47,25 @@ dependencies = [
     "pypdf>=3.17.0",
     "python-docx>=1.0.0",
     "openpyxl>=3.1.2",
+    # fastembed (CPU-only ONNX inference) is a core dependency, not an optional
+    # extra, so `uv tool install --upgrade` stays self-consistent: previously the
+    # `[embeddings]` extra was stripped on every upgrade, silently disabling
+    # `semantic_search` until a manual `pip install 'memopad[embeddings]'` (BUG 4).
+    # The runtime stays gated behind MEMOPAD_EMBEDDINGS_ENABLED, so users who never
+    # set it see no behavior change; only the install is heavier. abi3 wheels make
+    # this safe across the supported Python range (incl. the 3.14 dev env).
+    "fastembed>=0.4.0",
 ]
 
 [project.optional-dependencies]
 stoolap = [
     "stoolap-python>=0.3.0",  # Embedded Rust SQL DB — Stoolap backend
 ]
+# `embeddings` is now bundled into the core install (see `dependencies` above).
+# The extra is kept as an alias so existing `pip install 'memopad[embeddings]'`
+# / `uv tool install 'memopad[embeddings]'` commands still resolve.
 embeddings = [
-    "fastembed>=0.4.0",  # CPU-only ONNX inference for semantic/hybrid search
+    "fastembed>=0.4.0",  # alias — now also a core dependency (BUG 4)
 ]
 
 

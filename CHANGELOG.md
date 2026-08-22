@@ -1,5 +1,64 @@
 ﻿# CHANGELOG
 
+## [0.21.4] - 2026-08-22
+
+### Fixed — bulk CLI distillation loses its final entity to `database is locked` (BUG 6/7)
+
+- **`repository/search_repository_base.py`:** the raw-SQL search-index writes
+  (`index_item`, `bulk_index_items`, `delete_by_entity_id`, `delete_by_permalink`)
+  were the one write path **not** covered by the `_retry_on_db_locked` decorator —
+  `SearchRepositoryBase` doesn't inherit from the base `Repository` where it lives.
+  A CLI `distill --bulk` racing the long-lived MCP server (which holds a WAL write
+  lock during a reindex) could exhaust the 30s `busy_timeout` on its very last
+  entity and lose the `INSERT INTO search_index`, exiting with an error instead of
+  a clean "complete" footer. The entity row persisted; only its FTS index was
+  lost. All four writes now carry `retry_on_db_locked_bulk`.
+- **`repository/repository.py`:** refactored the retry into a parameterized
+  factory `_make_db_locked_retry` so the **hot CRUD path keeps its fast 3-retry /
+  0.05s budget unchanged** (no regression), and added a **bulk-budget variant**
+  (`retry_on_db_locked_bulk`: 6 retries, 1s exponential backoff) for writes that
+  can race a long-held cross-process WAL lock. The fast 0.05s backoff re-fails
+  instantly while the lock is still held past `busy_timeout`; the bulk budget
+  gives the lock holder time to finish and release. Bulk indexing is
+  fire-and-forget on the API/MCP hot path (it cannot block a response) and awaited
+  inline only on the CLI bulk path, where waiting is the desired behavior — so
+  the larger budget never slows interactive writes. This is the
+  lock-tolerance fix direction BUG 7 names as acceptable for the shared-WAL
+  architecture.
+- The retry block is defined before `from memopad import db` in `repository.py`
+  on purpose: `memopad.db` pulls in the search repositories, which import
+  `retry_on_db_locked_bulk` from this module, so it must already exist when that
+  import chain runs (avoids a circular import).
+
+### Fixed — `uv tool install --upgrade` strips the `[embeddings]` extra (BUG 4)
+
+- **`pyproject.toml`:** moved `fastembed>=0.4.0` from
+  `[project.optional-dependencies.embeddings]` into the core `[project]
+  dependencies`, so `uv tool install --upgrade` stays self-consistent — previously
+  the extra was stripped on every upgrade, silently disabling `semantic_search`
+  ("Embeddings disabled") until a manual `pip install 'memopad[embeddings]'`. The
+  runtime stays gated behind `MEMOPAD_EMBEDDINGS_ENABLED`, so users who never set
+  it see no behavior change; only the install is heavier. The `embeddings` extra
+  is kept as an alias so existing `pip install 'memopad[embeddings]'` commands
+  still resolve. Verified `fastembed 0.8.0` + `onnxruntime 1.29.0` install cleanly
+  on the Python 3.14 dev env (abi3 wheels) — bundling does not break the dev
+  install.
+
+### Fixed — `SyncReportResponse.total` "Field required" on edge response shapes
+
+- **`schemas/sync_report.py`:** `total` is now `Field(default=0, ...)`. It's a
+  derived count of changes, so an absent value means "no changes", not a missing
+  required field. Prevents a pydantic `ValidationError` ("total field required")
+  that could make clients mis-read a successful sync as a failure.
+
+### Tests
+
+- `tests/repository/test_write_path_hardening.py` — added 4 tests for the bulk
+  retry variant (retries-then-succeeds, gives-up-after-budget, no-retry-on-non-lock,
+  and the four `SearchRepositoryBase` writes are wrapped).
+- `tests/schemas/test_schemas.py` — added
+  `test_sync_report_response_total_defaults_to_zero`.
+
 ## [0.21.3] - 2026-08-22
 
 ### Fixed — `NameError` on import of the knowledge router (Python ≤3.13 / installed 3.11 env)
