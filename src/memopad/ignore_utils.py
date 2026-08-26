@@ -54,6 +54,14 @@ DEFAULT_IGNORE_PATTERNS = {
     "*.swp",
     "*.swo",
     "*~",
+    # MemoPad bookkeeping files. The file-watch service writes these continuously
+    # (rotating log + per-batch status snapshot). When the watched project path is
+    # the data dir itself (the default "main" project == ~/memopad), each write
+    # fires a watchfiles event -> re-scan -> more log + a fresh status file ->
+    # infinite hot loop that starves the event loop (MCP keepalive storm).
+    # Excluding them breaks the self-trigger cycle.
+    "*.log",
+    "watch-status.json",
 }
 
 
@@ -138,6 +146,10 @@ desktop.ini
 *.swp
 *.swo
 *~
+
+# MemoPad bookkeeping (log + watch status) — never index these
+*.log
+watch-status.json
 """)
 
 

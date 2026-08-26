@@ -221,7 +221,7 @@ def cmd_distill(
         50,
         "--max-memories",
         "-m",
-        help="Max L0 entities to scan per L1 pass (1-1000). Default 50.",
+        help="Max L0 entities to scan per L1 pass (1-100000). Default 50.",
     ),
     bulk: bool = typer.Option(
         False,
@@ -262,8 +262,8 @@ def cmd_distill(
             return
 
         levels = _parse_levels(level)
-        if max_memories < 1 or max_memories > 1000:
-            raise typer.BadParameter("--max-memories must be between 1 and 1000")
+        if max_memories < 1 or max_memories > 100000:
+            raise typer.BadParameter("--max-memories must be between 1 and 100000")
         level_spec = ",".join(levels)
         run_with_cleanup(_run_distill(project, level_spec, max_memories, bulk))
     except (ToolError, ValueError) as e:

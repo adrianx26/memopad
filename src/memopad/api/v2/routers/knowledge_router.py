@@ -1099,7 +1099,7 @@ async def distill_memory(
         "L1 distils new L0 observations into atomic facts; L2 clusters facts into "
         "scenarios; L3 aggregates stable facts into the persona.",
     ),
-    max_memories: int = Query(50, ge=1, le=1000, description="Max L0 entities to scan per L1 pass."),
+    max_memories: int = Query(50, ge=1, le=100000, description="Max L0 entities to scan per L1 pass. Upper bound is generous so large corpora can be processed in a single bulk pass without the MCP/CLI caller hitting an artificial 1000-entity cap."),
     bulk: bool = Query(
         False,
         description="If True, process ALL existing L0 entities (cold-start / backfill). "

@@ -1,5 +1,109 @@
 ﻿# CHANGELOG
 
+## [0.21.6] - 2026-08-27
+
+### Fixed — file-watch self-trigger hot loop (BUG 1) + distill cap + embedding backfill + local assimilate
+
+Addresses the reproducible bugs in the 2026-08-26 debugging report (adrianx26/memopad,
+v0.21.5, Linux/SQLite WAL, Hermes MCP stdio). Several of the report's bugs were
+already fixed natively in this tree — confirmed against the current code and noted
+below so the report's "patch lost on every upgrade" concern is resolved for the
+shipped codebase.
+
+#### Bug 1 — file-watch service re-indexes its own bookkeeping files (High)
+The default "main" project path is the data dir (`~/memopad`), which is also
+where the watcher writes `memopad.log` (loguru sink) and `watch-status.json`
+(per-batch state snapshot). Neither file was excluded, so every write fired a
+`watchfiles` event → re-scan → more log + a fresh status file → infinite hot loop
+(~2 it/s) that starved the event loop and drove the MCP keepalive reconnect storm
+(BUG 2, which is downstream of this and the embedding CPU spike).
+
+Two-layer fix:
+- **`ignore_utils.py`:** added `*.log` and `watch-status.json` to
+  `DEFAULT_IGNORE_PATTERNS` and the default `.bmignore` body so the watcher never
+  watches its own outputs, regardless of project path.
+- **`sync/watch_service.py`:** a defensive `_is_own_bookkeeping_path` guard in
+  `_watch_projects_cycle` (and a `*.log`/`watch-status.json` reject in
+  `filter_changes`) backstops the pattern set — even if a project path or ignore
+  config accidentally re-includes those files, the watcher still won't re-index
+  its own status file or (rotated) log.
+
+#### Bug 8 — `distill_memory` hard-capped `max_memories` at 1000 (Medium)
+The API router (`Query(le=1000)`) and CLI rejected anything above 1000, forcing
+large corpora onto the multi-hour `memopad distill --bulk` CLI run. Raised the
+bound to **100000** consistently across the API router, CLI option + range check,
+and MCP tool docstring. (The separate ~120s MCP-gateway timeout is a client-side
+limit — e.g. Hermes — that MemoPad can't control; for large corpora the CLI bulk
+path remains the recommendation. The raised cap at least lets an on-demand pass
+process more in one call.)
+
+#### Bug 9 — no safe embedding-backfill command (Low/Medium)
+`memopad reindex --embeddings` was never shipped (planned in `plans/PLAN.md` §2.4
+but never implemented); the `semantic_search` MCP tool pointed users at a command
+that didn't exist, so they had to write external `embedding-backfill.py` scripts.
+- **New `memopad embeddings` command group** with a `backfill` subcommand
+  (`src/memopad/cli/commands/embeddings.py`): insert-missing by default, `--force`
+  to re-embed all, `--project/-p`, `--limit`, `--batch-size`. Safe by construction
+  — only the `embedding` table is written; entities and observations are
+  read-only. The content embedded is the entity title + its observations' text.
+- **`services/embedding_service.py`:** added `existing_ids()` (skip-already-embedded
+  set) and `upsert_many()` (embed a batch in one provider call + one bulk
+  `INSERT ... ON CONFLICT`), so a backfill of thousands of entities is one ONNX
+  inference batch per chunk instead of one per entity.
+- Fixed the dangling `memopad reindex --embeddings` pointer in
+  `mcp/tools/semantic_search.py` to point at `memopad embeddings backfill`.
+
+#### Bug 10 — `assimilate` GitHub/HTTP-only; local paths silently no-op (Low)
+A `file://` URL or bare local path exited 0 with no notes: `file://` has no
+`netloc` so it hit "Invalid URL", and httpx can't speak `file://`.
+- **New `mcp/tools/assimilate/local_ingest.py`:** `local_source()` resolves a
+  `file://` URL or an existing filesystem path; `crawl_local()` walks a file or
+  directory recursively (skipping VCS/build dirs) and builds the same
+  `CrawlResult` shape the github/crawl strategies use, reusing
+  `FileProcessor.extract_text_content` and `detect_content_type` so type-specific
+  note builders fire. Oversized files are skipped; unsupported extensions are
+  skipped during directory walks (a single explicit file is still attempted via
+  the UTF-8 fallback).
+- **`mcp/tools/assimilate/__init__.py`:** inserted a "Strategy 0: local" branch
+  before the remote-URL netloc validation, so `assimilate` now accepts
+  `file:///C:/dev/repo`, `/home/me/notes`, etc. Tool description updated.
+
+#### Already fixed natively in this tree (confirmed against report)
+For completeness — the report flagged these as "local patches lost on upgrade";
+they are **already shipped natively** here, no action needed:
+- **Bug 3** (`SyncReportResponse.total` required): `total` is `Field(default=0)`
+  (`schemas/sync_report.py`); the `sync_started` background response no longer
+  trips a pydantic ValidationError.
+- **Bug 4** (embedding threads): `FastEmbedProvider` passes
+  `threads=int(os.environ.get("MEMOPAD_EMBED_THREADS", "1"))` to `TextEmbedding`
+  (`services/embedding_service.py`), defaulting to 1 instead of all cores.
+- **Bug 6** (`CodeExtractor` exact-category match): categories are split on `,`
+  and matched if any component is in `distillable_categories`
+  (`services/distillation_service.py`); compound categories are no longer skipped.
+- **Bug 7** (watermark gating skips static corpora): the L1 pass self-heals —
+  when the incremental watermark scan is empty and L1 is still empty, it falls
+  back to a full `find_updated_since(None)` scan (`services/distillation_service.py`).
+
+#### Not MemoPad-side (no code change)
+- **Bug 5** (stdio duplicate spawn race) is a race in the MCP *client* (Hermes),
+  not MemoPad. The MemoPad-side recommendation (guard against multiple concurrent
+  watch/MCP instances) is satisfied by the single shared write budget added in
+  0.21.5 and the self-loop fix above.
+
+### Files changed
+- `src/memopad/ignore_utils.py`
+- `src/memopad/sync/watch_service.py`
+- `src/memopad/api/v2/routers/knowledge_router.py`
+- `src/memopad/cli/commands/distill.py`
+- `src/memopad/mcp/tools/distill.py`
+- `src/memopad/services/embedding_service.py`
+- `src/memopad/cli/commands/embeddings.py` (new)
+- `src/memopad/cli/main.py`, `src/memopad/cli/app.py`
+- `src/memopad/mcp/tools/semantic_search.py`
+- `src/memopad/mcp/tools/assimilate/local_ingest.py` (new)
+- `src/memopad/mcp/tools/assimilate/__init__.py`
+- `README.md`, `plans/PLAN.md`
+
 ## [0.21.5] - 2026-08-22
 
 ### Fixed — root cause of `database is locked`: unify all background writers under one shared budget (BUG 6/7)

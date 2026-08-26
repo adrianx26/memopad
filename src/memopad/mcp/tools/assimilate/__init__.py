@@ -22,26 +22,31 @@ from .config import DEFAULT_CONFIG, DIRECT_DOWNLOAD_EXTENSIONS, DIRECT_DOWNLOAD_
 from .crawler import crawl, get_http_client
 from .file_processor import FileProcessor
 from .github import clone_github_repo, is_github_repo
+from .local_ingest import crawl_local, local_label, local_source
 from .logger import get_logger as get_assimilate_logger
 from .note_builders import build_all_notes
 from .types import CrawlResult
 
 
 @mcp.tool(
-    description="""Assimilate knowledge from a URL into memopad.
+    description="""Assimilate knowledge from a URL or local path into memopad.
 
-    Crawls the given URL (and linked pages), extracts useful content, and stores
-    structured notes in the knowledge base. Automatically detects:
+    Crawls the given URL (and linked pages), OR ingests a local file/directory,
+    extracts useful content, and stores structured notes in the knowledge base.
+    Automatically detects:
     - Agent profiles & system prompts
     - Skills, rules, and workflow definitions
     - Architectural concepts and design patterns
     - GitHub repository links
     - Documents (PDF, DOCX, XLSX) and Images
 
-    Notes are stored under <domain>/ in the target project.
+    Notes are stored under <domain>/ in the target project. Local sources accept
+    a `file://` URL or a bare filesystem path; a directory is walked recursively
+    (VCS/build dirs are skipped).
 
     Args:
-        url: The URL to assimilate (e.g. "https://github.com/org/repo")
+        url: The URL to assimilate (e.g. "https://github.com/org/repo") or a local
+            file/directory path (e.g. "/home/me/notes" or "file:///C:/dev/repo")
         project: Project to store notes in. Optional - uses default if not specified.
         max_depth: How many link-hops deep to crawl (default: 10)
         max_pages: Maximum pages to fetch (default: 0 = unlimited)
@@ -88,92 +93,111 @@ async def _assimilate_impl(
     try:
         # Validate URL
         parsed = urlparse(url)
-        if not parsed.scheme or not parsed.netloc:
-            return "# Error\n\nInvalid URL. Please provide a full URL like https://example.com"
-
-        domain = parsed.netloc.lower()
-        if domain.startswith("www."):
-            domain = domain[4:]
-
-        # Open in browser if requested
-        if open_browser:
-            try:
-                global_logger.info(f"Opening browser for {url}")
-                webbrowser.open(url)
-            except Exception as e:
-                global_logger.error(f"Failed to open browser for {url}: {e}")
 
         data: CrawlResult | None = None
         strategy = "unknown"
 
-        # Strategy 1: GitHub Repo
-        if is_github_repo(url):
-            strategy = "github"
-            global_logger.info(f"assimilate: detected GitHub repo, cloning {url}")
-            data = await clone_github_repo(url, max_files=max_pages)
-            path_parts = parsed.path.strip("/").split("/")
-            if len(path_parts) >= 2:
-                domain = f"{domain}/{path_parts[0]}/{path_parts[1]}"
-
-        # Strategy 2: Check for direct file download
+        # Strategy 0: Local file/directory ingestion (file:// URL or a path
+        # that exists on disk). Checked before the remote-URL netloc validation
+        # so a bare local path doesn't get rejected as "Invalid URL". A file:///
+        # URL previously exited 0 with no notes because httpx can't speak file://;
+        # this branch handles it natively.
+        local_path = local_source(parsed, url)
+        if local_path is not None:
+            if not local_path.exists():
+                return f"# Error\n\nLocal path not found: {url}"
+            strategy = "local"
+            domain = local_label(local_path)
+            global_logger.info(f"assimilate: ingesting local path {local_path}")
+            data = await crawl_local(local_path, max_pages=max_pages)
         else:
-            is_file_ext = url.lower().endswith(DIRECT_DOWNLOAD_EXTENSIONS)
-            should_download_directly = is_file_ext
-            content_type = ""
+            # Remote URL validation — a non-file:// URL needs a scheme + netloc.
+            if not parsed.scheme or not parsed.netloc:
+                return (
+                    "# Error\n\nInvalid URL. Please provide a full URL like "
+                    "https://example.com or a local file/directory path"
+                )
 
-            # If not obvious extension, check Content-Type via HEAD request
-            if not should_download_directly:
+            domain = parsed.netloc.lower()
+            if domain.startswith("www."):
+                domain = domain[4:]
+
+            # Open in browser if requested
+            if open_browser:
                 try:
-                    async with get_http_client() as client:
-                        head_resp = await client.head(
-                            url, follow_redirects=True, timeout=DEFAULT_CONFIG.head_timeout
-                        )
-                        content_type = head_resp.headers.get("content-type", "").lower()
-                        if any(t in content_type for t in DIRECT_DOWNLOAD_CONTENT_TYPES):
-                            should_download_directly = True
-                except Exception:
-                    pass  # Ignore HEAD errors, fall back to crawl
+                    global_logger.info(f"Opening browser for {url}")
+                    webbrowser.open(url)
+                except Exception as e:
+                    global_logger.error(f"Failed to open browser for {url}: {e}")
 
-            if should_download_directly:
-                global_logger.info(f"assimilate: detected direct file download for {url}")
-                try:
-                    async with get_http_client() as client:
-                        resp = await client.get(
-                            url, follow_redirects=True, timeout=DEFAULT_CONFIG.download_timeout
-                        )
-                        resp.raise_for_status()
-                        content = resp.content
-                        if not content_type:
-                            content_type = resp.headers.get("content-type", "").lower()
+            # Strategy 1: GitHub Repo
+            if is_github_repo(url):
+                strategy = "github"
+                global_logger.info(f"assimilate: detected GitHub repo, cloning {url}")
+                data = await clone_github_repo(url, max_files=max_pages)
+                path_parts = parsed.path.strip("/").split("/")
+                if len(path_parts) >= 2:
+                    domain = f"{domain}/{path_parts[0]}/{path_parts[1]}"
 
-                        text = FileProcessor.extract_text_content(content, content_type, url)
+            # Strategy 2: Check for direct file download
+            else:
+                is_file_ext = url.lower().endswith(DIRECT_DOWNLOAD_EXTENSIONS)
+                should_download_directly = is_file_ext
+                content_type = ""
 
-                        # Construct a single-page result
+                # If not obvious extension, check Content-Type via HEAD request
+                if not should_download_directly:
+                    try:
+                        async with get_http_client() as client:
+                            head_resp = await client.head(
+                                url, follow_redirects=True, timeout=DEFAULT_CONFIG.head_timeout
+                            )
+                            content_type = head_resp.headers.get("content-type", "").lower()
+                            if any(t in content_type for t in DIRECT_DOWNLOAD_CONTENT_TYPES):
+                                should_download_directly = True
+                    except Exception:
+                        pass  # Ignore HEAD errors, fall back to crawl
+
+                if should_download_directly:
+                    global_logger.info(f"assimilate: detected direct file download for {url}")
+                    try:
+                        async with get_http_client() as client:
+                            resp = await client.get(
+                                url, follow_redirects=True, timeout=DEFAULT_CONFIG.download_timeout
+                            )
+                            resp.raise_for_status()
+                            content = resp.content
+                            if not content_type:
+                                content_type = resp.headers.get("content-type", "").lower()
+
+                            text = FileProcessor.extract_text_content(content, content_type, url)
+
+                            # Construct a single-page result
+                            data = {
+                                "pages": [{
+                                    "url": str(resp.url),
+                                    "text": text,
+                                    "content_types": ["file_content"],
+                                    "links": {"internal": [], "github": [], "external": []},
+                                    "is_file": True,
+                                }],
+                                "all_github_links": [],
+                                "all_external_links": [],
+                                "errors": [],
+                            }
+                    except Exception as e:
+                        global_logger.error(f"Failed to download file {url}: {e}")
                         data = {
-                            "pages": [{
-                                "url": str(resp.url),
-                                "text": text,
-                                "content_types": ["file_content"],
-                                "links": {"internal": [], "github": [], "external": []},
-                                "is_file": True,
-                            }],
+                            "pages": [],
                             "all_github_links": [],
                             "all_external_links": [],
-                            "errors": [],
+                            "errors": [str(e)],
                         }
-                except Exception as e:
-                    global_logger.error(f"Failed to download file {url}: {e}")
-                    data = {
-                        "pages": [],
-                        "all_github_links": [],
-                        "all_external_links": [],
-                        "errors": [str(e)],
-                    }
 
-        # Strategy 3: Generic Crawl (Fallback)
-        if data is None:
-            global_logger.info(f"assimilate: starting generic crawl of {url}")
-            data = await crawl(url, max_depth=max_depth, max_pages=max_pages)
+            # Strategy 3: Generic Crawl (Fallback)
+            if data is None:
+                global_logger.info(f"assimilate: starting generic crawl of {url}")
+                data = await crawl(url, max_depth=max_depth, max_pages=max_pages)
 
         global_logger.info(
             f"assimilate: processing complete — {len(data['pages'])} pages/files, "

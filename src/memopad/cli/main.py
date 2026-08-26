@@ -8,6 +8,7 @@ from memopad.cli.commands import (  # noqa: F401  # pragma: no cover
     db,
     distill,
     doctor,
+    embeddings,
     import_chatgpt,
     import_claude_conversations,
     import_claude_projects,

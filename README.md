@@ -618,6 +618,27 @@ Hybrid mode fuses keyword and embedding rankings via Reciprocal Rank Fusion
 (RRF) — robust across precise term lookups and conceptual queries without
 weight tuning.
 
+### Backfilling embeddings for existing notes
+
+Vectors are written lazily as notes sync, so an existing vault has no embeddings
+until you backfill. Use the built-in, safe backfill command — it only writes the
+`embedding` table and never touches entities or observations:
+
+```bash
+# Backfill vectors for entities that don't have one yet (insert-missing)
+memopad embeddings backfill
+
+# Re-embed everything (e.g. after switching model)
+memopad embeddings backfill --force
+
+# Limit to one project / cap entities per project (debug)
+memopad embeddings backfill --project main --limit 100 --batch-size 128
+```
+
+This replaces the external `embedding-backfill.py` scripts users previously had
+to write (the historical `memopad reindex --embeddings` command was never
+shipped).
+
 > **CPU usage:** `fastembed`/onnxruntime defaults its intra-op thread pool to *all*
 > cores, which can starve the event loop on CPU-only boxes (the historical MCP
 > keepalive/reconnect storm). MemoPad caps this to 1 thread by default; override

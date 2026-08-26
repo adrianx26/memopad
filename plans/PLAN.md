@@ -118,7 +118,11 @@ Embedding service and MCP tool wired up. Disabled by default (env var gate
    vector lookup and returns ranked entity_ids.
 3. Update `semantic_search` MCP tool to call that endpoint and merge with the
    FTS5 result via `reciprocal_rank_fusion`.
-4. Add a CLI command `memopad reindex --embeddings` to backfill existing notes.
+4. Add a CLI command to backfill embeddings for existing notes. ✅ Shipped as
+   `memopad embeddings backfill` (see `src/memopad/cli/commands/embeddings.py`),
+   which writes only the `embedding` table (insert-missing by default, `--force`
+   to re-embed all) and never touches observations — the safe replacement for the
+   `memopad reindex --embeddings` command that was never shipped.
 
 The math (RRF, cosine, vector packing) is already covered by tests in
 [`tests/services/test_embedding_service.py`](../tests/services/test_embedding_service.py).

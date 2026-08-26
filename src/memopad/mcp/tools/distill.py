@@ -47,7 +47,9 @@ async def distill_memory(
         level: Comma-separated levels to run: "L1", "L2", "L3", or any combination
             (e.g. "L1,L2,L3"). Default "L1".
         project: Project name. Optional — server resolves the default.
-        max_memories: Max L0 entities to scan per L1 pass (1–1000). Default 50.
+        max_memories: Max L0 entities to scan per L1 pass (1–100000). Default 50.
+            The previous hard cap of 1000 forced large corpora onto the CLI; the
+            raised bound lets an on-demand bulk pass process more in one call.
         bulk: If True, process ALL existing L0 entities (cold-start/backfill mode).
               Default False = incremental (only updated-since-watermark).
         context: Optional FastMCP context.

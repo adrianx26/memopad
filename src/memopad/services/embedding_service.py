@@ -239,6 +239,68 @@ class EmbeddingService:
                 {"eid": entity_id},
             )
 
+    async def existing_ids(self) -> set[int]:
+        """Entity IDs that already have a stored vector for this project+model.
+
+        Used by the backfill command to skip entities that are already embedded
+        (insert-missing semantics) without re-embedding the whole corpus.
+        """
+        if not self.provider:
+            return set()
+        async with db.scoped_session(self.session_maker) as session:
+            result = await session.execute(
+                text(
+                    "SELECT entity_id FROM embedding "
+                    "WHERE project_id = :pid AND model = :model"
+                ),
+                {"pid": self.project_id, "model": self.provider.model_name},
+            )
+            return {row[0] for row in result.fetchall()}
+
+    async def upsert_many(
+        self, items: Sequence[tuple[int, str]]
+    ) -> int:
+        """Embed and store vectors for many ``(entity_id, content)`` pairs at once.
+
+        Replaces any prior rows (ON CONFLICT update). Returns the number of rows
+        written. Content is embedded in a single provider call — fastembed batches
+        internally, so this is far cheaper than one ``upsert`` per entity for a
+        backfill of thousands of entities. Only writes the ``embedding`` table;
+        callers build the content text (the command never touches observations).
+        """
+        if not self.provider or not items:
+            return 0
+        texts = [content for _, content in items]
+        vectors = self.provider.embed(texts)
+        rows = []
+        for (entity_id, _), vec in zip(items, vectors):
+            rows.append(
+                {
+                    "eid": entity_id,
+                    "pid": self.project_id,
+                    "model": self.provider.model_name,
+                    "dim": self.provider.dim,
+                    "vec": _pack_vector(vec),
+                }
+            )
+        async with db.scoped_session(self.session_maker) as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO embedding (entity_id, project_id, model, dim, vector, updated_at)
+                    VALUES (:eid, :pid, :model, :dim, :vec, datetime('now'))
+                    ON CONFLICT(entity_id) DO UPDATE SET
+                        project_id = excluded.project_id,
+                        model = excluded.model,
+                        dim = excluded.dim,
+                        vector = excluded.vector,
+                        updated_at = excluded.updated_at
+                    """
+                ),
+                rows,
+            )
+        return len(rows)
+
     async def similar(self, query: str, limit: int = 10) -> list[EmbeddingHit]:
         """Return the top-K most similar entities to `query` by cosine score.
 

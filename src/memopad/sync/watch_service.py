@@ -106,6 +106,13 @@ class WatchService:
         self.state = WatchServiceState()
         self.status_path = Path.home() / DATA_DIR_NAME / WATCH_STATUS_JSON
         self.status_path.parent.mkdir(parents=True, exist_ok=True)
+        # The loguru file sink (utils.setup_logging, MCP/CLI entry points) writes
+        # to ~/memopad/memopad.log. When the watched project path is the data dir
+        # itself (default "main" project), both this status file and the log file
+        # live inside the watched tree and would self-trigger a re-index hot loop
+        # without explicit exclusion. Tracked here for the defensive self-path
+        # guard in _watch_projects_cycle / filter_changes.
+        self._log_path = Path.home() / DATA_DIR_NAME / "memopad.log"
         self._ignore_patterns_cache: dict[Path, Set[str]] = {}
         self._sync_service_factory = sync_service_factory
         # Tb G2: code-graph reindex factory. Lazily used at the end of a
@@ -204,6 +211,18 @@ class WatchService:
                         # Check if the file should be ignored based on gitignore patterns
                         project_path = Path(project.path)
                         file_path = Path(path)
+
+                        # Defensive backstop: never re-index the watcher's own
+                        # continuously-written bookkeeping files (log + status).
+                        # Without this, each write fires a new event -> re-scan ->
+                        # more log/status -> infinite hot loop (MCP keepalive storm)
+                        # when the watched project path is the data dir.
+                        if self._is_own_bookkeeping_path(file_path):
+                            logger.trace(
+                                f"Ignoring watcher's own bookkeeping file change: {file_path}"
+                            )
+                            continue
+
                         ignore_patterns = self._get_ignore_patterns(project_path)
 
                         if should_ignore_path(file_path, project_path, ignore_patterns):
@@ -303,7 +322,56 @@ class WatchService:
         if path.endswith(".tmp"):
             return False
 
+        # Never watch the watcher's own continuously-written bookkeeping files.
+        # When the watched project path is the data dir (default "main" project),
+        # each write to memopad.log / watch-status.json fires a watchfiles event
+        # -> re-scan -> more log + a fresh status file -> infinite hot loop that
+        # starves the event loop (MCP keepalive storm). Rejecting here stops the
+        # event before it is even emitted; _is_own_bookkeeping_path is the
+        # defensive backstop inside _watch_projects_cycle.
+        name = Path(path).name
+        if name == WATCH_STATUS_JSON or name.endswith(".log"):
+            return False
+
         return True
+
+    def _is_own_bookkeeping_path(self, path: Path) -> bool:
+        """True if ``path`` is a file the watch service itself writes continuously.
+
+        These must never be re-indexed: re-indexing them rewrites log/status,
+        which fires new watchfiles events, which re-indexes them — an infinite
+        self-trigger loop that starves the event loop (MCP keepalive storm) when
+        the watched project path is the data dir. The ignore patterns cover the
+        common case; this is the defensive backstop that does not depend on the
+        pattern set being correct.
+        """
+        try:
+            resolved = path.resolve()
+        except Exception:
+            return False
+        try:
+            status_resolved = self.status_path.resolve()
+        except Exception:
+            status_resolved = self.status_path
+        if resolved == status_resolved:
+            return True
+        log_path = self._log_path
+        if log_path is not None:
+            try:
+                log_resolved = log_path.resolve()
+            except Exception:
+                log_resolved = log_path
+            if resolved == log_resolved:
+                return True
+            # loguru rotates memopad.log to e.g. memopad.log.2026-08-26_22-00-00;
+            # match any sibling in the same parent whose name starts with the
+            # active log file's name so a rotation event also can't self-trigger.
+            if (
+                resolved.parent == log_resolved.parent
+                and resolved.name.startswith(log_resolved.name)
+            ):
+                return True
+        return False
 
     async def write_status(self):
         """Write current state to status file"""

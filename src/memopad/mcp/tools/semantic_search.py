@@ -67,8 +67,9 @@ async def semantic_search(
             "# Embeddings disabled\n\n"
             f"Set `{EMBEDDINGS_ENABLED_ENV}=true` and install the optional extra:\n\n"
             "```\npip install 'memopad[embeddings]'\n```\n\n"
-            "Then run `memopad reindex --embeddings` to backfill existing notes. "
-            "Or pass `mode=\"fts\"` to use keyword search instead."
+            "Then run `memopad embeddings backfill` to backfill vectors for "
+            "existing notes (only writes the embedding table — observations are "
+            "not touched). Or pass `mode=\"fts\"` to use keyword search instead."
         )
 
     async with get_client() as client:

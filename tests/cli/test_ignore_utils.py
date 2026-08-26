@@ -313,3 +313,29 @@ temp_*
         assert len(filtered_files) == 2
         assert set(filtered_files) == set(expected_kept)
         assert ignored_count == 2  # debug.log, temp_file.txt
+
+
+def test_default_patterns_exclude_watcher_bookkeeping_files():
+    """Bug 1: the file-watch service must never re-index its own outputs.
+
+    `memopad.log` and `watch-status.json` are written continuously inside the
+    watched tree when the default "main" project path is the data dir. If they
+    aren't in the default ignore set, every write fires a re-scan -> infinite
+    hot loop (MCP keepalive storm). Guard that they stay excluded by default.
+    """
+    assert "*.log" in DEFAULT_IGNORE_PATTERNS
+    assert "watch-status.json" in DEFAULT_IGNORE_PATTERNS
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        patterns = DEFAULT_IGNORE_PATTERNS
+
+        # The watcher's own continuously-written files must be ignored.
+        assert should_ignore_path(temp_path / "memopad.log", temp_path, patterns) is True
+        assert should_ignore_path(temp_path / "watch-status.json", temp_path, patterns) is True
+        # A rotated log (loguru appends a timestamp suffix) is still excluded by *.log? No —
+        # *.log only matches names ending in .log. The defensive path guard in watch_service
+        # covers rotated siblings; here we only assert the active bookkeeping files.
+        assert should_ignore_path(temp_path / "memopad.log.2026-08-26_22-00-00", temp_path, patterns) is False
+        # A user's actual note file must still be indexed.
+        assert should_ignore_path(temp_path / "my-note.md", temp_path, patterns) is False
