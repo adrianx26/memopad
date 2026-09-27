@@ -1,4 +1,4 @@
-﻿"""Runtime mode resolution for Basic Memory.
+"""Runtime mode resolution for Basic Memory.
 
 This module centralizes runtime mode detection, ensuring cloud/local/test
 determination happens in one place rather than scattered across modules.

@@ -1,4 +1,4 @@
-﻿"""Edit note tool for Memopad MCP server."""
+"""Edit note tool for Memopad MCP server."""
 
 from typing import Optional
 

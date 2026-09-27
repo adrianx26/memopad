@@ -1,4 +1,4 @@
-﻿"""Import command for memopad CLI to import from JSON memory format."""
+"""Import command for memopad CLI to import from JSON memory format."""
 
 import json
 from pathlib import Path

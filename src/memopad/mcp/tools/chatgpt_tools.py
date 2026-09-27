@@ -1,4 +1,4 @@
-﻿"""ChatGPT-compatible MCP tools for Memopad.
+"""ChatGPT-compatible MCP tools for Memopad.
 
 These adapters expose Memopad's search/fetch functionality using the exact
 tool names and response structure OpenAI's MCP clients expect: each call returns

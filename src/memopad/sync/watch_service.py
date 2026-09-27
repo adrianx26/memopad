@@ -1,4 +1,4 @@
-﻿"""Watch service for Memopad."""
+"""Watch service for Memopad."""
 
 import asyncio
 import os
@@ -163,6 +163,50 @@ class WatchService:
 
         return await get_distillation_scheduler(self.app_config)
 
+    async def _run_distillation_idle_monitor(
+        self, projects: Sequence[Project], stop_event: asyncio.Event
+    ) -> None:
+        """Check pending project work periodically while the filesystem watch is idle."""
+        timeout = self.app_config.pipeline_l1_idle_timeout_seconds
+        if (
+            timeout <= 0
+            or not self.app_config.levels_enabled
+            or not self.app_config.levels_pipeline_automatic
+        ):
+            return
+
+        interval = max(1.0, min(30.0, timeout / 2))
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval)
+                return
+            except asyncio.TimeoutError:
+                pass
+
+            try:
+                await self._evaluate_idle_distillation(projects)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(f"distillation idle monitor failed: {exc}")
+
+    async def _evaluate_idle_distillation(self, projects: Sequence[Project]) -> None:
+        """Dispatch due idle work under the shared background-task limit."""
+        from memopad.deps.services import get_background_task_semaphore
+
+        semaphore = get_background_task_semaphore(
+            self.app_config.background_task_concurrency
+        )
+        scheduler = await self._get_distillation_scheduler()
+        for project in projects:
+            async with semaphore:
+                trigger = await scheduler.evaluate_idle_and_dispatch(project.id)
+            if trigger is not None:
+                logger.info(
+                    f"idle distillation completed for project {project.id}: "
+                    f"{trigger.reason}"
+                )
+
     @staticmethod
     def _batch_has_code_files(paths: List[str]) -> bool:
         """Return True if any path in the batch is a supported source file.
@@ -272,6 +316,9 @@ class WatchService:
 
                 # Schedule restart after configured interval to reload projects
                 timer_task = asyncio.create_task(self._schedule_restart(stop_event))
+                idle_task = asyncio.create_task(
+                    self._run_distillation_idle_monitor(projects, stop_event)
+                )
 
                 try:
                     await self._watch_projects_cycle(projects, stop_event)
@@ -289,6 +336,12 @@ class WatchService:
                             await timer_task
                         except asyncio.CancelledError:
                             pass
+                    if not idle_task.done():
+                        idle_task.cancel()
+                    try:
+                        await idle_task
+                    except asyncio.CancelledError:
+                        pass
 
         except Exception as e:
             logger.exception("Watch service error", error=str(e))

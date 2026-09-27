@@ -1,4 +1,4 @@
-﻿from memopad.repository.repository import Repository
+from memopad.repository.repository import Repository
 from memopad.models.project import Project
 
 

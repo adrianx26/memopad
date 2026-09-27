@@ -1,4 +1,4 @@
-﻿"""Request schemas for interacting with the knowledge graph."""
+"""Request schemas for interacting with the knowledge graph."""
 
 from typing import List, Optional, Annotated, Literal
 from annotated_types import MaxLen, MinLen

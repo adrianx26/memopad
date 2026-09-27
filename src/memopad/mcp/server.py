@@ -1,4 +1,4 @@
-﻿"""
+"""
 Memopad FastMCP server.
 """
 

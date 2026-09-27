@@ -1,4 +1,4 @@
-﻿"""Import command for ChatGPT conversations."""
+"""Import command for ChatGPT conversations."""
 
 import json
 from pathlib import Path

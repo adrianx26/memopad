@@ -149,6 +149,42 @@ async def test_get_entity_by_id_not_found(client: AsyncClient, v2_project_url):
 
 
 @pytest.mark.asyncio
+async def test_get_extraction_suggestions(client: AsyncClient, v2_project_url):
+    entity_data = {
+        "title": "ExtractionSource",
+        "directory": "test",
+        "content": "This note explores architecture and backend systems.",
+    }
+    response = await client.post(
+        f"{v2_project_url}/knowledge/entities",
+        json=entity_data,
+        params={"fast": False},
+    )
+    assert response.status_code == 200
+    created = EntityResponseV2.model_validate(response.json())
+
+    response = await client.get(
+        f"{v2_project_url}/knowledge/entities/{created.external_id}/extraction-suggestions"
+    )
+
+    assert response.status_code == 200
+    suggestions = response.json()
+    assert suggestions["entity_id"] == created.external_id
+    assert suggestions["relations"] == []
+    assert suggestions["tags"] == []
+
+
+@pytest.mark.asyncio
+async def test_get_extraction_suggestions_not_found(client: AsyncClient, v2_project_url):
+    response = await client.get(
+        f"{v2_project_url}/knowledge/entities/"
+        "00000000-0000-0000-0000-000000000000/extraction-suggestions"
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_create_entity(client: AsyncClient, file_service, v2_project_url):
     """Test creating an entity via v2 endpoint."""
     data = {

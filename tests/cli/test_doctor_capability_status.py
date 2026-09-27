@@ -60,6 +60,10 @@ def test_capability_status_default_state(monkeypatch):
     # G4 params present with their disabled value (0).
     assert "recall_max_chars_per_memory" in out
     assert "recall_timeout_ms" in out
+    assert "recall_max_tokens" in out
+    assert "recall_min_confidence" in out
+    assert "recall_tier_budgets" in out
+    assert "L3=uncapped" in out
     # Per-flag state: levels_enabled, levels_pipeline_automatic, and
     # shortterm_enabled are ON by default; skills_enabled and codegraph_enabled off.
     default_on = {"levels_enabled", "levels_pipeline_automatic", "shortterm_enabled"}
@@ -81,17 +85,21 @@ def test_capability_status_reflects_enabled_flags(monkeypatch):
         codegraph_enabled=True,
         shortterm_enabled=True,
         recall_max_chars_per_memory=5000,
+        recall_max_tokens=6000,
+        recall_tier_budget_l3=1200,
         recall_timeout_ms=2000,
     )
 
     doctor.print_capability_status(config)
 
     out = buf.getvalue()
-    # Five "on" states for the boolean flags + two for the G4 params = 7 total.
+    # Five "on" states for the boolean flags + three enabled numeric limits.
     # Use the space-padded state token to avoid matching "on" inside hint words.
-    assert out.count(" on ") >= 7
+    assert out.count(" on ") >= 8
     # G4 numeric values are echoed.
     assert "5000" in out
+    assert "6000" in out
+    assert "L3=1200" in out
     assert "2000ms" in out
     # The enabled flags' hints still appear.
     for _, label, hint in doctor._CAPABILITY_FLAGS:

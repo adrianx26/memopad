@@ -1,4 +1,4 @@
-﻿"""Configuration dependency injection for memopad.
+"""Configuration dependency injection for memopad.
 
 This module provides configuration-related dependencies.
 Note: Long-term goal is to minimize direct ConfigManager access

@@ -1,4 +1,4 @@
-﻿"""V2 Import Router - ID-based data import operations.
+"""V2 Import Router - ID-based data import operations.
 
 This router uses v2 dependencies for consistent project handling with external_id UUIDs.
 Import endpoints use project_id in the path for consistency with other v2 endpoints.

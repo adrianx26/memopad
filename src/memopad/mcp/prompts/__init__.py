@@ -1,4 +1,4 @@
-﻿"""Memopad MCP prompts.
+"""Memopad MCP prompts.
 
 Prompts are a special type of tool that returns a string response
 formatted for a user to read, typically invoking one or more tools

@@ -1,4 +1,4 @@
-﻿"""Add project_id to relation/observation and pg_trgm for fuzzy link resolution
+"""Add project_id to relation/observation and pg_trgm for fuzzy link resolution
 
 Revision ID: f8a9b2c3d4e5
 Revises: 314f1ea54dc4

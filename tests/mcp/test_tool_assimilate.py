@@ -14,6 +14,8 @@ from memopad.mcp.tools.assimilate.note_builders import (
     NOTE_BUILDERS,
     build_functional_diagram_note as _build_functional_diagram_note,
     build_github_links_note as _build_github_links_note,
+    build_all_notes,
+    build_code_architecture_note,
     build_note,
     build_overview_note as _build_overview_note,
     truncate_content as _safe_truncate,
@@ -161,35 +163,52 @@ class TestDetectContentType:
         assert "soul_file" in types
 
     def test_detects_soul_file_by_content(self):
-        types = detect_content_type("https://example.com/page", "This defines core_values and principles for the agent")
+        types = detect_content_type(
+            "https://example.com/page", "This defines core_values and principles for the agent"
+        )
         assert "soul_file" in types
 
     def test_detects_tools_functions(self):
-        types = detect_content_type("https://example.com/tools/search.py", "@mcp.tool decorator used here")
+        types = detect_content_type(
+            "https://example.com/tools/search.py", "@mcp.tool decorator used here"
+        )
         assert "tools_functions" in types
 
     def test_detects_tools_functions_by_content(self):
-        types = detect_content_type("https://example.com/page", "register_tool and api_endpoint definitions")
+        types = detect_content_type(
+            "https://example.com/page", "register_tool and api_endpoint definitions"
+        )
         assert "tools_functions" in types
 
     def test_detects_algorithms(self):
-        types = detect_content_type("https://example.com/algo.py", "binary_search algorithm with O(log n) complexity")
+        types = detect_content_type(
+            "https://example.com/algo.py", "binary_search algorithm with O(log n) complexity"
+        )
         assert "algorithms" in types
 
     def test_detects_algorithms_by_content(self):
-        types = detect_content_type("https://example.com/page", "dynamic_programming optimization with memoization")
+        types = detect_content_type(
+            "https://example.com/page", "dynamic_programming optimization with memoization"
+        )
         assert "algorithms" in types
 
     def test_detects_decision_structure(self):
-        types = detect_content_type("https://example.com/fsm.py", "state_machine implementation with finite_state transitions")
+        types = detect_content_type(
+            "https://example.com/fsm.py",
+            "state_machine implementation with finite_state transitions",
+        )
         assert "decision_structure" in types
 
     def test_detects_decision_structure_by_content(self):
-        types = detect_content_type("https://example.com/page", "rule_engine for routing_logic and decision_table handling")
+        types = detect_content_type(
+            "https://example.com/page", "rule_engine for routing_logic and decision_table handling"
+        )
         assert "decision_structure" in types
 
     def test_no_false_positives(self):
-        types = detect_content_type("https://example.com/random", "Just a normal page with nothing special")
+        types = detect_content_type(
+            "https://example.com/random", "Just a normal page with nothing special"
+        )
         assert types == []
 
 
@@ -377,7 +396,11 @@ async def test_assimilate_stores_notes(app, test_project, monkeypatch):
                 "url": "https://test-site.example.com",
                 "text": "# Test Repo\n\nA great project with plugin system and architecture design patterns",
                 "content_types": ["config_docs", "concepts"],
-                "links": {"internal": [], "github": ["https://github.com/org/test"], "external": []},
+                "links": {
+                    "internal": [],
+                    "github": ["https://github.com/org/test"],
+                    "external": [],
+                },
             },
         ],
         "all_github_links": ["https://github.com/org/test"],
@@ -438,6 +461,7 @@ class TestSafeTruncate:
     def test_truncated_content_under_entity_limit(self):
         """The truncated result must always be under MAX_CONTENT_LENGTH (1M)."""
         from memopad.schemas.base import MAX_CONTENT_LENGTH
+
         huge = "x" * (MAX_CONTENT_LENGTH + 500_000)
         result = _safe_truncate(huge)
         assert len(result) < MAX_CONTENT_LENGTH
@@ -494,11 +518,114 @@ class TestNoteBuilderTruncation:
         assert len(note) <= MAX_NOTE_CONTENT + 100
 
 
+class TestCodeArchitectureNote:
+    def test_extracts_python_structures_as_observations(self):
+        data = {
+            "pages": [
+                {
+                    "url": "https://example.com/src/settings.py",
+                    "text": (
+                        "class AppSettings(BaseSettings):\n"
+                        "    timeout: int = 30\n\n"
+                        "def public_api(name: str) -> str:\n"
+                        "    assert name\n"
+                        "    return name\n"
+                        "\n"
+                        "@router.get('/items')\n"
+                        "def read_item(item_id: int):\n"
+                        "    return item_id\n"
+                    ),
+                    "content_types": ["algorithms"],
+                }
+            ],
+            "all_github_links": [],
+            "all_external_links": [],
+            "errors": [],
+        }
+
+        note = build_code_architecture_note(data)
+
+        assert note is not None
+        assert "- [architecture] /src/settings.py defines class AppSettings" in note
+        assert "- [configuration] AppSettings.timeout: int = 30" in note
+        assert "- [api] /src/settings.py exposes def public_api" in note
+        assert (
+            "- [api] /src/settings.py exposes router.get('/items') def read_item(item_id: int)"
+        ) in note
+        assert "- [rule] /src/settings.py requires: name" in note
+
+    def test_extracts_common_typescript_declarations(self):
+        data = {
+            "pages": [
+                {
+                    "url": "https://example.com/src/api.ts",
+                    "text": (
+                        "export interface User {}\n"
+                        "export function getUser(id: string) {}\n"
+                        "export const MAX_RETRIES = 3;\n"
+                    ),
+                    "content_types": [],
+                }
+            ],
+            "all_github_links": [],
+            "all_external_links": [],
+            "errors": [],
+        }
+
+        note = build_code_architecture_note(data)
+
+        assert note is not None
+        assert "- [architecture] /src/api.ts defines export interface User" in note
+        assert "- [api] /src/api.ts exposes export function getUser(id: string)" in note
+        assert "- [configuration] /src/api.ts defines export const MAX_RETRIES = 3" in note
+
+    def test_code_note_is_included_with_regular_assimilation_notes(self):
+        data = {
+            "pages": [
+                {
+                    "url": "https://example.com/src/app.py",
+                    "text": "class App:\n    pass\n",
+                    "content_types": ["concepts"],
+                }
+            ],
+            "all_github_links": [],
+            "all_external_links": [],
+            "errors": [],
+        }
+
+        notes = build_all_notes("https://example.com", data)
+
+        code_note = next(content for title, content in notes if title == "Code Architecture")
+        assert "- [architecture]" in code_note
+
+    def test_ignores_unparseable_python_and_non_code_pages(self):
+        data = {
+            "pages": [
+                {
+                    "url": "https://example.com/src/broken.py",
+                    "text": "def unfinished(:\n",
+                    "content_types": [],
+                },
+                {
+                    "url": "https://example.com/README.md",
+                    "text": "class Example:",
+                    "content_types": [],
+                },
+            ],
+            "all_github_links": [],
+            "all_external_links": [],
+            "errors": [],
+        }
+
+        assert build_code_architecture_note(data) is None
+
+
 class TestSafetyConstants:
     """Tests that safety constants are configured correctly."""
 
     def test_max_note_content_below_entity_limit(self):
         from memopad.schemas.base import MAX_CONTENT_LENGTH
+
         assert MAX_NOTE_CONTENT < MAX_CONTENT_LENGTH
 
     def test_default_max_files_reasonable(self):
@@ -554,4 +681,3 @@ class TestAssimilateOversizedContent:
         # Should succeed or at least report partial success, NOT crash
         assert "Error" not in result or "FAILED" in result
         assert "Assimilation Complete" in result
-

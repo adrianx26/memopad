@@ -1,4 +1,4 @@
-﻿"""Project management service for Memopad."""
+"""Project management service for Memopad."""
 
 import asyncio
 import json

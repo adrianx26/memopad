@@ -1,4 +1,4 @@
-﻿"""Two-Queue (2Q) Cache Implementation.
+"""Two-Queue (2Q) Cache Implementation.
 
 Phase 2 Optimization #5: Advanced cache eviction policy with scan resistance.
 

@@ -1,4 +1,4 @@
-﻿"""Shared initialization service for Basic Memory.
+"""Shared initialization service for Basic Memory.
 
 This module provides shared initialization functions used by both CLI and API
 to ensure consistent application startup across all entry points.

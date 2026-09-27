@@ -1,4 +1,4 @@
-﻿"""Schema for project info response."""
+"""Schema for project info response."""
 
 import os
 from datetime import datetime

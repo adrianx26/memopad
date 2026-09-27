@@ -1,4 +1,4 @@
-﻿"""Database management commands."""
+"""Database management commands."""
 
 from pathlib import Path
 

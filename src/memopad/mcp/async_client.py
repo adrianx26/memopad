@@ -1,4 +1,4 @@
-﻿from contextlib import asynccontextmanager, AbstractAsyncContextManager
+from contextlib import asynccontextmanager, AbstractAsyncContextManager
 from typing import AsyncIterator, Callable, Optional
 
 from httpx import ASGITransport, AsyncClient, Timeout

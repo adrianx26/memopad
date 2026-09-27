@@ -1,4 +1,4 @@
-﻿"""Response schemas for knowledge graph operations.
+"""Response schemas for knowledge graph operations.
 
 This module defines the response formats for all knowledge graph operations.
 Each response includes complete information about the affected entities,

@@ -82,9 +82,7 @@ async def _note(
     for cat, content in observations:
         lines.append(f"- [{cat}] {content}")
     content = "\n".join(lines) + "\n"
-    schema = EntitySchema(
-        title=title, directory=directory, entity_type="note", content=content
-    )
+    schema = EntitySchema(title=title, directory=directory, entity_type="note", content=content)
     entity = await entity_service.create_entity(schema)
     await search_service.index_entity(entity)
     return entity
@@ -103,18 +101,29 @@ def _sources(entity) -> list:
 
 @pytest.mark.asyncio
 async def test_l1_creates_fact_from_distillable_observation(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """A `[definition]` observation distils into one L1 fact carrying provenance."""
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="Widgets",
         observations=[("definition", "A widget is a reusable UI component")],
     )
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
     created = await svc.run_l1_pass(max_memories=50)
 
@@ -131,19 +140,69 @@ async def test_l1_creates_fact_from_distillable_observation(
 
 
 @pytest.mark.asyncio
+async def test_l1_distils_code_architecture_observations(
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
+):
+    await _note(
+        entity_service,
+        search_service,
+        title="Code Architecture",
+        observations=[
+            ("architecture", "src/main.py defines class App"),
+            ("configuration", "AppSettings.timeout: int = 30"),
+        ],
+    )
+    svc = _service(
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
+    )
+
+    created = await svc.run_l1_pass(max_memories=50)
+
+    assert created == 2
+    facts = await entity_repository.list_by_entity_type(FACT_ENTITY_TYPE, limit=100)
+    assert {fact.entity_metadata["category"] for fact in facts} == {
+        "architecture",
+        "configuration",
+    }
+
+
+@pytest.mark.asyncio
 async def test_l1_skips_non_distillable_categories(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """A `[diary]` (not in distillable_categories) produces no L1 fact."""
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="Diary",
         observations=[("diary", "today I felt tired")],
     )
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
     created = await svc.run_l1_pass(max_memories=50)
     assert created == 0
@@ -153,18 +212,29 @@ async def test_l1_skips_non_distillable_categories(
 
 @pytest.mark.asyncio
 async def test_l1_dedup_reconfirms_identical_fact(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """A second sighting of the same fact reconfirms (no duplicate), bumps confidence."""
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="Src A",
         observations=[("definition", "A widget is a reusable UI component")],
     )
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
     await svc.run_l1_pass(max_memories=50)
     facts = await entity_repository.list_by_entity_type(FACT_ENTITY_TYPE, limit=100)
@@ -174,7 +244,8 @@ async def test_l1_dedup_reconfirms_identical_fact(
 
     # Second source sighting the identical fact.
     src_b = await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="Src B",
         observations=[("definition", "A widget is a reusable UI component")],
     )
@@ -189,26 +260,42 @@ async def test_l1_dedup_reconfirms_identical_fact(
 
 @pytest.mark.asyncio
 async def test_l1_idempotent_cold_restart_no_duplicates(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """Losing the watermark (cold restart) and re-passing creates no duplicates."""
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="Cold",
         observations=[("rule", "Never commit secrets to the repository")],
     )
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
     await svc.run_l1_pass(max_memories=50)
     assert len(await entity_repository.list_by_entity_type(FACT_ENTITY_TYPE, limit=100)) == 1
 
     # Simulate a cold restart: a brand-new service with NO state file (since=None).
     svc2 = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
         state_path=tmp_path / "fresh-state.json",  # nonexistent -> since=None
     )
     created = await svc2.run_l1_pass(max_memories=50)
@@ -222,12 +309,18 @@ async def test_l1_idempotent_cold_restart_no_duplicates(
 
 @pytest.mark.asyncio
 async def test_l2_clusters_facts_sharing_a_source(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """Two distinct facts from one L0 (shared source) form one L2 scenario."""
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="Dual",
         observations=[
             ("definition", "A widget renders the UI tree"),
@@ -235,8 +328,13 @@ async def test_l2_clusters_facts_sharing_a_source(
         ],
     )
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
     await svc.run_l1_pass(max_memories=50)
     # scheduler=None -> run_l2_pass is not debounced, runs immediately.
@@ -251,23 +349,35 @@ async def test_l2_clusters_facts_sharing_a_source(
 
 @pytest.mark.asyncio
 async def test_l2_no_cluster_for_unrelated_facts(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """Two unrelated facts (no shared tag/source/similarity) form no scenario."""
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="Alpha",
         observations=[("rule", "Always rotate credentials on schedule")],
     )
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="Beta",
         observations=[("definition", "A photon is a light quantum")],
     )
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
     await svc.run_l1_pass(max_memories=50)
     scenarios = await svc.run_l2_pass()
@@ -279,18 +389,29 @@ async def test_l2_no_cluster_for_unrelated_facts(
 
 @pytest.mark.asyncio
 async def test_l3_aggregates_stable_facts_into_persona(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """Stable L1 facts (confidence >= l3_min_confidence) aggregate into one persona."""
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="Rules",
         observations=[("rule", "Never commit secrets to the repository")],
     )
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
     await svc.run_l1_pass(max_memories=50)
     # rule base confidence 0.85 >= default l3_min_confidence 0.70 -> stable.
@@ -310,13 +431,23 @@ async def test_l3_aggregates_stable_facts_into_persona(
 
 @pytest.mark.asyncio
 async def test_l3_no_persona_when_no_stable_facts(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """With no facts at all, L3 writes nothing."""
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
     written = await svc.run_l3_pass()
     assert written == 0
@@ -328,18 +459,29 @@ async def test_l3_no_persona_when_no_stable_facts(
 
 @pytest.mark.asyncio
 async def test_handle_trigger_l1_dispatch(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """An L1 trigger dispatches the L1 (+L2) passes via handle_trigger."""
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="Trig",
         observations=[("definition", "A port is a network endpoint")],
     )
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
     trigger = DistillationTrigger(
         trigger_type=TRIGGER_L1_DISTILL,
@@ -355,18 +497,29 @@ async def test_handle_trigger_l1_dispatch(
 
 @pytest.mark.asyncio
 async def test_handle_trigger_warmup_is_noop(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """A warmup trigger (retrieval-only for MVP) writes nothing."""
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="Warm",
         observations=[("definition", "A socket is a file descriptor")],
     )
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
     trigger = DistillationTrigger(
         trigger_type=TRIGGER_WARMUP,
@@ -406,8 +559,13 @@ def test_similarity_jaccard_when_embeddings_off(entity_repository, tmp_path):
 
 @pytest.mark.asyncio
 async def test_custom_extractor_is_used(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """A custom FactExtractor's candidates flow through to L1 creation."""
 
@@ -425,13 +583,19 @@ async def test_custom_extractor_is_used(
             ]
 
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="Custom Src",
         observations=[("diary", "anything")],  # would be skipped by CodeExtractor
     )
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
         extractor=UpperExtractor(),  # type: ignore[arg-type]
     )
     created = await svc.run_l1_pass(max_memories=50)
@@ -439,9 +603,7 @@ async def test_custom_extractor_is_used(
     facts = await entity_repository.list_by_entity_type(FACT_ENTITY_TYPE, limit=100)
     assert len(facts) == 1
     # The custom text reached the fact's observation.
-    fact_obs = next(
-        (o for o in (facts[0].observations or []) if o.category == "fact"), None
-    )
+    fact_obs = next((o for o in (facts[0].observations or []) if o.category == "fact"), None)
     assert fact_obs is not None
     assert "CUSTOM DISTILLED FACT" in fact_obs.content
 
@@ -451,14 +613,24 @@ async def test_custom_extractor_is_used(
 
 @pytest.mark.asyncio
 async def test_ensure_distillation_skill_creates_asset_when_skills_on(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """With skills_enabled on, first run materializes the `distillation` skill."""
     skills_config = app_config.model_copy(update={"skills_enabled": True})
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, skills_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        skills_config,
+        tmp_path,
     )
     await svc.ensure_distillation_skill()
     skills = await entity_repository.list_by_entity_type(SKILL_ENTITY_TYPE, limit=100)
@@ -471,13 +643,23 @@ async def test_ensure_distillation_skill_creates_asset_when_skills_on(
 
 @pytest.mark.asyncio
 async def test_load_skill_tunables_falls_back_to_config_when_skills_off(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """With skills off, tunables come straight from config defaults."""
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
     tunables = await svc.load_skill_tunables()
     assert tunables["dedup_similarity_threshold"] == app_config.dedup_similarity_threshold
@@ -487,14 +669,24 @@ async def test_load_skill_tunables_falls_back_to_config_when_skills_off(
 
 @pytest.mark.asyncio
 async def test_load_skill_tunables_reads_skill_overrides(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """A tunables block in the `distillation` skill overrides config defaults."""
     skills_config = app_config.model_copy(update={"skills_enabled": True})
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, skills_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        skills_config,
+        tmp_path,
     )
     await svc.ensure_distillation_skill()
     # Mutate the skill's tunables to a custom threshold.
@@ -513,12 +705,18 @@ async def test_load_skill_tunables_reads_skill_overrides(
 
 @pytest.mark.asyncio
 async def test_l2_debounced_by_scheduler(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """When the scheduler says L2 is not due, run_l2_pass is a no-op (debounced)."""
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="Debounced",
         observations=[
             ("definition", "A queue is a FIFO buffer"),
@@ -529,8 +727,13 @@ async def test_l2_debounced_by_scheduler(
     # Force the debounce watermark to "just fired" so should_trigger_l2 is False.
     scheduler.mark_l2_fired(entity_repository.project_id, now=datetime.now(timezone.utc))
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
         scheduler=scheduler,
     )
     await svc.run_l1_pass(max_memories=50)
@@ -542,11 +745,16 @@ async def test_l2_debounced_by_scheduler(
 
 
 @pytest.mark.asyncio
-async def test_dispatcher_swallows_service_failures(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+async def test_dispatcher_surfaces_service_failures_for_scheduler_retry(
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
-    """A failing service factory must never propagate to the caller (fire-and-forget)."""
+    """The dispatcher must expose failures so pending scheduler work can retry."""
 
     async def failing_factory(project_id: int):
         raise RuntimeError("boom")
@@ -560,24 +768,35 @@ async def test_dispatcher_swallows_service_failures(
         max_memories=50,
         fired_at=datetime.now(timezone.utc),
     )
-    # Must not raise.
-    await dispatcher(trigger)
+    with pytest.raises(RuntimeError, match="boom"):
+        await dispatcher(trigger)
 
 
 @pytest.mark.asyncio
 async def test_dispatcher_routes_trigger_to_service(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """The dispatcher builds the service and routes the trigger through handle_trigger."""
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="Dispatch",
         observations=[("definition", "A cache stores computed results")],
     )
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
 
     async def factory(project_id: int):
@@ -598,14 +817,21 @@ async def test_dispatcher_routes_trigger_to_service(
 
 # --- discover_observation_categories -----------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_discover_observation_categories_returns_all_categories(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """discover_observation_categories returns all distinct categories from L0 entities."""
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="Src1",
         observations=[
             ("definition", "A widget is a UI component"),
@@ -613,13 +839,19 @@ async def test_discover_observation_categories_returns_all_categories(
         ],
     )
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="Src2",
         observations=[("constraint", "Widgets need permissions")],
     )
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
     result = await svc.discover_observation_categories()
 
@@ -633,12 +865,18 @@ async def test_discover_observation_categories_returns_all_categories(
 
 @pytest.mark.asyncio
 async def test_discover_observation_categories_identifies_unknowns(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """Categories not in distillable_categories appear in the 'unknown' list."""
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="PolicyDoc",
         observations=[
             ("policy", "All data must be encrypted at rest"),
@@ -646,8 +884,13 @@ async def test_discover_observation_categories_identifies_unknowns(
         ],
     )
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
     result = await svc.discover_observation_categories()
 
@@ -660,22 +903,33 @@ async def test_discover_observation_categories_identifies_unknowns(
 
 @pytest.mark.asyncio
 async def test_discover_observation_categories_excludes_derived_entities(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """Observations from L1/L2/L3 entities are excluded from category counts."""
     # Create an L0 note with a distillable + a custom (non-distillable) category.
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="CustomCat",
         observations=[
             ("definition", "a definable thing"),  # distillable -> creates an L1 fact
-            ("custom_type", "some observation"),   # non-distillable, stays in L0
+            ("custom_type", "some observation"),  # non-distillable, stays in L0
         ],
     )
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
     # Run L1 to create a fact (from the distillable "definition" observation).
     await svc.run_l1_pass(max_memories=50)
@@ -692,15 +946,26 @@ async def test_discover_observation_categories_excludes_derived_entities(
 
 # --- add_unknown_categories --------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_add_unknown_categories_adds_new_ones(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """add_unknown_categories adds specified categories to the distillable set."""
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
     result = await svc.add_unknown_categories(categories=["policy", "guideline"])
 
@@ -714,13 +979,23 @@ async def test_add_unknown_categories_adds_new_ones(
 
 @pytest.mark.asyncio
 async def test_add_unknown_categories_skips_existing(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """Categories already in distillable set are skipped."""
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
     result = await svc.add_unknown_categories(categories=["definition", "rule"])
 
@@ -731,12 +1006,18 @@ async def test_add_unknown_categories_skips_existing(
 
 @pytest.mark.asyncio
 async def test_add_unknown_categories_auto_discovers_when_none_given(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """Calling with categories=None auto-discovers and adds all unknowns."""
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="AutoTest",
         observations=[
             ("policy", "encrypt everything"),
@@ -744,8 +1025,13 @@ async def test_add_unknown_categories_auto_discovers_when_none_given(
         ],
     )
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
     result = await svc.add_unknown_categories(categories=None)
 
@@ -758,14 +1044,24 @@ async def test_add_unknown_categories_auto_discovers_when_none_given(
 
 @pytest.mark.asyncio
 async def test_add_unknown_categories_updates_skill_tunables_when_skills_on(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """With skills enabled, the distillation skill's tunables are updated."""
     skills_config = app_config.model_copy(update={"skills_enabled": True})
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, skills_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        skills_config,
+        tmp_path,
     )
     await svc.ensure_distillation_skill()
 
@@ -779,31 +1075,45 @@ async def test_add_unknown_categories_updates_skill_tunables_when_skills_on(
 
 # --- bulk mode (all_entities=True) ------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_bulk_l1_pass_processes_all_entities(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """Bulk mode processes ALL L0 entities regardless of watermark."""
     # Create multiple notes with distillable categories
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="Note1",
         observations=[("definition", "A is one")],
     )
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="Note2",
         observations=[("rule", "B must be two")],
     )
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="Note3",
         observations=[("fact", "C is three")],
     )
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
 
     # Bulk mode should process all 3 entities
@@ -816,22 +1126,33 @@ async def test_bulk_l1_pass_processes_all_entities(
 
 @pytest.mark.asyncio
 async def test_bulk_l1_pass_with_unknown_categories_uses_policy(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """Bulk mode respects unknown_category_policy for non-distillable categories."""
     # Create notes with both distillable and unknown categories
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="Mixed",
         observations=[
             ("definition", "A is defined"),  # distillable
-            ("policy", "encrypt data"),       # not distillable by default
+            ("policy", "encrypt data"),  # not distillable by default
         ],
     )
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
 
     # With skip policy (default), only the definition should be extracted
@@ -841,26 +1162,35 @@ async def test_bulk_l1_pass_with_unknown_categories_uses_policy(
     facts = await entity_repository.list_by_entity_type(FACT_ENTITY_TYPE, limit=100)
     assert len(facts) == 1
     # The fact should be from the definition category
-    fact_obs = next(
-        (o for o in (facts[0].observations or []) if o.category == "fact"), None
-    )
+    fact_obs = next((o for o in (facts[0].observations or []) if o.category == "fact"), None)
     assert "A is defined" in (fact_obs.content if fact_obs else "")
 
 
 @pytest.mark.asyncio
 async def test_bulk_l1_pass_sets_watermark_at_end(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """After bulk mode completes, the watermark is set so future passes are incremental."""
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="BulkWatermark",
         observations=[("definition", "X is x")],
     )
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
 
     # Bulk pass should create the fact and set watermark
@@ -874,15 +1204,22 @@ async def test_bulk_l1_pass_sets_watermark_at_end(
 
 # --- integration: discover → add → bulk distill → L2/L3 cascade ------------
 
+
 @pytest.mark.asyncio
 async def test_full_pipeline_discover_add_bulk_distill_l2_l3(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """End-to-end: discover unknowns → add them → bulk distill L1 → cascade to L2/L3."""
     # Create entities with non-default categories
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="PolicyDoc",
         observations=[
             ("policy", "All data must be encrypted at rest"),
@@ -890,7 +1227,8 @@ async def test_full_pipeline_discover_add_bulk_distill_l2_l3(
         ],
     )
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="RuleBook",
         observations=[
             ("policy", "Passwords must be 12+ chars"),
@@ -899,8 +1237,13 @@ async def test_full_pipeline_discover_add_bulk_distill_l2_l3(
     )
 
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
 
     # Step 1: Discover categories — should show policy/guideline as unknown
@@ -931,9 +1274,7 @@ async def test_full_pipeline_discover_add_bulk_distill_l2_l3(
     # At least one scenario should form (shared sources or similarity)
     assert scenarios >= 0  # depends on clustering thresholds
 
-    scenarios_list = await entity_repository.list_by_entity_type(
-        SCENARIO_ENTITY_TYPE, limit=100
-    )
+    scenarios_list = await entity_repository.list_by_entity_type(SCENARIO_ENTITY_TYPE, limit=100)
     # With shared source entities, at least some clusters may form
     # The exact count depends on similarity threshold; just verify no errors
     assert isinstance(scenarios_list, list)
@@ -950,19 +1291,30 @@ async def test_full_pipeline_discover_add_bulk_distill_l2_l3(
 
 @pytest.mark.asyncio
 async def test_incremental_pass_after_bulk_only_new_entities(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """After a bulk pass, incremental mode only picks up newly created entities."""
     # Bulk pass with initial data
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="Initial",
         observations=[("definition", "A is alpha")],
     )
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
 
     await svc.run_l1_pass(max_memories=50, all_entities=True)
@@ -970,7 +1322,8 @@ async def test_incremental_pass_after_bulk_only_new_entities(
 
     # Add a new entity after the bulk pass watermark was set
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="NewAfterBulk",
         observations=[("rule", "B is beta")],
     )
@@ -985,17 +1338,24 @@ async def test_incremental_pass_after_bulk_only_new_entities(
 
 # --- CodeExtractor unknown category policy ---------------------------------
 
+
 @pytest.mark.asyncio
 async def test_code_extractor_skip_policy(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """CodeExtractor with skip policy ignores non-distillable categories."""
     from memopad.services.distillation_service import CodeExtractor
 
     extractor = CodeExtractor(unknown_category_policy="skip")
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="SkipTest",
         observations=[
             ("definition", "A is defined"),
@@ -1007,7 +1367,9 @@ async def test_code_extractor_skip_policy(
     obs = await observation_repository.find_by_entity(l0_entity.id)
 
     candidates = await extractor.extract(
-        l0_entity, obs, categories=["definition"]  # only definition is distillable
+        l0_entity,
+        obs,
+        categories=["definition"],  # only definition is distillable
     )
     assert len(candidates) == 1
     assert candidates[0].category == "definition"
@@ -1015,15 +1377,21 @@ async def test_code_extractor_skip_policy(
 
 @pytest.mark.asyncio
 async def test_code_extractor_include_policy(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """CodeExtractor with include policy includes unknown categories at base confidence."""
     from memopad.services.distillation_service import CodeExtractor
 
     extractor = CodeExtractor(unknown_category_policy="include")
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="IncludeTest",
         observations=[
             ("definition", "A is defined"),
@@ -1035,7 +1403,9 @@ async def test_code_extractor_include_policy(
     obs = await observation_repository.find_by_entity(l0_entity.id)
 
     candidates = await extractor.extract(
-        l0_entity, obs, categories=["definition"]  # only definition is explicitly distillable
+        l0_entity,
+        obs,
+        categories=["definition"],  # only definition is explicitly distillable
     )
     assert len(candidates) == 2  # both included via "include" policy
     categories_found = {c.category for c in candidates}
@@ -1048,15 +1418,21 @@ async def test_code_extractor_include_policy(
 
 @pytest.mark.asyncio
 async def test_code_extractor_include_low_policy(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """CodeExtractor with include_low policy includes unknowns at reduced confidence."""
     from memopad.services.distillation_service import CodeExtractor
 
     extractor = CodeExtractor(unknown_category_policy="include_low")
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="LowTest",
         observations=[("policy", "encrypt data")],  # unknown category
     )
@@ -1065,7 +1441,9 @@ async def test_code_extractor_include_low_policy(
     obs = await observation_repository.find_by_entity(l0_entity.id)
 
     candidates = await extractor.extract(
-        l0_entity, obs, categories=["definition"]  # only definition is distillable
+        l0_entity,
+        obs,
+        categories=["definition"],  # only definition is distillable
     )
     assert len(candidates) == 1
     assert candidates[0].category == "policy"
@@ -1079,8 +1457,13 @@ async def test_code_extractor_include_low_policy(
 
 @pytest.mark.asyncio
 async def test_code_extractor_handles_compound_categories(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """A comma-separated compound category matches if ANY component is distillable;
     the matched component becomes the candidate's category + drives confidence."""
@@ -1088,20 +1471,19 @@ async def test_code_extractor_handles_compound_categories(
 
     extractor = CodeExtractor()  # default skip policy
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="Compound",
         observations=[
             ("config_docs, algorithms", "vector search uses ANN"),  # algorithms is distillable
-            ("diary, personal", "felt tired today"),                 # neither distillable
+            ("diary, personal", "felt tired today"),  # neither distillable
         ],
     )
     entities = await entity_repository.find_updated_since(None, limit=100)
     l0_entity = next(e for e in entities if e.title == "Compound")
     obs = await observation_repository.find_by_entity(l0_entity.id)
 
-    candidates = await extractor.extract(
-        l0_entity, obs, categories=["definition", "algorithms"]
-    )
+    candidates = await extractor.extract(l0_entity, obs, categories=["definition", "algorithms"])
     # Only the compound containing a distillable component ("algorithms") yields a
     # candidate; the matched component is the category (not the raw compound string).
     assert len(candidates) == 1
@@ -1111,19 +1493,30 @@ async def test_code_extractor_handles_compound_categories(
 
 @pytest.mark.asyncio
 async def test_l1_distils_compound_category_observation(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """An L0 observation tagged with a compound category that includes a distillable
     component is distilled end-to-end (the cold-start silent-zero failure mode)."""
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="CompoundL0",
         observations=[("config_docs, algorithms", "ANN indexes vectors for search")],
     )
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
     created = await svc.run_l1_pass(max_memories=50)
     assert created == 1
@@ -1139,20 +1532,31 @@ async def test_l1_distils_compound_category_observation(
 
 @pytest.mark.asyncio
 async def test_l1_pass_self_heals_when_watermark_scan_empty(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """A stuck watermark (advanced past all L0 without distilling) self-heals: an
     incremental pass with an empty watermark scan + empty L1 falls back to a full
     scan instead of leaving L1 permanently empty (the guide's Patch 3 goal)."""
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="Stuck",
         observations=[("definition", "A widget is a reusable UI component")],
     )
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
     # Simulate a stuck watermark: set last_l1_at to *now* without distilling, so
     # find_updated_since(since) returns nothing (the L0 predates the watermark)
@@ -1167,19 +1571,30 @@ async def test_l1_pass_self_heals_when_watermark_scan_empty(
 
 @pytest.mark.asyncio
 async def test_l1_pass_no_self_heal_when_l1_already_populated(
-    entity_repository, observation_repository, relation_repository,
-    search_service, entity_service, app_config, tmp_path,
+    entity_repository,
+    observation_repository,
+    relation_repository,
+    search_service,
+    entity_service,
+    app_config,
+    tmp_path,
 ):
     """Once L1 has facts, an empty watermark scan is a normal idle tick (nothing new),
     NOT a stuck state — so it must NOT fall back to a full scan (stays a cheap no-op)."""
     await _note(
-        entity_service, search_service,
+        entity_service,
+        search_service,
         title="Populated",
         observations=[("definition", "A widget is a reusable UI component")],
     )
     svc = _service(
-        entity_repository, observation_repository, relation_repository,
-        search_service, entity_service, app_config, tmp_path,
+        entity_repository,
+        observation_repository,
+        relation_repository,
+        search_service,
+        entity_service,
+        app_config,
+        tmp_path,
     )
     # Distil once so L1 is populated and the watermark advances.
     await svc.run_l1_pass(max_memories=50)

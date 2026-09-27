@@ -35,9 +35,14 @@ class _FakeScheduler:
 
     def __init__(self):
         self.recorded: list[int] = []
+        self.idle_recorded: list[int] = []
 
     async def record_new_memory(self, project_id: int):
         self.recorded.append(project_id)
+
+    async def evaluate_idle_and_dispatch(self, project_id: int):
+        self.idle_recorded.append(project_id)
+        return None
 
 
 class _FakeSyncService:
@@ -158,3 +163,17 @@ async def test_distillation_hook_degrades_on_build_failure(
     await _drain()
 
     assert scheduler.recorded == []
+
+
+@pytest.mark.asyncio
+async def test_idle_monitor_dispatches_pending_project_check(project_repository, test_project):
+    scheduler = _FakeScheduler()
+    watch_service = _make_watch_service(
+        project_repository,
+        automatic=True,
+        scheduler=scheduler,
+    )
+
+    await watch_service._evaluate_idle_distillation([test_project])
+
+    assert scheduler.idle_recorded == [test_project.id]

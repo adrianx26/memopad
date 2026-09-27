@@ -1,4 +1,4 @@
-﻿"""Pydantic schemas for sync report responses."""
+"""Pydantic schemas for sync report responses."""
 
 from datetime import datetime
 from typing import TYPE_CHECKING, Dict, List, Set

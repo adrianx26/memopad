@@ -22,7 +22,11 @@ from memopad.config import MemoPadConfig
 from memopad.repository.search_index_row import SearchIndexRow
 from memopad.schemas.memory import MemoryUrl
 from memopad.schemas.search import SearchItemType
-from memopad.services.context_service import ContextService
+from memopad.services.context_service import (
+    ContextResultItem,
+    ContextService,
+)
+from memopad.services.shortterm_context import estimate_tokens
 
 
 def _config_with(**overrides) -> MemoPadConfig:
@@ -87,6 +91,60 @@ async def test_truncate_memory_caps_when_enabled():
     # Short text is untouched.
     short = "short"
     assert svc._truncate_memory(short) == short
+
+
+def test_total_recall_token_budget_is_shared_across_results():
+    from datetime import datetime, timezone
+
+    cfg = _config_with(recall_max_tokens=10)
+    svc = ContextService(
+        search_repository=None,  # type: ignore[arg-type]
+        entity_repository=None,  # type: ignore[arg-type]
+        observation_repository=None,  # type: ignore[arg-type]
+        app_config=cfg,
+    )
+    now = datetime.now(timezone.utc)
+    items = [
+        ContextResultItem(
+            primary_result=SearchIndexRow(
+                project_id=1,
+                id=1,
+                type=SearchItemType.ENTITY.value,
+                file_path="first.md",
+                created_at=now,
+                updated_at=now,
+                title="first",
+                content_snippet="short",
+            )
+        ),
+        ContextResultItem(
+            primary_result=SearchIndexRow(
+                project_id=1,
+                id=2,
+                type=SearchItemType.ENTITY.value,
+                file_path="second.md",
+                created_at=now,
+                updated_at=now,
+                title="second",
+                content_snippet="x" * 1000,
+            )
+        ),
+    ]
+
+    bounded = svc._apply_recall_token_budget(items)
+
+    assert len(bounded) == 2
+    texts = [
+        text
+        for item in bounded
+        for text in (
+            item.primary_result.title,
+            item.primary_result.content_snippet,
+        )
+        if text
+    ]
+    assert sum(estimate_tokens(text) for text in texts) <= 10
+    assert bounded[1].primary_result.content_snippet.endswith("…[truncated]")
 
 
 @pytest.mark.asyncio
@@ -237,3 +295,54 @@ async def test_build_context_does_not_truncate_when_disabled(
     assert result.results
     obs_content = result.results[0].observations[0].content
     assert obs_content == long_body  # untouched
+
+
+@pytest.mark.asyncio
+async def test_build_context_enforces_total_token_budget_for_direct_note(
+    entity_repository, search_repository
+):
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    entity = await entity_repository.create(
+        {
+            "title": "BudgetNote",
+            "entity_type": "note",
+            "permalink": "budget-note",
+            "file_path": "budget-note.md",
+            "content_type": "text/markdown",
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+    await search_repository.index_item(
+        SearchIndexRow(
+            project_id=entity_repository.project_id,
+            id=entity.id,
+            type=SearchItemType.ENTITY.value,
+            file_path=entity.file_path,
+            created_at=entity.created_at,
+            updated_at=entity.updated_at,
+            permalink=entity.permalink,
+            title=entity.title,
+            content_snippet="D" * 1000,
+        )
+    )
+    svc = ContextService(
+        search_repository=search_repository,
+        entity_repository=entity_repository,
+        observation_repository=None,  # type: ignore[arg-type]
+        app_config=_config_with(recall_max_tokens=10),
+    )
+
+    result = await svc.build_context(
+        memory_url=MemoryUrl("memory://budget-note"),
+        depth=0,
+        include_observations=False,
+    )
+
+    assert len(result.results) == 1
+    primary = result.results[0].primary_result
+    assert primary.content is not None
+    assert primary.content.endswith("…[truncated]")
+    assert sum(estimate_tokens(text) for text in (primary.title, primary.content) if text) <= 10

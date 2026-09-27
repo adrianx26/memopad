@@ -1,4 +1,4 @@
-﻿"""relation to_name unique index
+"""relation to_name unique index
 
 Revision ID: b3c3938bacdb
 Revises: 3dae7c7b1564

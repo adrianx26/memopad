@@ -20,6 +20,7 @@ from memopad.deps import (
     ProjectConfigV2ExternalDep,
     AppConfigDep,
     EntityRepositoryV2ExternalDep,
+    EntityAliasRepositoryV2ExternalDep,
     ProjectExternalIdPathDep,
     RelationRepositoryV2ExternalDep,
     TaskSchedulerDep,
@@ -60,6 +61,7 @@ from memopad.services.skill_service import (
     skill_version,
     structural_validation,
 )
+from memopad.services.local_extraction_service import LocalExtractionService
 
 # --- Distillation (Tb L0-L3) ---
 from memopad.services.distillation_scheduler import is_pipeline_active
@@ -101,6 +103,7 @@ def _schedule_distillation(scheduler, app_config, project_id: int) -> None:
                 logger.warning(f"distillation trigger failed for project {project_id}: {exc}")
 
     asyncio.create_task(_run())
+
 
 ## Resolution endpoint
 
@@ -218,6 +221,28 @@ async def get_entity_by_id(
     logger.info(f"API v2 response: external_id={entity_id}, title='{result.title}'")
 
     return result
+
+
+@router.get("/entities/{entity_id}/extraction-suggestions")
+async def get_extraction_suggestions(
+    entity_repository: EntityRepositoryV2ExternalDep,
+    alias_repository: EntityAliasRepositoryV2ExternalDep,
+    search_service: SearchServiceV2ExternalDep,
+    file_service: FileServiceV2ExternalDep,
+    entity_id: str = Path(..., description="Entity external ID (UUID)"),
+) -> dict:
+    """Suggest relations and tags from locally indexed project knowledge."""
+    entity = await entity_repository.get_by_external_id(entity_id)
+    if not entity:
+        raise HTTPException(
+            status_code=404, detail=f"Entity with external_id '{entity_id}' not found"
+        )
+
+    content = await file_service.read_file_content(entity.file_path)
+    suggestions = await LocalExtractionService(search_service, alias_repository).suggest(
+        content, source_entity_id=entity.id
+    )
+    return {"entity_id": entity.external_id, **suggestions}
 
 
 ## Create endpoints
@@ -720,9 +745,7 @@ async def get_backlinks(
             }
         )
 
-    logger.info(
-        f"API v2 response: get_backlinks entity_id={entity_id} count={len(items)}"
-    )
+    logger.info(f"API v2 response: get_backlinks entity_id={entity_id} count={len(items)}")
     return {"target_external_id": entity_id, "target_title": target.title, "backlinks": items}
 
 
@@ -755,9 +778,7 @@ async def get_drill_down(
     Returns a dict with `chain` (rendered Markdown), `target`, and `nodes`
     (structured tree). Unresolved sources appear as leaves tagged _[unresolved]_.
     """
-    logger.info(
-        f"API v2 request: get_drill_down entity_id={entity_id} target_level={target_level}"
-    )
+    logger.info(f"API v2 request: get_drill_down entity_id={entity_id} target_level={target_level}")
 
     target = await entity_repository.get_by_external_id(entity_id)
     if not target:
@@ -859,7 +880,9 @@ async def list_skills(
                 "file_path": ent.file_path,
                 "skill_version": skill_version(ent.entity_metadata),
                 "skill_status": st,
-                "source_entities_count": len((ent.entity_metadata or {}).get("source_entities", []) or []),
+                "source_entities_count": len(
+                    (ent.entity_metadata or {}).get("source_entities", []) or []
+                ),
             }
         )
 
@@ -973,10 +996,10 @@ async def validate_skill(
 async def index_codegraph(
     codegraph_service: CodeGraphServiceV2ExternalDep,
     app_config: AppConfigDep,
-    root: str = Query(..., description="Absolute or project-relative path of the source tree to index"),
-    languages: list[str] | None = Query(
-        None, description="Languages to index (default: python)"
+    root: str = Query(
+        ..., description="Absolute or project-relative path of the source tree to index"
     ),
+    languages: list[str] | None = Query(None, description="Languages to index (default: python)"),
 ) -> dict:
     """Parse a source tree and upsert code entities + relations + search rows.
 
@@ -1016,7 +1039,9 @@ async def find_symbol(
 ) -> dict:
     """Find functions/classes/modules by name."""
     if not app_config.codegraph_enabled:
-        raise HTTPException(status_code=400, detail="CodeGraph is disabled (codegraph_enabled=false).")
+        raise HTTPException(
+            status_code=400, detail="CodeGraph is disabled (codegraph_enabled=false)."
+        )
     hits = await codegraph_service.find_symbol(name, exact=exact)
     return {
         "symbols": [
@@ -1042,7 +1067,9 @@ async def impact_path(
 ) -> dict:
     """BFS over reverse `calls`: what does changing this symbol affect?"""
     if not app_config.codegraph_enabled:
-        raise HTTPException(status_code=400, detail="CodeGraph is disabled (codegraph_enabled=false).")
+        raise HTTPException(
+            status_code=400, detail="CodeGraph is disabled (codegraph_enabled=false)."
+        )
     view = await codegraph_service._load_graph_view()
     if permalink not in view.symbols:
         raise HTTPException(status_code=404, detail=f"No code symbol at '{permalink}'.")
@@ -1063,11 +1090,15 @@ async def code_context(
     codegraph_service: CodeGraphServiceV2ExternalDep,
     app_config: AppConfigDep,
     permalink: str = Query(..., description="code:// permalink of the symbol"),
-    max_tokens: int = Query(0, ge=0, description="Token budget for the rendered context (0=unlimited)"),
+    max_tokens: int = Query(
+        0, ge=0, description="Token budget for the rendered context (0=unlimited)"
+    ),
 ) -> dict:
     """Definition + direct dependencies + direct callers for a symbol."""
     if not app_config.codegraph_enabled:
-        raise HTTPException(status_code=400, detail="CodeGraph is disabled (codegraph_enabled=false).")
+        raise HTTPException(
+            status_code=400, detail="CodeGraph is disabled (codegraph_enabled=false)."
+        )
     view = await codegraph_service._load_graph_view()
     if permalink not in view.symbols:
         raise HTTPException(status_code=404, detail=f"No code symbol at '{permalink}'.")
@@ -1099,7 +1130,12 @@ async def distill_memory(
         "L1 distils new L0 observations into atomic facts; L2 clusters facts into "
         "scenarios; L3 aggregates stable facts into the persona.",
     ),
-    max_memories: int = Query(50, ge=1, le=100000, description="Max L0 entities to scan per L1 pass. Upper bound is generous so large corpora can be processed in a single bulk pass without the MCP/CLI caller hitting an artificial 1000-entity cap."),
+    max_memories: int = Query(
+        50,
+        ge=1,
+        le=100000,
+        description="Max L0 entities to scan per L1 pass. Upper bound is generous so large corpora can be processed in a single bulk pass without the MCP/CLI caller hitting an artificial 1000-entity cap.",
+    ),
     bulk: bool = Query(
         False,
         description="If True, process ALL existing L0 entities (cold-start / backfill). "
@@ -1202,7 +1238,9 @@ async def discover_categories(
 async def add_observation_categories(
     project_id: ProjectExternalIdPathDep,
     service: DistillationServiceV2ExternalDep,
-    categories: list[str] | None = Body(None, embed=True, description="Categories to add. If omitted, auto-discovers unknowns."),
+    categories: list[str] | None = Body(
+        None, embed=True, description="Categories to add. If omitted, auto-discovers unknowns."
+    ),
 ) -> dict:
     """Add observation categories to the distillable set.
 

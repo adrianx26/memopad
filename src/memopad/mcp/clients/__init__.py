@@ -1,4 +1,4 @@
-﻿"""Typed internal API clients for MCP tools.
+"""Typed internal API clients for MCP tools.
 
 These clients encapsulate API paths, error handling, and response validation.
 MCP tools become thin adapters that call these clients and format results.

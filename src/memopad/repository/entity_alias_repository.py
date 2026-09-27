@@ -5,7 +5,7 @@ from typing import Optional, Sequence
 from sqlalchemy import select, asc
 
 from memopad.models.entity_alias import EntityAlias
-from memopad.repository.repository import Repository
+from memopad.repository.repository import Repository, _retry_on_db_locked
 
 
 class EntityAliasRepository(Repository[EntityAlias]):
@@ -26,12 +26,30 @@ class EntityAliasRepository(Repository[EntityAlias]):
 
     async def find_by_entity(self, entity_id: int) -> Sequence[EntityAlias]:
         """Find all aliases for an entity."""
-        query = select(EntityAlias).where(EntityAlias.entity_id == entity_id).order_by(
-            asc(EntityAlias.id)
+        query = (
+            select(EntityAlias)
+            .where(EntityAlias.entity_id == entity_id)
+            .order_by(asc(EntityAlias.id))
         )
         result = await self.execute_query(query)
         return result.scalars().all()
 
+    async def find_by_entities(self, entity_ids: Sequence[int]) -> Sequence[EntityAlias]:
+        """Find aliases for multiple entities in the current project."""
+        if not entity_ids:
+            return []
+        query = (
+            select(EntityAlias)
+            .where(
+                EntityAlias.entity_id.in_(entity_ids),
+                EntityAlias.project_id == self.project_id,
+            )
+            .order_by(asc(EntityAlias.id))
+        )
+        result = await self.execute_query(query)
+        return result.scalars().all()
+
+    @_retry_on_db_locked
     async def upsert_aliases(
         self,
         entity_id: int,
@@ -41,7 +59,7 @@ class EntityAliasRepository(Repository[EntityAlias]):
         """Replace aliases for an entity with the supplied set."""
         from memopad import db
 
-        async with db.scoped_session(self.session_maker) as session:
+        async with db.scoped_session(self.session_maker, write=True) as session:
             existing = await session.execute(
                 select(EntityAlias).where(EntityAlias.entity_id == entity_id)
             )
@@ -56,13 +74,17 @@ class EntityAliasRepository(Repository[EntityAlias]):
                 seen.add(alias)
 
                 existing_alias = (
-                    await session.execute(
-                        select(EntityAlias).where(
-                            EntityAlias.alias == alias,
-                            EntityAlias.project_id == self.project_id,
+                    (
+                        await session.execute(
+                            select(EntityAlias).where(
+                                EntityAlias.alias == alias,
+                                EntityAlias.project_id == self.project_id,
+                            )
                         )
                     )
-                ).scalars().one_or_none()
+                    .scalars()
+                    .one_or_none()
+                )
                 if existing_alias and existing_alias.entity_id != entity_id:
                     continue
 
@@ -75,12 +97,11 @@ class EntityAliasRepository(Repository[EntityAlias]):
                     )
                 )
 
+    @_retry_on_db_locked
     async def delete_by_entity(self, entity_id: int) -> None:
         """Delete aliases for an entity."""
         from memopad import db
         from sqlalchemy import delete
 
-        async with db.scoped_session(self.session_maker) as session:
-            await session.execute(
-                delete(EntityAlias).where(EntityAlias.entity_id == entity_id)
-            )
+        async with db.scoped_session(self.session_maker, write=True) as session:
+            await session.execute(delete(EntityAlias).where(EntityAlias.entity_id == entity_id))

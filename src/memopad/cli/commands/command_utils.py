@@ -1,4 +1,4 @@
-﻿"""utility functions for commands"""
+"""utility functions for commands"""
 
 import asyncio
 from typing import Optional, TypeVar, Coroutine, Any

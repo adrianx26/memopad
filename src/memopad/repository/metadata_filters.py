@@ -1,4 +1,4 @@
-﻿"""Helpers for parsing structured metadata filters for search."""
+"""Helpers for parsing structured metadata filters for search."""
 
 from __future__ import annotations
 

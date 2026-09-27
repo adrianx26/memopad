@@ -1,4 +1,4 @@
-﻿"""add projects table
+"""add projects table
 
 Revision ID: 5fe1ab1ccebe
 Revises: cc7172b46608

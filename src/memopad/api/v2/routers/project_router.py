@@ -1,4 +1,4 @@
-﻿"""V2 Project Router - External ID-based project management operations.
+"""V2 Project Router - External ID-based project management operations.
 
 This router provides external_id (UUID) based CRUD operations for projects,
 using stable string UUIDs that never change (unlike integer IDs or names).

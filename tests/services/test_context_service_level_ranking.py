@@ -26,7 +26,11 @@ import pytest
 from memopad.config import MemoPadConfig
 from memopad.repository.search_index_row import SearchIndexRow
 from memopad.schemas.search import SearchItemType
-from memopad.services.context_service import ContextResultItem, ContextService
+from memopad.services.context_service import (
+    ContextResultItem,
+    ContextResultRow,
+    ContextService,
+)
 
 
 def _config_with(**overrides) -> MemoPadConfig:
@@ -44,7 +48,7 @@ def _make_item(entity_id: int, *, score: float = -5.0, etype: str = "entity"):
 
 async def _make_entity(repo, *, permalink, title, level=None, entity_type="note"):
     now = datetime.now(timezone.utc)
-    metadata = {"level": level} if level else None
+    metadata = {"level": level, "confidence": 0.9} if level else None
     return await repo.create(
         {
             "title": title,
@@ -141,7 +145,11 @@ async def test_level_weight_uniform_all_l0_preserves_order(entity_repository):
         app_config=_config_with(levels_enabled=True),
     )
     # Already in search-engine (ASC) order: -9, -6, -3.
-    items = [_make_item(a.id, score=-9.0), _make_item(b.id, score=-6.0), _make_item(c.id, score=-3.0)]
+    items = [
+        _make_item(a.id, score=-9.0),
+        _make_item(b.id, score=-6.0),
+        _make_item(c.id, score=-3.0),
+    ]
     out = await svc._apply_level_weights(items)
     # Uniform 0.40 scaling keeps ASC order intact — no spurious reorder.
     assert _ids(out) == [a.id, b.id, c.id]
@@ -161,8 +169,12 @@ async def test_level_weight_mixed_levels_sort_by_weighted_score(entity_repositor
         observation_repository=None,  # type: ignore[arg-type]
         app_config=_config_with(levels_enabled=True),
     )
-    items = [_make_item(l0.id, score=-5.0), _make_item(l1.id, score=-5.0),
-             _make_item(l2.id, score=-5.0), _make_item(l3.id, score=-5.0)]
+    items = [
+        _make_item(l0.id, score=-5.0),
+        _make_item(l1.id, score=-5.0),
+        _make_item(l2.id, score=-5.0),
+        _make_item(l3.id, score=-5.0),
+    ]
     out = await svc._apply_level_weights(items)
     # weighted: L3=-5.0, L2=-4.25, L1=-3.5, L0=-2.0 → ASC = L3,L2,L1,L0
     assert _ids(out) == [l3.id, l2.id, l1.id, l0.id]
@@ -186,28 +198,103 @@ async def test_level_weight_unlevelled_treated_as_l0(entity_repository):
     assert _ids(out) == [l3.id, plain.id]
 
 
+@pytest.mark.asyncio
+async def test_context_policy_keeps_confident_distilled_and_direct_raw_only(
+    entity_repository,
+):
+    now = datetime.now(timezone.utc)
+    source = await _make_entity(
+        entity_repository, permalink="policy-source", title="Source", level="L0"
+    )
+    fact = await _make_entity(entity_repository, permalink="policy-fact", title="Fact", level="L1")
+    low_fact = await _make_entity(
+        entity_repository, permalink="policy-low-fact", title="Low fact", level="L1"
+    )
+    await entity_repository.update(
+        low_fact.id, {"entity_metadata": {"level": "L1", "confidence": 0.2}}
+    )
+    raw_neighbor = await _make_entity(
+        entity_repository, permalink="policy-neighbor", title="Raw neighbor", level="L0"
+    )
+    svc = ContextService(
+        search_repository=None,  # type: ignore[arg-type]
+        entity_repository=entity_repository,
+        observation_repository=None,  # type: ignore[arg-type]
+        app_config=_config_with(levels_enabled=True, recall_min_confidence=0.5),
+    )
+    source_item = ContextResultItem(
+        primary_result=SimpleNamespace(type="entity", id=source.id, score=0.0),
+        related_results=[
+            ContextResultRow(
+                type="relation",
+                id=1,
+                title="derived_from",
+                permalink="",
+                file_path="",
+                depth=1,
+                root_id=source.id,
+                created_at=now,
+                from_id=source.id,
+                to_id=fact.id,
+                relation_type="derived_from",
+            ),
+            ContextResultRow(
+                type="entity",
+                id=fact.id,
+                title=fact.title,
+                permalink=fact.permalink,
+                file_path=fact.file_path,
+                depth=1,
+                root_id=source.id,
+                created_at=now,
+            ),
+            ContextResultRow(
+                type="entity",
+                id=raw_neighbor.id,
+                title=raw_neighbor.title,
+                permalink=raw_neighbor.permalink,
+                file_path=raw_neighbor.file_path,
+                depth=1,
+                root_id=source.id,
+                created_at=now,
+            ),
+        ],
+    )
+    items = [
+        source_item,
+        _make_item(low_fact.id),
+        _make_item(raw_neighbor.id),
+    ]
+
+    out = await svc._apply_distilled_retrieval_policy(
+        items, directly_requested_primary_ids={source.id}
+    )
+
+    assert _ids(out) == [source.id]
+    assert [row.id for row in out[0].related_results] == [1, fact.id]
+
+
 # --- End-to-end via build_context -------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_level_weight_end_to_end_via_build_context(
-    entity_repository, search_repository
-):
+async def test_level_weight_end_to_end_via_build_context(entity_repository, search_repository):
     """build_context wires the level-weight re-rank in. depth=0 avoids the CTE path."""
-    # Index the L0 note first, then the L3 persona. With no text query
+    # Index the L1 fact, L3 persona, and an L0 note. With no text query
     # (memory_url=None) the BM25 scores tie and SQLite falls back to rowid order,
     # so the natural (pre-weight) result order is note-first. The level-weight
-    # re-rank must then surface the L3 persona ahead of the L0 note — so
+    # re-rank must then surface the L3 persona ahead of the L1 fact — so
     # `ids[0] == persona.id` actually verifies the wiring. Indexing the persona
     # first would make it first even without weighting, passing the test trivially.
-    note = await _make_entity(
-        entity_repository, permalink="e2e-note", title="E2ENote", level="L0"
-    )
+    note = await _make_entity(entity_repository, permalink="e2e-note", title="E2ENote", level="L1")
     persona = await _make_entity(
         entity_repository, permalink="e2e-persona", title="E2EPersona", level="L3"
     )
+    raw_note = await _make_entity(
+        entity_repository, permalink="e2e-raw", title="E2ERaw", level="L0"
+    )
 
-    for e in (note, persona):
+    for e in (note, persona, raw_note):
         await search_repository.index_item(
             SearchIndexRow(
                 project_id=entity_repository.project_id,
@@ -237,16 +324,13 @@ async def test_level_weight_end_to_end_via_build_context(
     # The L3 persona must surface first despite being indexed second.
     assert ids[0] == persona.id
     assert note.id in ids
+    assert raw_note.id not in ids
 
 
 @pytest.mark.asyncio
-async def test_level_weight_end_to_end_noop_when_disabled(
-    entity_repository, search_repository
-):
+async def test_level_weight_end_to_end_noop_when_disabled(entity_repository, search_repository):
     """With levels_enabled off, build_context order is the raw search order."""
-    note = await _make_entity(
-        entity_repository, permalink="off-note", title="OffNote", level="L0"
-    )
+    note = await _make_entity(entity_repository, permalink="off-note", title="OffNote", level="L0")
     persona = await _make_entity(
         entity_repository, permalink="off-persona", title="OffPersona", level="L3"
     )

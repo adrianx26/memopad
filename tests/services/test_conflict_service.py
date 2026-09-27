@@ -104,8 +104,8 @@ async def test_no_conflict_different_category():
 async def test_conflict_same_category_different_content():
     service, repo = _make_service()
 
-    obs_a = _make_obs(1, 10, "status", "active and running smoothly")
-    obs_b = _make_obs(2, 10, "status", "deprecated and scheduled for removal")
+    obs_a = _make_obs(1, 10, "status", "the service is active and running smoothly")
+    obs_b = _make_obs(2, 10, "status", "the service is deprecated and scheduled for removal")
 
     repo.find_by_entity = AsyncMock(return_value=[obs_a, obs_b])
 
@@ -117,6 +117,35 @@ async def test_conflict_same_category_different_content():
     assert result.obs_a_id == 1
     assert result.obs_b_id == 2
     assert result.score > 0.15  # above threshold
+    mock_write.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_no_conflict_for_complementary_preferences():
+    service, repo = _make_service()
+    obs_a = _make_obs(1, 10, "preference", "Uses TypeScript for frontend")
+    obs_b = _make_obs(2, 10, "preference", "Uses Python for data pipelines")
+    repo.find_by_entity = AsyncMock(return_value=[obs_a, obs_b])
+
+    with patch.object(service, "_write_conflicts", new=AsyncMock()) as mock_write:
+        results = await service.detect_and_mark(entity_id=10, new_observations=[obs_a, obs_b])
+
+    assert results == []
+    mock_write.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_conflict_requires_explicit_opposite_assertion():
+    service, repo = _make_service()
+    obs_a = _make_obs(1, 10, "fact", "The service uses SQLite")
+    obs_b = _make_obs(2, 10, "fact", "The service does not use SQLite")
+    repo.find_by_entity = AsyncMock(return_value=[obs_a, obs_b])
+
+    with patch.object(service, "_write_conflicts", new=AsyncMock()) as mock_write:
+        results = await service.detect_and_mark(entity_id=10, new_observations=[obs_a, obs_b])
+
+    assert len(results) == 1
+    assert results[0].score == 1.0
     mock_write.assert_called_once()
 
 

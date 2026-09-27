@@ -1,4 +1,4 @@
-﻿"""V2 Directory Router - ID-based directory tree operations.
+"""V2 Directory Router - ID-based directory tree operations.
 
 This router provides directory structure browsing for projects using
 external_id UUIDs instead of name-based identifiers.

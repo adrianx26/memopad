@@ -1,4 +1,4 @@
-﻿"""Typed client for memory/context API operations.
+"""Typed client for memory/context API operations.
 
 Encapsulates all /v2/projects/{project_id}/memory/* endpoints.
 """

@@ -1,4 +1,4 @@
-﻿"""Importer dependency injection for memopad.
+"""Importer dependency injection for memopad.
 
 This module provides importer dependencies:
 - ChatGPTImporter

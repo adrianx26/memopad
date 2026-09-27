@@ -1,4 +1,4 @@
-﻿"""V2 Resource Router - ID-based resource content operations.
+"""V2 Resource Router - ID-based resource content operations.
 
 This router uses entity external_ids (UUIDs) for all operations, with file paths
 in request bodies when needed. This is consistent with v2's external_id-first design.

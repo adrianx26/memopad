@@ -1,4 +1,4 @@
-﻿"""Abstract base class for search repository implementations."""
+"""Abstract base class for search repository implementations."""
 
 from abc import ABC, abstractmethod
 from datetime import datetime
@@ -116,7 +116,7 @@ class SearchRepositoryBase(ABC):
         This implementation is shared across backends as it uses standard SQL INSERT.
         """
 
-        async with db.scoped_session(self.session_maker) as session:
+        async with db.scoped_session(self.session_maker, write=True) as session:
             # Delete existing record if any
             await session.execute(
                 text(
@@ -169,7 +169,7 @@ class SearchRepositoryBase(ABC):
         if not search_index_rows:  # pragma: no cover
             return  # pragma: no cover
 
-        async with db.scoped_session(self.session_maker) as session:
+        async with db.scoped_session(self.session_maker, write=True) as session:
             # When using text() raw SQL, always serialize JSON to string
             # Both SQLite (TEXT) and Postgres (JSONB) accept JSON strings in raw SQL
             # The database driver/column type will handle conversion
@@ -207,7 +207,7 @@ class SearchRepositoryBase(ABC):
 
         This implementation is shared across backends as it uses standard SQL DELETE.
         """
-        async with db.scoped_session(self.session_maker) as session:
+        async with db.scoped_session(self.session_maker, write=True) as session:
             await session.execute(
                 text(
                     "DELETE FROM search_index WHERE entity_id = :entity_id AND project_id = :project_id"
@@ -222,7 +222,7 @@ class SearchRepositoryBase(ABC):
 
         This implementation is shared across backends as it uses standard SQL DELETE.
         """
-        async with db.scoped_session(self.session_maker) as session:
+        async with db.scoped_session(self.session_maker, write=True) as session:
             await session.execute(
                 text(
                     "DELETE FROM search_index WHERE permalink = :permalink AND project_id = :project_id"

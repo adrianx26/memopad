@@ -72,6 +72,7 @@ test-smoke:
 
 # Fast local loop: lint, format, typecheck, impacted tests
 fast-check:
+    just check-encoding
     just fix
     just format
     just typecheck
@@ -139,12 +140,16 @@ coverage:
     uv run coverage html
     echo "Coverage report generated in htmlcov/index.html"
 
-# Lint and fix code (calls fix)
-lint: fix
+# Check Python source encoding and lint/fix code
+lint: check-encoding fix
 
 # Lint and fix code
 fix:
     uv run ruff check --fix --unsafe-fixes src tests test-int
+
+# Prevent UTF-8 BOMs from being reintroduced in Python files
+check-encoding:
+    python check_utf8_bom.py
 
 # Type check code
 typecheck:

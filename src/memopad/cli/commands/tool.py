@@ -1,4 +1,4 @@
-﻿"""CLI tool commands for Basic Memory."""
+"""CLI tool commands for Basic Memory."""
 
 import json
 import sys

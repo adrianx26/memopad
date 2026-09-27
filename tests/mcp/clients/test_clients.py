@@ -72,6 +72,27 @@ class TestKnowledgeClient:
         result = await client.resolve_entity("my-note")
         assert result == "entity-uuid-123"
 
+    @pytest.mark.asyncio
+    async def test_get_extraction_suggestions(self, monkeypatch):
+        from memopad.mcp.clients import knowledge as knowledge_mod
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"relations": [], "tags": []}
+
+        async def mock_call_get(client, url, **kwargs):
+            assert (
+                url == "/v2/projects/proj-123/knowledge/entities/entity-uuid/extraction-suggestions"
+            )
+            return mock_response
+
+        monkeypatch.setattr(knowledge_mod, "call_get", mock_call_get)
+
+        client = KnowledgeClient(MagicMock(), "proj-123")
+        assert await client.get_extraction_suggestions("entity-uuid") == {
+            "relations": [],
+            "tags": [],
+        }
+
 
 class TestSearchClient:
     """Tests for SearchClient."""

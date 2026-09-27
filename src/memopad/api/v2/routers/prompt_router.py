@@ -1,4 +1,4 @@
-﻿"""V2 Prompt Router - ID-based prompt generation operations.
+"""V2 Prompt Router - ID-based prompt generation operations.
 
 This router uses v2 dependencies for consistent project handling with external_id UUIDs.
 Prompt endpoints are action-based (not resource-based), so they don't

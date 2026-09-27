@@ -1,4 +1,4 @@
-﻿"""Functions for managing database migrations."""
+"""Functions for managing database migrations."""
 
 from pathlib import Path
 from loguru import logger

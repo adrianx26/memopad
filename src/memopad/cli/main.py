@@ -1,4 +1,4 @@
-﻿"""Main CLI entry point for memopad."""  # pragma: no cover
+"""Main CLI entry point for memopad."""  # pragma: no cover
 
 from memopad.cli.app import app  # pragma: no cover
 

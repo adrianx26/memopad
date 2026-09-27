@@ -1,4 +1,4 @@
-﻿"""Add mtime and size columns to Entity for sync optimization
+"""Add mtime and size columns to Entity for sync optimization
 
 Revision ID: 9d9c1cb7d8f5
 Revises: a1b2c3d4e5f6

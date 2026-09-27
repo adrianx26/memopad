@@ -1,4 +1,4 @@
-﻿"""Memopad API module."""
+"""Memopad API module."""
 
 from .app import app
 

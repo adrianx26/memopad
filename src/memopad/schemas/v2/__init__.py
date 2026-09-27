@@ -1,4 +1,4 @@
-﻿"""V2 API schemas - ID-based entity and project references."""
+"""V2 API schemas - ID-based entity and project references."""
 
 from memopad.schemas.v2.entity import (
     EntityResolveRequest,

@@ -1,4 +1,4 @@
-﻿"""Basic Memory sync services."""
+"""Basic Memory sync services."""
 
 from .coordinator import SyncCoordinator, SyncStatus
 from .sync_service import SyncService

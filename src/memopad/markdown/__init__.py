@@ -1,4 +1,4 @@
-﻿"""Base package for markdown parsing."""
+"""Base package for markdown parsing."""
 
 from memopad.file_utils import ParseError
 from memopad.markdown.entity_parser import EntityParser

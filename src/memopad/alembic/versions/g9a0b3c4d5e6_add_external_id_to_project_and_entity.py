@@ -1,4 +1,4 @@
-﻿"""Add external_id UUID column to project and entity tables
+"""Add external_id UUID column to project and entity tables
 
 Revision ID: g9a0b3c4d5e6
 Revises: f8a9b2c3d4e5

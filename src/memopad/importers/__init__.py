@@ -1,4 +1,4 @@
-﻿"""Import services for Basic Memory."""
+"""Import services for Basic Memory."""
 
 from memopad.importers.base import Importer
 from memopad.importers.chatgpt_importer import ChatGPTImporter

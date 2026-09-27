@@ -1,4 +1,4 @@
-﻿"""Schemas for directory tree operations."""
+"""Schemas for directory tree operations."""
 
 from datetime import datetime
 from typing import List, Optional, Literal

@@ -1,4 +1,4 @@
-﻿"""Alembic environment configuration."""
+"""Alembic environment configuration."""
 
 import asyncio
 import os

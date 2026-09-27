@@ -1,4 +1,4 @@
-﻿"""MCP composition root for Basic Memory.
+"""MCP composition root for Basic Memory.
 
 This container owns reading ConfigManager and environment variables for the
 MCP server entrypoint. Downstream modules receive config/dependencies explicitly

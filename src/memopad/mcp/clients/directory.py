@@ -1,4 +1,4 @@
-﻿"""Typed client for directory API operations.
+"""Typed client for directory API operations.
 
 Encapsulates all /v2/projects/{project_id}/directory/* endpoints.
 """

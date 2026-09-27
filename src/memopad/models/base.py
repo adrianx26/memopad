@@ -1,4 +1,4 @@
-﻿"""Base model class for SQLAlchemy models."""
+"""Base model class for SQLAlchemy models."""
 
 from sqlalchemy.ext.asyncio import AsyncAttrs
 from sqlalchemy.orm import DeclarativeBase

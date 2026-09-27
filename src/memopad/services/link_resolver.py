@@ -1,4 +1,4 @@
-﻿"""Service for resolving markdown links to permalinks."""
+"""Service for resolving markdown links to permalinks."""
 
 from typing import Optional, Tuple
 

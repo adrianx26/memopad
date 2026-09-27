@@ -1,4 +1,4 @@
-﻿"""Schema models for entity markdown files."""
+"""Schema models for entity markdown files."""
 
 from datetime import datetime
 from typing import List, Optional

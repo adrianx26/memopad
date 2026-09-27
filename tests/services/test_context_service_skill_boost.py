@@ -24,7 +24,12 @@ from memopad.repository.search_index_row import SearchIndexRow
 from memopad.schemas.memory import MemoryUrl
 from memopad.schemas.search import SearchItemType
 from memopad.services.context_service import ContextResultItem, ContextService
-from memopad.services.skill_service import SKILL_ENTITY_TYPE, SKILL_STATUS_KEY, SKILL_VERSION_KEY, STATUS_VALIDATED
+from memopad.services.skill_service import (
+    SKILL_ENTITY_TYPE,
+    SKILL_STATUS_KEY,
+    SKILL_VERSION_KEY,
+    STATUS_VALIDATED,
+)
 
 
 def _config_with(**overrides) -> MemoPadConfig:
@@ -59,13 +64,13 @@ async def _make_entity(repo, *, permalink, title, entity_type, metadata=None):
 @pytest.mark.asyncio
 async def test_boost_disabled_by_default(entity_repository):
     skill = await _make_entity(
-        entity_repository, permalink="sk-def", title="S",
+        entity_repository,
+        permalink="sk-def",
+        title="S",
         entity_type=SKILL_ENTITY_TYPE,
         metadata={SKILL_VERSION_KEY: 1, SKILL_STATUS_KEY: STATUS_VALIDATED},
     )
-    note = await _make_entity(
-        entity_repository, permalink="nt-def", title="N", entity_type="note"
-    )
+    note = await _make_entity(entity_repository, permalink="nt-def", title="N", entity_type="note")
 
     svc = ContextService(
         search_repository=None,  # type: ignore[arg-type]
@@ -83,13 +88,13 @@ async def test_boost_disabled_by_default(entity_repository):
 @pytest.mark.asyncio
 async def test_boost_moves_validated_skill_first(entity_repository):
     skill = await _make_entity(
-        entity_repository, permalink="sk-v", title="S",
+        entity_repository,
+        permalink="sk-v",
+        title="S",
         entity_type=SKILL_ENTITY_TYPE,
         metadata={SKILL_VERSION_KEY: 2, SKILL_STATUS_KEY: STATUS_VALIDATED},
     )
-    note = await _make_entity(
-        entity_repository, permalink="nt-v", title="N", entity_type="note"
-    )
+    note = await _make_entity(entity_repository, permalink="nt-v", title="N", entity_type="note")
 
     svc = ContextService(
         search_repository=None,  # type: ignore[arg-type]
@@ -106,18 +111,20 @@ async def test_boost_moves_validated_skill_first(entity_repository):
 @pytest.mark.asyncio
 async def test_boost_preserves_order_within_groups(entity_repository):
     s1 = await _make_entity(
-        entity_repository, permalink="sk-a", title="A",
+        entity_repository,
+        permalink="sk-a",
+        title="A",
         entity_type=SKILL_ENTITY_TYPE,
         metadata={SKILL_VERSION_KEY: 1, SKILL_STATUS_KEY: STATUS_VALIDATED},
     )
     s2 = await _make_entity(
-        entity_repository, permalink="sk-b", title="B",
+        entity_repository,
+        permalink="sk-b",
+        title="B",
         entity_type=SKILL_ENTITY_TYPE,
         metadata={SKILL_VERSION_KEY: 1, SKILL_STATUS_KEY: STATUS_VALIDATED},
     )
-    note = await _make_entity(
-        entity_repository, permalink="nt-c", title="C", entity_type="note"
-    )
+    note = await _make_entity(entity_repository, permalink="nt-c", title="C", entity_type="note")
 
     svc = ContextService(
         search_repository=None,  # type: ignore[arg-type]
@@ -134,13 +141,13 @@ async def test_boost_preserves_order_within_groups(entity_repository):
 @pytest.mark.asyncio
 async def test_boost_no_change_when_no_validated_skills(entity_repository):
     draft_skill = await _make_entity(
-        entity_repository, permalink="sk-d", title="D",
+        entity_repository,
+        permalink="sk-d",
+        title="D",
         entity_type=SKILL_ENTITY_TYPE,
         metadata={SKILL_VERSION_KEY: 1, SKILL_STATUS_KEY: "draft"},
     )
-    note = await _make_entity(
-        entity_repository, permalink="nt-d", title="N", entity_type="note"
-    )
+    note = await _make_entity(entity_repository, permalink="nt-d", title="N", entity_type="note")
     svc = ContextService(
         search_repository=None,  # type: ignore[arg-type]
         entity_repository=entity_repository,
@@ -154,9 +161,7 @@ async def test_boost_no_change_when_no_validated_skills(entity_repository):
 
 
 @pytest.mark.asyncio
-async def test_boost_end_to_end_via_build_context(
-    entity_repository, search_repository
-):
+async def test_boost_end_to_end_via_build_context(entity_repository, search_repository):
     """build_context wires the boost in. depth=0 avoids the CTE path."""
     from memopad.repository.search_index_row import SearchIndexRow  # noqa: F401
 
@@ -170,8 +175,11 @@ async def test_boost_end_to_end_via_build_context(
     note = await _make_entity(
         entity_repository, permalink="nt-e2e", title="NoteE2E", entity_type="note"
     )
+    await entity_repository.update(note.id, {"entity_metadata": {"level": "L1", "confidence": 0.9}})
     skill = await _make_entity(
-        entity_repository, permalink="sk-e2e", title="SkillE2E",
+        entity_repository,
+        permalink="sk-e2e",
+        title="SkillE2E",
         entity_type=SKILL_ENTITY_TYPE,
         metadata={SKILL_VERSION_KEY: 1, SKILL_STATUS_KEY: STATUS_VALIDATED},
     )

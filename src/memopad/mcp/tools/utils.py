@@ -1,4 +1,4 @@
-﻿"""Utility functions for making HTTP requests in Memopad MCP tools.
+"""Utility functions for making HTTP requests in Memopad MCP tools.
 
 These functions provide a consistent interface for making HTTP requests
 to the Memopad API, with improved error handling and logging.

@@ -4,21 +4,20 @@ Inspired by MemGraphRAG's Conflict Detector + Conflict Handler agent pattern.
 Instead of autonomous LLM agents, MemoPad uses lightweight rule-based detection and
 surfaces conflicts to the LLM via tool output for human-in-the-loop resolution.
 
-Current detection is intentionally simple and should be treated as a first-pass
-quality signal, not a final truth source. It flags observations in the same entity
-and category when their content diverges beyond a threshold. Future hardening should
-prefer explicit conflict markers or a dedicated observation_conflict join table.
+Conflict detection is deliberately conservative: distance identifies differences,
+not contradictions. Two observations are flagged only when they make opposite
+assertions about the same normalized claim or use opposing lifecycle/status terms
+in a status-like category.
 
 Detection logic:
-- Two observations on the same entity in the same category with different content
-  are flagged as potentially conflicting (score = 1.0 for exact-different, lower for similar).
-- If the optional embedding service is available, cosine distance is used for a
-  richer score; otherwise a normalised Levenshtein-inspired ratio is used.
+- Two observations on the same entity and category are compared for explicit negation
+  or opposing status assertions.
 - Conflicts are stored bidirectionally: both observations point at each other.
 - MemoPad does not auto-resolve conflicts; it records and surfaces them.
 """
 
 from dataclasses import dataclass
+import re
 from typing import Optional, Sequence
 
 from loguru import logger
@@ -26,14 +25,76 @@ from sqlalchemy import select, update
 
 from memopad.models.knowledge import Observation
 from memopad.repository.observation_repository import ObservationRepository
+from memopad.repository.repository import _retry_on_db_locked
 from memopad import db
 
 
-# --- Threshold ---
-# Trigger: content differs by more than this ratio (0–1, lower = more similar)
-# Why: avoid flagging minor whitespace edits or capitalisation differences
-# Outcome: only meaningfully different content in the same category is flagged
-_CONFLICT_THRESHOLD = 0.15  # flag when similarity < (1 - threshold)
+_NEGATORS = {"no", "not", "never", "without", "cannot"}
+_STATUS_OPPOSITES = (
+    ("active", "deprecated"),
+    ("active", "inactive"),
+    ("enabled", "disabled"),
+    ("supported", "unsupported"),
+    ("available", "unavailable"),
+    ("running", "stopped"),
+    ("current", "obsolete"),
+)
+_IGNORED_TOKENS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "do",
+    "does",
+    "for",
+    "from",
+    "in",
+    "is",
+    "it",
+    "of",
+    "on",
+    "or",
+    "the",
+    "to",
+    "with",
+}
+
+
+def _claim_tokens(content: str) -> tuple[set[str], bool]:
+    """Normalize common inflections and return claim terms plus negation polarity."""
+    content = re.sub(r"\bdoesn't\b", "does not", content, flags=re.IGNORECASE)
+    content = re.sub(r"\bdon't\b", "do not", content, flags=re.IGNORECASE)
+    raw_tokens = [token.lower() for token in re.findall(r"[a-z0-9]+", content.lower())]
+    negated = sum(token in _NEGATORS for token in raw_tokens) % 2 == 1
+    tokens = set()
+    for token in raw_tokens:
+        if token in _NEGATORS or token in _IGNORED_TOKENS:
+            continue
+        if token in {"uses", "used", "using"}:
+            token = "use"
+        tokens.add(token)
+    return tokens, negated
+
+
+def _is_explicit_contradiction(a: str, b: str) -> bool:
+    """Return true only for aligned claims with explicit opposing assertions."""
+    tokens_a, negated_a = _claim_tokens(a)
+    tokens_b, negated_b = _claim_tokens(b)
+    if tokens_a and tokens_a == tokens_b and negated_a != negated_b:
+        return True
+
+    for left, right in _STATUS_OPPOSITES:
+        opposing = (left in tokens_a and right in tokens_b) or (
+            right in tokens_a and left in tokens_b
+        )
+        shared_subject = (tokens_a - {left, right}) & (tokens_b - {left, right})
+        if opposing and shared_subject:
+            return True
+    return False
 
 
 @dataclass
@@ -62,6 +123,7 @@ def _similarity_ratio(a: str, b: str) -> float:
 
     # Common character count (multiset intersection)
     from collections import Counter
+
     ca, cb = Counter(a_norm), Counter(b_norm)
     common = sum((ca & cb).values())
     total = sum(ca.values()) + sum(cb.values())
@@ -129,11 +191,8 @@ class ConflictService:
                     if obs_a.conflicting_obs_id == obs_b.id:
                         continue
 
-                    similarity = _similarity_ratio(obs_a.content, obs_b.content)
-                    divergence = 1.0 - similarity
-
-                    if divergence > _CONFLICT_THRESHOLD:
-                        score = round(divergence, 4)
+                    if _is_explicit_contradiction(obs_a.content, obs_b.content):
+                        score = 1.0
                         logger.info(
                             f"Conflict detected: obs_id={obs_a.id} vs obs_id={obs_b.id} "
                             f"category='{category}' score={score}"
@@ -147,13 +206,16 @@ class ConflictService:
 
         return conflicts
 
+    @_retry_on_db_locked
     async def _write_conflicts(
         self,
         conflicts: list[ConflictResult],
         provenance_path: Optional[str],
     ) -> None:
         """Persist conflict flags bidirectionally for all detected pairs."""
-        async with db.scoped_session(self.observation_repository.session_maker) as session:
+        async with db.scoped_session(
+            self.observation_repository.session_maker, write=True
+        ) as session:
             for result in conflicts:
                 # Flag obs_a → obs_b
                 await session.execute(
@@ -178,6 +240,7 @@ class ConflictService:
                     )
                 )
 
+    @_retry_on_db_locked
     async def resolve_conflict(self, observation_id: int) -> None:
         """Mark an observation's conflict as resolved.
 
@@ -187,7 +250,9 @@ class ConflictService:
         Args:
             observation_id: ID of either observation in a conflicting pair.
         """
-        async with db.scoped_session(self.observation_repository.session_maker) as session:
+        async with db.scoped_session(
+            self.observation_repository.session_maker, write=True
+        ) as session:
             # Load the observation to find its partner
             result = await session.execute(
                 select(Observation).where(Observation.id == observation_id)
@@ -214,6 +279,4 @@ class ConflictService:
                     .values(conflict_score=None, conflicting_obs_id=None, conflict_resolved=True)
                 )
 
-            logger.info(
-                f"Conflict resolved: obs_id={observation_id} partner_id={partner_id}"
-            )
+            logger.info(f"Conflict resolved: obs_id={observation_id} partner_id={partner_id}")

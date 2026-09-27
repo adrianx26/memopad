@@ -1,4 +1,4 @@
-﻿"""Project context utilities for Basic Memory MCP server.
+"""Project context utilities for Basic Memory MCP server.
 
 Provides project lookup utilities for MCP tools.
 Handles project validation and context management in one place.

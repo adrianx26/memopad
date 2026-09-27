@@ -1,4 +1,4 @@
-﻿"""remove required from entity.permalink
+"""remove required from entity.permalink
 
 Revision ID: 502b60eaa905
 Revises: b3c3938bacdb

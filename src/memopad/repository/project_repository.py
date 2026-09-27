@@ -1,4 +1,4 @@
-﻿"""Repository for managing projects in Basic Memory."""
+"""Repository for managing projects in Basic Memory."""
 
 from pathlib import Path
 from typing import Optional, Sequence, Union
@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from memopad import db
 from memopad.models.project import Project
-from memopad.repository.repository import Repository
+from memopad.repository.repository import Repository, _retry_on_db_locked
 
 
 class ProjectRepository(Repository[Project]):
@@ -97,6 +97,7 @@ class ProjectRepository(Repository[Project]):
         result = await self.execute_query(query)
         return list(result.scalars().all())
 
+    @_retry_on_db_locked
     async def set_as_default(self, project_id: int) -> Optional[Project]:
         """Set a project as the default and unset previous default.
 
@@ -106,7 +107,7 @@ class ProjectRepository(Repository[Project]):
         Returns:
             The updated project if found, None otherwise
         """
-        async with db.scoped_session(self.session_maker) as session:
+        async with db.scoped_session(self.session_maker, write=True) as session:
             # First, clear the default flag for all projects using direct SQL
             await session.execute(
                 text("UPDATE project SET is_default = NULL WHERE is_default IS NOT NULL")
@@ -121,6 +122,7 @@ class ProjectRepository(Repository[Project]):
                 return target_project
             return None  # pragma: no cover
 
+    @_retry_on_db_locked
     async def update_path(self, project_id: int, new_path: str) -> Optional[Project]:
         """Update project path.
 
@@ -131,7 +133,7 @@ class ProjectRepository(Repository[Project]):
         Returns:
             The updated project if found, None otherwise
         """
-        async with db.scoped_session(self.session_maker) as session:
+        async with db.scoped_session(self.session_maker, write=True) as session:
             project = await self.select_by_id(session, project_id)
             if project:
                 project.path = new_path

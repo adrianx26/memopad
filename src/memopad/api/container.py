@@ -1,4 +1,4 @@
-﻿"""API composition root for Basic Memory.
+"""API composition root for Basic Memory.
 
 This container owns reading ConfigManager and environment variables for the
 API entrypoint. Downstream modules receive config/dependencies explicitly

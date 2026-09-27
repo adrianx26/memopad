@@ -1,4 +1,4 @@
-﻿"""CLI composition root for Memopad.
+"""CLI composition root for Memopad.
 
 This container owns reading ConfigManager and environment variables for the
 CLI entrypoint. Downstream modules receive config/dependencies explicitly

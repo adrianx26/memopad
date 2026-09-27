@@ -1,4 +1,4 @@
-﻿"""SQLite FTS5-based search repository implementation."""
+"""SQLite FTS5-based search repository implementation."""
 
 import json
 import re
@@ -13,6 +13,7 @@ from memopad import db
 from memopad.models.search import CREATE_SEARCH_INDEX
 from memopad.repository.search_index_row import SearchIndexRow
 from memopad.repository.search_repository_base import SearchRepositoryBase
+from memopad.repository.repository import retry_on_db_locked_bulk
 from memopad.repository.metadata_filters import parse_metadata_filters, build_sqlite_json_path
 from memopad.schemas.search import SearchItemType
 
@@ -38,6 +39,7 @@ class SQLiteSearchRepository(SearchRepositoryBase):
                 self._entity_columns = {row[1] for row in result.fetchall()}
         return self._entity_columns
 
+    @retry_on_db_locked_bulk
     async def init_search_index(self):
         """Create FTS5 virtual table for search if it doesn't exist.
 
@@ -46,7 +48,7 @@ class SQLiteSearchRepository(SearchRepositoryBase):
         """
         logger.info("Initializing SQLite FTS5 search index")
         try:
-            async with db.scoped_session(self.session_maker) as session:
+            async with db.scoped_session(self.session_maker, write=True) as session:
                 # Create FTS5 virtual table if it doesn't exist
                 await session.execute(CREATE_SEARCH_INDEX)
                 await session.commit()

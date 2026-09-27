@@ -1,4 +1,4 @@
-﻿"""Repository for managing Observation objects."""
+"""Repository for managing Observation objects."""
 
 from typing import Dict, List, Sequence
 

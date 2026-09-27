@@ -1,4 +1,4 @@
-﻿"""Dependency injection functions for memopad services.
+"""Dependency injection functions for memopad services.
 
 DEPRECATED: This module is a backwards-compatibility shim.
 Import from memopad.deps package submodules instead:

@@ -1,4 +1,4 @@
-﻿"""Utilities for converting between markdown and entity models."""
+"""Utilities for converting between markdown and entity models."""
 
 import uuid
 from pathlib import Path

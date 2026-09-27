@@ -1,4 +1,4 @@
-﻿"""Move note tool for Memopad MCP server."""
+"""Move note tool for Memopad MCP server."""
 
 from textwrap import dedent
 from typing import Optional

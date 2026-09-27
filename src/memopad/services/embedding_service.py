@@ -29,6 +29,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from memopad import db
+from memopad.repository.repository import retry_on_db_locked_bulk
 
 
 # --- Configuration ---
@@ -177,9 +178,10 @@ class EmbeddingService:
         provider = FastEmbedProvider()
         return cls(session_maker, project_id, provider)
 
+    @retry_on_db_locked_bulk
     async def init_store(self) -> None:
         """Create the embedding table if it doesn't exist. Idempotent."""
-        async with db.scoped_session(self.session_maker) as session:
+        async with db.scoped_session(self.session_maker, write=True) as session:
             await session.execute(
                 text(
                     """
@@ -201,6 +203,7 @@ class EmbeddingService:
                 )
             )
 
+    @retry_on_db_locked_bulk
     async def upsert(self, entity_id: int, content: str) -> None:
         """Embed `content` and write it to the store, replacing any prior row."""
         if not self.provider:
@@ -208,7 +211,7 @@ class EmbeddingService:
         vec = self.provider.embed([content])[0]
         blob = _pack_vector(vec)
 
-        async with db.scoped_session(self.session_maker) as session:
+        async with db.scoped_session(self.session_maker, write=True) as session:
             await session.execute(
                 text(
                     """
@@ -231,9 +234,10 @@ class EmbeddingService:
                 },
             )
 
+    @retry_on_db_locked_bulk
     async def delete(self, entity_id: int) -> None:
         """Remove an entity's embedding (called when an entity is deleted)."""
-        async with db.scoped_session(self.session_maker) as session:
+        async with db.scoped_session(self.session_maker, write=True) as session:
             await session.execute(
                 text("DELETE FROM embedding WHERE entity_id = :eid"),
                 {"eid": entity_id},
@@ -257,6 +261,7 @@ class EmbeddingService:
             )
             return {row[0] for row in result.fetchall()}
 
+    @retry_on_db_locked_bulk
     async def upsert_many(
         self, items: Sequence[tuple[int, str]]
     ) -> int:
@@ -283,7 +288,7 @@ class EmbeddingService:
                     "vec": _pack_vector(vec),
                 }
             )
-        async with db.scoped_session(self.session_maker) as session:
+        async with db.scoped_session(self.session_maker, write=True) as session:
             await session.execute(
                 text(
                     """

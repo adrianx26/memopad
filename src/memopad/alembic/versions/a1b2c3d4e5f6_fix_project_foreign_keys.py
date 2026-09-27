@@ -1,4 +1,4 @@
-﻿"""fix project foreign keys
+"""fix project foreign keys
 
 Revision ID: a1b2c3d4e5f6
 Revises: 647e7a75e2cd

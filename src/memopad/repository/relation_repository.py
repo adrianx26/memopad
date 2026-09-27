@@ -1,4 +1,4 @@
-﻿"""Repository for managing Relation objects."""
+"""Repository for managing Relation objects."""
 
 from typing import Sequence, List, Optional, Any, cast
 
@@ -12,7 +12,7 @@ from sqlalchemy.orm.interfaces import LoaderOption
 
 from memopad import db
 from memopad.models import Relation, Entity
-from memopad.repository.repository import Repository
+from memopad.repository.repository import Repository, _retry_on_db_locked
 
 
 class RelationRepository(Repository[Relation]):
@@ -60,13 +60,14 @@ class RelationRepository(Repository[Relation]):
         result = await self.execute_query(query)
         return result.scalars().all()
 
+    @_retry_on_db_locked
     async def delete_outgoing_relations_from_entity(self, entity_id: int) -> None:
         """Delete outgoing relations for an entity.
 
         Only deletes relations where this entity is the source (from_id),
         as these are the ones owned by this entity's markdown file.
         """
-        async with db.scoped_session(self.session_maker) as session:
+        async with db.scoped_session(self.session_maker, write=True) as session:
             await session.execute(delete(Relation).where(Relation.from_id == entity_id))
 
     async def find_unresolved_relations(self) -> Sequence[Relation]:
@@ -126,6 +127,7 @@ class RelationRepository(Repository[Relation]):
         result = await self.execute_query(query)
         return result.scalars().all()
 
+    @_retry_on_db_locked
     async def add_all_ignore_duplicates(self, relations: List[Relation]) -> int:
         """Bulk insert relations, ignoring duplicates.
 
@@ -158,7 +160,7 @@ class RelationRepository(Repository[Relation]):
             for r in relations
         ]
 
-        async with db.scoped_session(self.session_maker) as session:
+        async with db.scoped_session(self.session_maker, write=True) as session:
             # Check dialect to use appropriate insert
             dialect_name = session.bind.dialect.name if session.bind else "sqlite"
 

@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 
 from memopad.config import ConfigManager
 from memopad.mcp.server import mcp

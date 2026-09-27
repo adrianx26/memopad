@@ -1,4 +1,4 @@
-﻿"""Repository for search operations.
+"""Repository for search operations.
 
 This module provides the search repository interface.
 The actual repository implementations are backend-specific:

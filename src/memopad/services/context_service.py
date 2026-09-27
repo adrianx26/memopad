@@ -24,6 +24,13 @@ from memopad.services.skill_service import (
     is_validated_skill,
     match_trigger,
 )
+from memopad.services.local_decision_provider import (
+    DecisionBatch,
+    DecisionProvider,
+    DecisionQuestion,
+    DecisionProviderResponseError,
+)
+from memopad.services.shortterm_context import estimate_tokens
 from memopad.utils import generate_permalink
 from memopad.config import MemoPadConfig
 
@@ -103,14 +110,14 @@ class ContextService:
         entity_repository: EntityRepository,
         observation_repository: ObservationRepository,
         app_config: MemoPadConfig | None = None,
+        decision_provider: DecisionProvider | None = None,
     ):
         self.search_repository = search_repository
         self.entity_repository = entity_repository
         self.observation_repository = observation_repository
         self.app_config = app_config
-        self.hub_penalty_enabled = (
-            app_config.hub_penalty_enabled if app_config else True
-        )
+        self.decision_provider = decision_provider
+        self.hub_penalty_enabled = app_config.hub_penalty_enabled if app_config else True
         self.hub_penalty_weight = app_config.hub_penalty_weight if app_config else 0.5
         self.hub_degree_threshold = app_config.hub_degree_threshold if app_config else 0
 
@@ -120,6 +127,14 @@ class ContextService:
         self.recall_max_chars_per_memory = (
             app_config.recall_max_chars_per_memory if app_config else 0
         )
+        self.recall_max_tokens = app_config.recall_max_tokens if app_config else 4096
+        self.recall_tier_budgets = {
+            "L0": app_config.recall_tier_budget_l0 if app_config else None,
+            "L1": app_config.recall_tier_budget_l1 if app_config else None,
+            "L2": app_config.recall_tier_budget_l2 if app_config else None,
+            "L3": app_config.recall_tier_budget_l3 if app_config else None,
+        }
+        self.recall_min_confidence = app_config.recall_min_confidence if app_config else 0.50
         self.recall_timeout_s = (
             (app_config.recall_timeout_ms / 1000.0)
             if app_config and app_config.recall_timeout_ms > 0
@@ -230,6 +245,148 @@ class ContextService:
                 rest.append(item)
         return boosted + rest
 
+    async def _rerank_context_candidates(
+        self,
+        context_results: List[ContextResultItem],
+        query: Optional[str],
+    ) -> List[ContextResultItem]:
+        """Rerank at most 20 candidates without crossing retrieval groups."""
+        if self.decision_provider is None or not query or not query.strip() or not context_results:
+            return context_results
+
+        candidate_limit = 20
+        candidate_count = min(len(context_results), candidate_limit)
+        candidates = context_results[:candidate_count]
+        if candidate_count < 2:
+            return context_results
+
+        group_keys = await self._context_rerank_group_keys(candidates)
+        scores = await self._score_context_candidates(query, candidates)
+        candidate_slots: dict[tuple[str, tuple[str, ...], bool], list[int]] = {}
+        for index, group_key in enumerate(group_keys):
+            candidate_slots.setdefault(group_key, []).append(index)
+
+        reranked_candidates = list(candidates)
+        for indices in candidate_slots.values():
+            ordered = sorted(indices, key=lambda index: (-scores[index], index))
+            for slot, candidate_index in zip(indices, ordered):
+                reranked_candidates[slot] = candidates[candidate_index]
+
+        reranked = reranked_candidates + context_results[candidate_count:]
+        return reranked
+
+    async def _context_rerank_group_keys(
+        self, context_results: List[ContextResultItem]
+    ) -> List[tuple[str, tuple[str, ...], bool]]:
+        """Resolve result type, memory level, and validated-skill status."""
+        referenced: list[set[int]] = []
+        all_entity_ids: set[int] = set()
+        for item in context_results:
+            primary = item.primary_result
+            if primary.type == SearchItemType.ENTITY.value:
+                ids = {primary.id}
+            elif primary.type == SearchItemType.OBSERVATION.value:
+                ids = {primary.entity_id} if primary.entity_id is not None else set()
+            elif primary.type == SearchItemType.RELATION.value:
+                ids = {
+                    entity_id
+                    for entity_id in (primary.from_id, primary.to_id)
+                    if entity_id is not None
+                }
+            else:
+                ids = set()
+            referenced.append(ids)
+            all_entity_ids.update(ids)
+
+        entities = (
+            await self.entity_repository.get_by_ids(list(all_entity_ids)) if all_entity_ids else []
+        )
+        metadata_by_id = {entity.id: entity for entity in entities}
+        group_keys = []
+        for item, entity_ids in zip(context_results, referenced):
+            levels = tuple(
+                sorted(
+                    {
+                        str((metadata_by_id[entity_id].entity_metadata or {}).get("level") or "L0")
+                        for entity_id in entity_ids
+                        if entity_id in metadata_by_id
+                    }
+                )
+            )
+            is_validated = any(
+                is_validated_skill(metadata_by_id[entity_id])
+                for entity_id in entity_ids
+                if entity_id in metadata_by_id
+            )
+            group_keys.append((item.primary_result.type, levels or ("L0",), is_validated))
+        return group_keys
+
+    async def _score_context_candidates(
+        self,
+        query: str,
+        candidates: List[ContextResultItem],
+    ) -> list[float]:
+        """Score a small candidate batch; scores only reorder matching groups."""
+        state_candidates = []
+        questions: list[DecisionQuestion] = []
+        for index, item in enumerate(candidates):
+            primary = item.primary_result
+            title = primary.title or ""
+            if isinstance(primary, SearchIndexRow):
+                snippet = primary.content_snippet or ""
+            else:
+                snippet = primary.content or ""
+            question_id = f"candidate_{index}"
+            state_candidates.append(
+                {
+                    "id": question_id,
+                    "title": title[:200],
+                    "content": snippet[:600],
+                }
+            )
+            questions.append(
+                DecisionQuestion(
+                    id=question_id,
+                    type="noul",
+                    instructions=f"Score the relevance of {question_id} to the query.",
+                    criteria={
+                        "true": "The candidate provides useful information for this query.",
+                        "false": "The candidate is not useful for this query.",
+                    },
+                )
+            )
+
+        batch = DecisionBatch(
+            state={"query": query[:1000], "candidates": state_candidates},
+            questions=questions,
+        )
+        provider = self.decision_provider
+        if provider is None:
+            raise RuntimeError("A local decision provider is required for context reranking")
+        response = await provider.decide(batch)
+        expected_ids = {question.id for question in questions}
+        if set(response.answers) != expected_ids:
+            raise DecisionProviderResponseError(
+                "Provider answer IDs must exactly match the context reranking questions"
+            )
+        scores: list[float] = []
+        for question in questions:
+            answer = response.answers.get(question.id)
+            if (
+                answer is None
+                or answer.question_id != question.id
+                or answer.type != "noul"
+                or isinstance(answer.value, bool)
+                or not isinstance(answer.value, (int, float))
+                or not math.isfinite(answer.value)
+                or not 0 <= answer.value <= 1
+            ):
+                raise DecisionProviderResponseError(
+                    f"Provider returned an invalid relevance score for {question.id!r}"
+                )
+            scores.append(float(answer.value))
+        return scores
+
     async def _apply_level_weights(
         self, context_results: List[ContextResultItem]
     ) -> List[ContextResultItem]:
@@ -249,12 +406,9 @@ class ContextService:
             full-text component, so bm25 ties at 0 and the level weight itself
             breaks the tie (higher level → larger weight → sorts first).
 
-        Primaries without a higher level (unlevelled entities, and non-entity
-        rows like observations/relations) take the L0 weight — the "no level"
-        default — so only L1+ memories rise above the L0 tier; the relative order
-        within the L0 tier is preserved (uniform weight, stable sort). Because of
-        this, an all-L0 repo is untouched even with the flag on: reordering only
-        happens when L1/L2/L3 memories are present.
+        Entity primaries use their own level; observation primaries use their
+        owning entity's level, and relation primaries use the strongest level
+        among their endpoints. Unlevelled entities use the L0 weight.
 
         The level is read from authoritative `entity_metadata` via a single
         batched `get_by_ids` (the search index stores only `entity_type`, not the
@@ -265,16 +419,24 @@ class ContextService:
         if not self.levels_enabled or not context_results:
             return context_results
 
-        entity_ids = [
-            item.primary_result.id
-            for item in context_results
-            if getattr(item.primary_result, "type", None) == SearchItemType.ENTITY.value
-        ]
+        entity_ids: set[int] = set()
+        for item in context_results:
+            primary = item.primary_result
+            if primary.type == SearchItemType.ENTITY.value:
+                entity_ids.add(primary.id)
+            elif primary.type == SearchItemType.OBSERVATION.value and primary.entity_id:
+                entity_ids.add(primary.entity_id)
+            elif primary.type == SearchItemType.RELATION.value:
+                entity_ids.update(
+                    entity_id
+                    for entity_id in (primary.from_id, primary.to_id)
+                    if entity_id is not None
+                )
         if not entity_ids:
             return context_results  # no entity primaries → nothing to re-rank
 
         try:
-            entities = await self.entity_repository.get_by_ids(entity_ids)
+            entities = await self.entity_repository.get_by_ids(list(entity_ids))
         except Exception as e:  # pragma: no cover - explicit degradation, not fallback
             logger.warning(
                 f"Level-weight re-rank skipped — entity metadata read failed: {e}. "
@@ -282,15 +444,32 @@ class ContextService:
             )
             return context_results
 
-        level_by_id = {
-            e.id: (e.entity_metadata or {}).get("level") for e in entities
-        }
+        level_by_id = {}
+        for entity in entities:
+            level_value = (entity.entity_metadata or {}).get("level")
+            level_by_id[entity.id] = level_value if isinstance(level_value, str) else None
         l0_weight = self.level_weights["L0"]
 
         def _weight_for(prim) -> float:
-            if getattr(prim, "type", None) == SearchItemType.ENTITY.value:
-                return self.level_weights.get(level_by_id.get(prim.id), l0_weight)
-            return l0_weight  # non-entity / no level → default L0 tier
+            if prim.type == SearchItemType.ENTITY.value:
+                entity_ids_for_row = [prim.id]
+            elif prim.type == SearchItemType.OBSERVATION.value:
+                entity_ids_for_row = [prim.entity_id] if prim.entity_id else []
+            elif prim.type == SearchItemType.RELATION.value:
+                entity_ids_for_row = [
+                    entity_id for entity_id in (prim.from_id, prim.to_id) if entity_id is not None
+                ]
+            else:
+                entity_ids_for_row = []
+            weights = []
+            for entity_id in entity_ids_for_row:
+                level = level_by_id.get(entity_id)
+                weights.append(
+                    self.level_weights[level]
+                    if level is not None and level in self.level_weights
+                    else l0_weight
+                )
+            return max(weights, default=l0_weight)
 
         def _sort_key(item: ContextResultItem):
             prim = item.primary_result
@@ -307,6 +486,317 @@ class ContextService:
 
         context_results.sort(key=_sort_key)
         return context_results
+
+    async def _apply_distilled_retrieval_policy(
+        self,
+        context_results: List[ContextResultItem],
+        *,
+        directly_requested_primary_ids: set[int],
+    ) -> List[ContextResultItem]:
+        """Keep distilled, sufficiently confident results in ordinary retrieval.
+
+        An exact URI explicitly requested by the caller may keep its raw L0
+        primary. Other L0 memories are reachable through the dedicated drill-down
+        flow, not mixed into ordinary retrieval alongside compact L1-L3 memories.
+        """
+        if not self.levels_enabled or not context_results:
+            return context_results
+
+        def referenced_entity_ids(row: ContextResultRow | SearchIndexRow) -> set[int]:
+            if row.type == SearchItemType.ENTITY.value:
+                return {row.id}
+            if row.type == SearchItemType.OBSERVATION.value:
+                entity_id = row.entity_id
+                return {entity_id} if entity_id is not None else set()
+            if row.type == SearchItemType.RELATION.value:
+                return {
+                    entity_id for entity_id in (row.from_id, row.to_id) if entity_id is not None
+                }
+            return set()
+
+        entity_ids = set()
+        for item in context_results:
+            entity_ids.update(referenced_entity_ids(item.primary_result))
+            for row in (*item.observations, *item.related_results):
+                entity_ids.update(referenced_entity_ids(row))
+        if not entity_ids:
+            return []
+
+        entities = await self.entity_repository.get_by_ids(list(entity_ids))
+        eligible_ids: set[int] = set()
+        level_by_id: dict[int, str | None] = {}
+        for entity in entities:
+            metadata = entity.entity_metadata or {}
+            level_value = metadata.get("level")
+            level = level_value if isinstance(level_value, str) else None
+            level_by_id[entity.id] = level
+            if self.skills_enabled and is_validated_skill(entity):
+                eligible_ids.add(entity.id)
+                continue
+            if level not in {"L1", "L2", "L3"}:
+                continue
+            try:
+                confidence = float(metadata.get("confidence") or 0.0)
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"Distilled entity {entity.id} has invalid confidence metadata; "
+                    "excluding it from context."
+                )
+                continue
+            if confidence >= self.recall_min_confidence:
+                eligible_ids.add(entity.id)
+
+        directly_requested_raw_ids = {
+            entity_id
+            for entity_id in directly_requested_primary_ids
+            if level_by_id.get(entity_id) not in {"L1", "L2", "L3"}
+        }
+        allowed_ids = eligible_ids | directly_requested_raw_ids
+
+        def is_allowed(row: ContextResultRow | SearchIndexRow, *, primary: bool) -> bool:
+            entity_ids_for_row = referenced_entity_ids(row)
+            if row.type == SearchItemType.ENTITY.value:
+                if primary and row.id in directly_requested_raw_ids:
+                    return True
+                return row.id in eligible_ids
+            if row.type == SearchItemType.OBSERVATION.value:
+                return bool(entity_ids_for_row & allowed_ids)
+            if row.type == SearchItemType.RELATION.value:
+                return (
+                    len(entity_ids_for_row) == 2
+                    and entity_ids_for_row <= allowed_ids
+                    and bool(entity_ids_for_row & eligible_ids)
+                )
+            return False
+
+        filtered: List[ContextResultItem] = []
+        for item in context_results:
+            if not is_allowed(item.primary_result, primary=True):
+                continue
+            item.related_results = [
+                row for row in item.related_results if is_allowed(row, primary=False)
+            ]
+            filtered.append(item)
+        return filtered
+
+    @staticmethod
+    def _budget_row_text(
+        row: ContextResultRow | SearchIndexRow, remaining_tokens: int
+    ) -> tuple[int, bool]:
+        """Spend a shared estimated-token budget on user-visible memory text."""
+        if isinstance(row, SearchIndexRow):
+            fields = (
+                ("title", row.title),
+                ("content_snippet", row.content_snippet),
+            )
+        else:
+            fields = (
+                ("title", row.title),
+                ("content", row.content),
+                ("category", row.category),
+                ("relation_type", row.relation_type),
+            )
+
+        for field_index, (field_name, value) in enumerate(fields):
+            if not isinstance(value, str) or not value:
+                continue
+            if remaining_tokens <= 0:
+                if field_name == "title":
+                    row.title = ""
+                elif field_name == "content_snippet" and isinstance(row, SearchIndexRow):
+                    row.content_snippet = ""
+                elif field_name == "content" and isinstance(row, ContextResultRow):
+                    row.content = ""
+                elif field_name == "category" and isinstance(row, ContextResultRow):
+                    row.category = ""
+                elif field_name == "relation_type" and isinstance(row, ContextResultRow):
+                    row.relation_type = ""
+                return 0, True
+            cost = estimate_tokens(value)
+            if cost <= remaining_tokens:
+                remaining_tokens -= cost
+                continue
+
+            marker = " …[truncated]"
+            marker_cost = estimate_tokens(marker)
+            if remaining_tokens > marker_cost:
+                clipped = value[: (remaining_tokens - marker_cost) * 4].rstrip() + marker
+            else:
+                clipped = value[: remaining_tokens * 4 + 3]
+            ContextService._set_row_text(row, field_name, clipped)
+            for remaining_field, _ in fields[field_index + 1 :]:
+                ContextService._set_row_text(row, remaining_field, "")
+            return max(0, remaining_tokens - estimate_tokens(clipped)), True
+        return remaining_tokens, remaining_tokens <= 0
+
+    @staticmethod
+    def _set_row_text(row: ContextResultRow | SearchIndexRow, field_name: str, value: str) -> None:
+        if field_name == "title":
+            row.title = value
+        elif field_name == "content_snippet" and isinstance(row, SearchIndexRow):
+            row.content_snippet = value
+        elif field_name == "content" and isinstance(row, ContextResultRow):
+            row.content = value
+        elif field_name == "category" and isinstance(row, ContextResultRow):
+            row.category = value
+        elif field_name == "relation_type" and isinstance(row, ContextResultRow):
+            row.relation_type = value
+
+    def _apply_recall_token_budget(
+        self, context_results: List[ContextResultItem]
+    ) -> List[ContextResultItem]:
+        """Cap combined primary, observation, and related text after ranking."""
+        if self.recall_max_tokens <= 0:
+            return context_results
+
+        remaining = self.recall_max_tokens
+        bounded: List[ContextResultItem] = []
+        for item in context_results:
+            if remaining <= 0:
+                break
+
+            remaining, exhausted = self._budget_row_text(item.primary_result, remaining)
+            observations = []
+            related = []
+            if remaining > 0 and not exhausted:
+                for row in item.observations:
+                    remaining, exhausted = self._budget_row_text(row, remaining)
+                    observations.append(row)
+                    if exhausted:
+                        break
+            if remaining > 0 and not exhausted:
+                for row in item.related_results:
+                    remaining, exhausted = self._budget_row_text(row, remaining)
+                    related.append(row)
+                    if exhausted:
+                        break
+            bounded.append(
+                ContextResultItem(
+                    primary_result=item.primary_result,
+                    observations=observations,
+                    related_results=related,
+                )
+            )
+            if exhausted:
+                break
+        return bounded
+
+    async def _apply_configured_recall_budgets(
+        self, context_results: List[ContextResultItem]
+    ) -> List[ContextResultItem]:
+        """Apply optional per-level caps and the existing total response ceiling.
+
+        Per-tier values are caps, not reserved quotas: underused capacity is not
+        redistributed, and no tier can exceed the shared total budget. Missing
+        tier caps preserve the legacy shared-budget behavior for that level.
+        """
+        if not any(budget is not None for budget in self.recall_tier_budgets.values()):
+            return self._apply_recall_token_budget(context_results)
+        if not context_results:
+            return context_results
+
+        item_levels = await self._context_item_levels(context_results)
+        level_rank = {"L0": 0, "L1": 1, "L2": 2, "L3": 3}
+        prioritized = sorted(
+            enumerate(zip(item_levels, context_results)),
+            key=lambda pair: (-level_rank[pair[1][0]], pair[0]),
+        )
+        item_levels = [level for _, (level, _) in prioritized]
+        context_results = [item for _, (_, item) in prioritized]
+        remaining_by_level = dict(self.recall_tier_budgets)
+        total_remaining = self.recall_max_tokens if self.recall_max_tokens > 0 else None
+        bounded: List[ContextResultItem] = []
+
+        for item, level in zip(context_results, item_levels):
+            if total_remaining == 0:
+                break
+            tier_remaining = remaining_by_level[level]
+            if tier_remaining == 0:
+                continue
+
+            limits = [limit for limit in (total_remaining, tier_remaining) if limit is not None]
+            if not limits:
+                bounded.append(item)
+                continue
+
+            allowance = min(limits)
+            remaining = allowance
+            remaining, exhausted = self._budget_row_text(item.primary_result, remaining)
+            observations: list[ContextResultRow] = []
+            related: list[ContextResultRow] = []
+            if remaining > 0 and not exhausted:
+                for row in item.observations:
+                    remaining, exhausted = self._budget_row_text(row, remaining)
+                    observations.append(row)
+                    if exhausted:
+                        break
+            if remaining > 0 and not exhausted:
+                for row in item.related_results:
+                    remaining, exhausted = self._budget_row_text(row, remaining)
+                    related.append(row)
+                    if exhausted:
+                        break
+
+            spent = allowance - remaining
+            if total_remaining is not None:
+                total_remaining = max(0, total_remaining - spent)
+            if tier_remaining is not None:
+                remaining_by_level[level] = max(0, tier_remaining - spent)
+
+            bounded.append(
+                ContextResultItem(
+                    primary_result=item.primary_result,
+                    observations=observations,
+                    related_results=related,
+                )
+            )
+
+        return bounded
+
+    async def _context_item_levels(self, context_results: List[ContextResultItem]) -> list[str]:
+        """Resolve each primary item's tier once; relations use their strongest endpoint."""
+        referenced_ids: list[set[int]] = []
+        all_entity_ids: set[int] = set()
+        for item in context_results:
+            primary = item.primary_result
+            if primary.type == SearchItemType.ENTITY.value:
+                entity_ids = {primary.id}
+            elif primary.type == SearchItemType.OBSERVATION.value:
+                entity_ids = {primary.entity_id} if primary.entity_id is not None else set()
+            elif primary.type == SearchItemType.RELATION.value:
+                entity_ids = {
+                    entity_id
+                    for entity_id in (primary.from_id, primary.to_id)
+                    if entity_id is not None
+                }
+            else:
+                entity_ids = set()
+            referenced_ids.append(entity_ids)
+            all_entity_ids.update(entity_ids)
+
+        entities = (
+            await self.entity_repository.get_by_ids(list(all_entity_ids)) if all_entity_ids else []
+        )
+        level_rank = {"L0": 0, "L1": 1, "L2": 2, "L3": 3}
+        level_by_id = {}
+        for entity in entities:
+            level = (entity.entity_metadata or {}).get("level")
+            if self.skills_enabled and is_validated_skill(entity):
+                level_by_id[entity.id] = "L2"
+            else:
+                level_by_id[entity.id] = (
+                    level if isinstance(level, str) and level in level_rank else "L0"
+                )
+
+        levels = []
+        for entity_ids in referenced_ids:
+            referenced_levels = [
+                level_by_id[entity_id] for entity_id in entity_ids if entity_id in level_by_id
+            ]
+            levels.append(
+                max(referenced_levels, key=level_rank.__getitem__) if referenced_levels else "L0"
+            )
+        return levels
 
     async def _inject_trigger_skills(
         self,
@@ -350,8 +840,7 @@ class ContextService:
             return context_results
 
         candidates = [
-            e for e in skill_entities
-            if is_validated_skill(e) and e.id not in present_ids
+            e for e in skill_entities if is_validated_skill(e) and e.id not in present_ids
         ]
         if not candidates:
             return context_results
@@ -387,9 +876,7 @@ class ContextService:
 
         if not injected:
             return context_results
-        logger.info(
-            f"Skill trigger-match injected {len(injected)} skill(s) for topic '{topic}'"
-        )
+        logger.info(f"Skill trigger-match injected {len(injected)} skill(s) for topic '{topic}'")
         return injected + context_results
 
     async def build_context(
@@ -402,13 +889,15 @@ class ContextService:
         offset=0,
         max_related: int = 10,
         include_observations: bool = True,
+        query: Optional[str] = None,
     ) -> ContextResult:
-        """Build rich context from a memory:// URI."""
+        """Build rich context; an explicit query may enable injected reranking."""
         logger.debug(
             f"Building context for URI: '{memory_url}' depth: '{depth}' since: '{since}' limit: '{limit}' offset: '{offset}'  max_related: '{max_related}'"
         )
 
         normalized_path: Optional[str] = None
+        directly_requested_primary_ids: set[int] = set()
         # Tb G1: the raw (un-normalized) memory_url path is the context
         # topic used for skill trigger-matching. Only set for non-wildcard
         # lookups — a wildcard pattern isn't a topic. Type-only lookups have no
@@ -445,6 +934,9 @@ class ContextService:
                     ),
                     "primary_search",
                 )
+                directly_requested_primary_ids = {
+                    item.id for item in (primary or []) if item.type == SearchItemType.ENTITY.value
+                }
         else:
             logger.debug(f"Build context for '{types}'")
             primary = await self._with_recall_timeout(
@@ -461,9 +953,7 @@ class ContextService:
 
         # Find related content
         related = await self._with_recall_timeout(
-            self.find_related(
-                type_id_pairs, max_depth=depth, since=since, max_results=max_related
-            ),
+            self.find_related(type_id_pairs, max_depth=depth, since=since, max_results=max_related),
             "find_related",
         )
         related = related or []
@@ -471,7 +961,7 @@ class ContextService:
 
         # Collect entity IDs from primary and related results
         entity_ids = []
-        for result in (primary or []):
+        for result in primary or []:
             if result.type == SearchItemType.ENTITY.value:
                 entity_ids.append(result.id)
 
@@ -506,7 +996,7 @@ class ContextService:
         context_results = []
 
         # For each primary result
-        for primary_item in (primary or []):
+        for primary_item in primary or []:
             # Find all related items with this primary item as root
             related_to_primary = [r for r in related if r.root_id == primary_item.id]
 
@@ -550,15 +1040,20 @@ class ContextService:
 
             context_results.append(context_item)
 
-        # Tb L0-L3: level-weighted re-rank. Multiplies each primary entity's
-        # search score by its configured level weight and re-sorts, so distilled
-        # L1/L2/L3 memories surface above raw L0 notes. Self-gates on
-        # `levels_enabled`; a uniform weight across all-L0 results preserves the
-        # search-engine order, so this is a no-op for repos without derived tiers
-        # even when the flag is on. Runs before the skill boost so the G1 boost
-        # (validated skills to front) still wins over level weighting.
+        # Keep distilled memories in ordinary retrieval; raw L0 context is only
+        # preserved when the caller addressed that exact entity URI.
+        if context_results:
+            context_results = await self._apply_distilled_retrieval_policy(
+                context_results,
+                directly_requested_primary_ids=directly_requested_primary_ids,
+            )
+
+        # Re-rank the retained entity results by confidence-weighted memory level.
         if context_results:
             context_results = await self._apply_level_weights(context_results)
+
+        if query is not None:
+            context_results = await self._rerank_context_candidates(context_results, query)
 
         # Tb G1: re-rank so validated skills surface first. The method
         # self-gates on `skills_enabled`, so this is a no-op when the flag is off.
@@ -570,12 +1065,21 @@ class ContextService:
         # on `skills_enabled` + a non-empty `topic`; never drops existing results.
         context_results = await self._inject_trigger_skills(context_results, topic)
 
+        context_results = await self._apply_configured_recall_budgets(context_results)
+
         # Tb G1: trigger-matching may prepend validated skills to the result list
         # after `metadata` was built (primary_count was captured as len(primary)
         # above, before injection). Reconcile it to the final list length so the
         # metadata stays consistent with `len(result.results)`. No-op when the
         # flag is off or there's no topic (injection is a no-op then).
         metadata.primary_count = len(context_results)
+        metadata.related_count = sum(len(item.related_results) for item in context_results)
+        metadata.total_observations = sum(len(item.observations) for item in context_results)
+        metadata.total_relations = sum(
+            row.type == SearchItemType.RELATION.value
+            for item in context_results
+            for row in item.related_results
+        )
 
         # Return the structured ContextResult
         return ContextResult(results=context_results, metadata=metadata)
@@ -737,7 +1241,10 @@ class ContextService:
         """)
         result = await self.search_repository.execute_query(
             query,
-            params={"entity_ids": tuple(entity_ids), "project_id": self.search_repository.project_id},
+            params={
+                "entity_ids": tuple(entity_ids),
+                "project_id": self.search_repository.project_id,
+            },
         )
         return {row.entity_id: row.degree for row in result.all()}
 
@@ -757,17 +1264,17 @@ class ContextService:
         for row in rows:
             depth_penalty = 1.0 / (row.depth + 1)
             if not self.hub_penalty_enabled:
-                row.relevance_score = depth_penalty ** self.hub_penalty_weight
+                row.relevance_score = depth_penalty**self.hub_penalty_weight
                 continue
 
             degree = degrees.get(row.id, 0)
             if degree <= self.hub_degree_threshold:
-                row.relevance_score = depth_penalty ** self.hub_penalty_weight
+                row.relevance_score = depth_penalty**self.hub_penalty_weight
                 continue
 
             effective_degree = degree - self.hub_degree_threshold
             hub_penalty = 1.0 / math.sqrt(effective_degree + 1)
-            row.relevance_score = (depth_penalty ** self.hub_penalty_weight) * hub_penalty
+            row.relevance_score = (depth_penalty**self.hub_penalty_weight) * hub_penalty
 
         return sorted(rows, key=lambda row: row.relevance_score, reverse=True)
 

@@ -6,7 +6,7 @@ from typing import Optional, Sequence
 from sqlalchemy import update
 
 from memopad.models.observation_schema import ObservationSchema
-from memopad.repository.repository import Repository
+from memopad.repository.repository import Repository, _retry_on_db_locked
 
 
 class ObservationSchemaRepository(Repository[ObservationSchema]):
@@ -58,6 +58,7 @@ class ObservationSchemaRepository(Repository[ObservationSchema]):
 
         return None
 
+    @_retry_on_db_locked
     async def upsert_schema(self, name: str) -> ObservationSchema:
         """Create a new schema entry or increment frequency for an existing one.
 
@@ -73,7 +74,7 @@ class ObservationSchemaRepository(Repository[ObservationSchema]):
         if existing:
             # Increment frequency
             from memopad import db
-            async with db.scoped_session(self.session_maker) as session:
+            async with db.scoped_session(self.session_maker, write=True) as session:
                 await session.execute(
                     update(ObservationSchema)
                     .where(ObservationSchema.id == existing.id)
@@ -94,6 +95,7 @@ class ObservationSchemaRepository(Repository[ObservationSchema]):
             "updated_at": now,
         })
 
+    @_retry_on_db_locked
     async def add_alias(self, schema_id: int, alias: str) -> None:
         """Register an alias for an existing schema.
 
@@ -110,7 +112,7 @@ class ObservationSchemaRepository(Repository[ObservationSchema]):
         current_aliases.append(alias)
 
         from memopad import db
-        async with db.scoped_session(self.session_maker) as session:
+        async with db.scoped_session(self.session_maker, write=True) as session:
             await session.execute(
                 update(ObservationSchema)
                 .where(ObservationSchema.id == schema_id)

@@ -1,4 +1,4 @@
-﻿"""Import command for memopad CLI to import project data from Claude.ai."""
+"""Import command for memopad CLI to import project data from Claude.ai."""
 
 import json
 from pathlib import Path

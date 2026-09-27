@@ -1,4 +1,4 @@
-﻿"""Claude conversations import service for Basic Memory."""
+"""Claude conversations import service for Basic Memory."""
 
 import logging
 from datetime import datetime

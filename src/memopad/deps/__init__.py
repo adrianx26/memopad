@@ -1,4 +1,4 @@
-﻿"""Dependency injection for memopad.
+"""Dependency injection for memopad.
 
 This package provides FastAPI dependencies organized by feature:
 - config: Application configuration

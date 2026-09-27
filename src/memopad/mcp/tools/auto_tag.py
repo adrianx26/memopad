@@ -1,6 +1,5 @@
 """Auto-tagging tool for Memopad MCP server."""
 
-import textwrap
 from typing import Optional
 from loguru import logger
 from fastmcp import Context
@@ -18,57 +17,31 @@ async def auto_tag_note(
     project: Optional[str] = None,
     context: Context | None = None,
 ) -> str:
-    """Analyze a note and instruct the LLM to auto-tag it.
-    
-    This tool fetches the content of a specific note and returns a prompt directing
-    the host LLM to analyze the content and use the `edit_note` tool to apply 
-    appropriate semantic tags to the note's frontmatter.
-    
+    """Suggest existing project tags from locally indexed related notes.
+
     Args:
         permalink: The permalink of the note to tag.
         project: Project name. Optional - server will resolve using hierarchy.
         context: Optional FastMCP context.
-        
-    Returns:
-        A markdown formatted instruction for the host LLM containing the note content.
     """
-    logger.info(f"Generating auto-tag instructions for {permalink} in project {project}")
+    logger.info(f"Generating local tag suggestions for {permalink} in project {project}")
 
     async with get_client() as client:
-        # Resolve active project
         active_project = await get_active_project(client, project, context)
+        from memopad.mcp.clients import KnowledgeClient
 
-        # Import here to avoid circular dependencies
-        from memopad.mcp.clients import KnowledgeClient, ResourceClient
-
-        # Fetch the note content
         knowledge_client = KnowledgeClient(client, active_project.external_id)
-        resource_client = ResourceClient(client, active_project.external_id)
-        
-        try:
-            entity_id = await knowledge_client.resolve_entity(permalink)
-            response = await resource_client.read(entity_id)
-            content = response.text
-        except Exception as e:
-            return f"# Error\n\nFailed to read note {permalink}: {e}"
+        entity_id = await knowledge_client.resolve_entity(permalink)
+        suggestions = await knowledge_client.get_extraction_suggestions(entity_id)
+        tags = suggestions["tags"]
+        if not tags:
+            return f"No existing project tags found for notes related to `{permalink}`."
 
-        prompt = textwrap.dedent(f"""
-        # Auto-Tagging Task
-        
-        You have been requested to auto-tag the note `{permalink}` in project `{active_project.name}`.
-        
-        ## Note Content
-        ```markdown
-        {content}
-        ```
-        
-        ## Instructions
-        1. Analyze the content above to determine its core topics, concepts, and themes.
-        2. Generate 3-5 highly relevant, concise, lower-case tags (e.g., `architecture`, `planning`, `backend`).
-        3. Use the `edit_note` tool to add these tags to the note. 
-           - Set `operation` to `replace_section`.
-           - If the note has frontmatter, update the `tags:` array.
-           - If there's no frontmatter, add it.
-        """).strip()
-
-        return prompt
+        lines = [f"Existing tag suggestions for `{permalink}`:"]
+        for item in tags:
+            lines.append(
+                f"- `{item['tag']}` (supported by {item['supporting_entities']} notes, "
+                f"confidence {item['confidence']:.0%})"
+            )
+        lines.append("\nSuggestions are not applied automatically; use `edit_note` to accept them.")
+        return "\n".join(lines)

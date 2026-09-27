@@ -1,4 +1,4 @@
-﻿"""Utilities for handling .gitignore patterns and file filtering."""
+"""Utilities for handling .gitignore patterns and file filtering."""
 
 import fnmatch
 from pathlib import Path

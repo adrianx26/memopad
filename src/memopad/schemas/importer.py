@@ -1,4 +1,4 @@
-﻿"""Schemas for import services."""
+"""Schemas for import services."""
 
 from typing import Dict, Optional
 

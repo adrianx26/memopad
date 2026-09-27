@@ -1,4 +1,4 @@
-﻿"""Project model for Memopad."""
+"""Project model for Memopad."""
 
 import uuid
 from datetime import datetime, timezone

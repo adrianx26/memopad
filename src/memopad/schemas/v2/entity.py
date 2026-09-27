@@ -1,4 +1,4 @@
-﻿"""V2 entity and project schemas with ID-first design."""
+"""V2 entity and project schemas with ID-first design."""
 
 from datetime import datetime
 from typing import Dict, List, Literal, Optional

@@ -1,4 +1,4 @@
-﻿"""Utility functions for formatting prompt responses.
+"""Utility functions for formatting prompt responses.
 
 These utilities help format data from various tools into consistent,
 user-friendly markdown summaries.

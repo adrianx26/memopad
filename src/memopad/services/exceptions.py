@@ -1,4 +1,4 @@
-﻿class FileOperationError(Exception):
+class FileOperationError(Exception):
     """Raised when file operations fail"""
 
     pass

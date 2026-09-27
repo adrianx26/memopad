@@ -1,4 +1,4 @@
-﻿"""Add Postgres full-text search support with tsvector and GIN indexes
+"""Add Postgres full-text search support with tsvector and GIN indexes
 
 Revision ID: 314f1ea54dc4
 Revises: e7e1f4367280

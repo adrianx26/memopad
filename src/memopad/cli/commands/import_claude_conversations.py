@@ -1,4 +1,4 @@
-﻿"""Import command for memopad CLI to import chat data from conversations2.json format."""
+"""Import command for memopad CLI to import chat data from conversations2.json format."""
 
 import json
 from pathlib import Path

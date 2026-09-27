@@ -1,4 +1,4 @@
-﻿"""Database dependency injection for memopad.
+"""Database dependency injection for memopad.
 
 This module provides database-related dependencies:
 - Engine and session maker factories

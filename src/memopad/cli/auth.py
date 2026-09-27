@@ -1,4 +1,4 @@
-﻿"""WorkOS OAuth Device Authorization for CLI."""
+"""WorkOS OAuth Device Authorization for CLI."""
 
 import base64
 import hashlib

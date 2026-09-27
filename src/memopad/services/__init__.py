@@ -1,4 +1,4 @@
-﻿"""Services package."""
+"""Services package."""
 
 from .service import BaseService
 from .file_service import FileService

@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 
 from loguru import logger
 

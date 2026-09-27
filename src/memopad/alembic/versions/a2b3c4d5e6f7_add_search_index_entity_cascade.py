@@ -1,4 +1,4 @@
-﻿"""Add cascade delete FK from search_index to entity
+"""Add cascade delete FK from search_index to entity
 
 Revision ID: a2b3c4d5e6f7
 Revises: f8a9b2c3d4e5

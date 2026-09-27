@@ -1,4 +1,4 @@
-﻿"""V2 resource schemas for file content operations."""
+"""V2 resource schemas for file content operations."""
 
 from pydantic import BaseModel, Field
 

@@ -1,4 +1,4 @@
-﻿"""Directory service for managing file directories and tree structure."""
+"""Directory service for managing file directories and tree structure."""
 
 import fnmatch
 import logging

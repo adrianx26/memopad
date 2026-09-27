@@ -1,4 +1,4 @@
-﻿"""Status command for memopad CLI."""
+"""Status command for memopad CLI."""
 
 from typing import Set, Dict
 from typing import Annotated, Optional

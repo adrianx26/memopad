@@ -1,4 +1,4 @@
-﻿"""Format command for memopad CLI."""
+"""Format command for memopad CLI."""
 
 from pathlib import Path
 from typing import Annotated, Optional

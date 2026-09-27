@@ -1,4 +1,4 @@
-﻿"""Request and response schemas for prompt-related operations."""
+"""Request and response schemas for prompt-related operations."""
 
 from typing import Optional, List, Any, Dict
 from pydantic import BaseModel, Field

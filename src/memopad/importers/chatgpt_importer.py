@@ -1,4 +1,4 @@
-﻿"""ChatGPT import service for Memopad."""
+"""ChatGPT import service for Memopad."""
 
 import logging
 from datetime import datetime

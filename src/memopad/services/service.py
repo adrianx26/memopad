@@ -1,4 +1,4 @@
-﻿"""Base service class."""
+"""Base service class."""
 
 from typing import TypeVar, Generic
 

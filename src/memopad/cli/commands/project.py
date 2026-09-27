@@ -1,4 +1,4 @@
-﻿"""Command module for memopad project management."""
+"""Command module for memopad project management."""
 
 import json
 import os

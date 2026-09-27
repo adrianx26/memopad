@@ -52,6 +52,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -107,6 +109,9 @@ PERSONA_TITLE: str = "persona"  # fixed slug -> one persona per project, idempot
 # are the bootstrap defaults; the `distillation` skill's tunables block can override.
 CATEGORY_BASE_CONFIDENCE = {
     "definition": 0.80,
+    "architecture": 0.80,
+    "api": 0.80,
+    "configuration": 0.85,
     "rule": 0.85,
     "constraint": 0.85,
     "principle": 0.85,
@@ -308,17 +313,34 @@ class DistillationState:
         if not self.path.exists():
             return {}
         try:
-            return json.loads(self.path.read_text(encoding="utf-8"))
+            state = json.loads(self.path.read_text(encoding="utf-8"))
         except Exception as e:  # pragma: no cover - corrupt state -> cold start
-            logger.warning(f"distillation state unreadable ({e}); cold-starting")
-            return {}
+            raise ValueError(f"distillation state is unreadable: {self.path}") from e
+        if not isinstance(state, dict):
+            raise ValueError(f"distillation state must be a JSON object: {self.path}")
+        return state
 
     def save(self, data: dict) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path: Optional[Path] = None
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps(data), encoding="utf-8")
-        except Exception as e:  # pragma: no cover - state is best-effort
-            logger.warning(f"distillation state write failed ({e}); continuing")
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.path.parent,
+                prefix=f".{self.path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary_file:
+                temporary_path = Path(temporary_file.name)
+                json.dump(data, temporary_file)
+                temporary_file.flush()
+                os.fsync(temporary_file.fileno())
+            os.replace(temporary_path, self.path)
+        except Exception:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+            raise
 
 
 def _parse_dt(value: Optional[str]) -> Optional[datetime]:
@@ -326,8 +348,8 @@ def _parse_dt(value: Optional[str]) -> Optional[datetime]:
         return None
     try:
         return datetime.fromisoformat(value)
-    except Exception:
-        return None
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"invalid distillation watermark timestamp: {value!r}") from e
 
 
 # --- The hard backbone -----------------------------------------------------
@@ -407,12 +429,8 @@ class DistillationService:
         if not (self.app_config and self.app_config.skills_enabled):
             return base
         try:
-            skills = await self.entity_repository.list_by_entity_type(
-                SKILL_ENTITY_TYPE, limit=200
-            )
-            skill = next(
-                (s for s in skills if s.title == DISTILLATION_SKILL_TITLE), None
-            )
+            skills = await self.entity_repository.list_by_entity_type(SKILL_ENTITY_TYPE, limit=200)
+            skill = next((s for s in skills if s.title == DISTILLATION_SKILL_TITLE), None)
             if skill is None:
                 return base
             tunables = (skill.entity_metadata or {}).get("tunables") or {}
@@ -435,9 +453,7 @@ class DistillationService:
         """
         if not (self.app_config and self.app_config.skills_enabled):
             return  # skills feature off -> distillation uses config defaults
-        skills = await self.entity_repository.list_by_entity_type(
-            SKILL_ENTITY_TYPE, limit=200
-        )
+        skills = await self.entity_repository.list_by_entity_type(SKILL_ENTITY_TYPE, limit=200)
         if any(s.title == DISTILLATION_SKILL_TITLE for s in skills):
             return  # already present
         schema = EntitySchema(
@@ -528,7 +544,9 @@ class DistillationService:
         }
 
     async def add_unknown_categories(
-        self, categories: Optional[Sequence[str]] = None, confidence: float = DEFAULT_BASE_CONFIDENCE
+        self,
+        categories: Optional[Sequence[str]] = None,
+        confidence: float = DEFAULT_BASE_CONFIDENCE,
     ) -> dict:
         """Add one or more observation categories to the distillable set.
 
@@ -574,9 +592,7 @@ class DistillationService:
                 skills = await self.entity_repository.list_by_entity_type(
                     SKILL_ENTITY_TYPE, limit=200
                 )
-                skill = next(
-                    (s for s in skills if s.title == DISTILLATION_SKILL_TITLE), None
-                )
+                skill = next((s for s in skills if s.title == DISTILLATION_SKILL_TITLE), None)
                 if skill is not None:
                     tunables_block = (skill.entity_metadata or {}).get("tunables") or {}
                     current_cats = set(tunables_block.get("distillable_categories", []))
@@ -608,9 +624,7 @@ class DistillationService:
 
     # --- L1 pass ---
 
-    async def run_l1_pass(
-        self, max_memories: int = 50, *, all_entities: bool = False
-    ) -> int:
+    async def run_l1_pass(self, max_memories: int = 50, *, all_entities: bool = False) -> int:
         """Distil new L0 observations into L1 atomic facts. Returns facts written.
 
         Args:
@@ -633,18 +647,14 @@ class DistillationService:
         if all_entities:
             # Cold-start / bulk mode: scan ALL L0 entities (no watermark filter)
             # find_updated_since(None) = no time filter, returns all entities up to limit
-            l0_entities = await self.entity_repository.find_updated_since(
-                None, limit=100000
-            )
+            l0_entities = await self.entity_repository.find_updated_since(None, limit=100000)
             logger.info(
                 f"L1 pass [BULK]: scanning {len(l0_entities)} total L0 entities "
                 f"(project {self.project_id})"
             )
         else:
             # Incremental mode: only process entities updated since last watermark.
-            l0_entities = await self.entity_repository.find_updated_since(
-                since, limit=max_memories
-            )
+            l0_entities = await self.entity_repository.find_updated_since(since, limit=max_memories)
 
         existing = await self._load_facts_with_text()
 
@@ -655,12 +665,9 @@ class DistillationService:
         # recovers on its own — no manual `all_entities=True` required. Once L1 is
         # non-empty, an empty watermark scan is a normal idle tick and stays cheap.
         if not all_entities and not l0_entities and not existing:
-            full_scan = await self.entity_repository.find_updated_since(
-                None, limit=max_memories
-            )
+            full_scan = await self.entity_repository.find_updated_since(None, limit=max_memories)
             eligible = [
-                e for e in full_scan
-                if entity_level(e.entity_metadata or {}) not in DERIVED_LEVELS
+                e for e in full_scan if entity_level(e.entity_metadata or {}) not in DERIVED_LEVELS
             ]
             if eligible:
                 logger.info(
@@ -701,14 +708,10 @@ class DistillationService:
 
     async def _load_facts_with_text(self) -> List[Tuple[object, str]]:
         """Existing L1 facts as (entity, fact_text) for dedup/clustering."""
-        facts = await self.entity_repository.list_by_entity_type(
-            FACT_ENTITY_TYPE, limit=100000
-        )
+        facts = await self.entity_repository.list_by_entity_type(FACT_ENTITY_TYPE, limit=100000)
         out: List[Tuple[object, str]] = []
         for f in facts:
-            fact_obs = next(
-                (o for o in (f.observations or []) if o.category == "fact"), None
-            )
+            fact_obs = next((o for o in (f.observations or []) if o.category == "fact"), None)
             text = (fact_obs.content if fact_obs else f.title) or ""
             out.append((f, text))
         return out
@@ -844,9 +847,7 @@ class DistillationService:
         state = self._state.load()
         state["last_l2_at"] = now.isoformat()
         self._state.save(state)
-        logger.info(
-            f"L2 pass: {n} facts -> {created} scenarios (project {self.project_id})"
-        )
+        logger.info(f"L2 pass: {n} facts -> {created} scenarios (project {self.project_id})")
         return created
 
     def _facts_connected(
@@ -880,9 +881,7 @@ class DistillationService:
             return [value]
         return [str(v) for v in value]
 
-    async def _create_l2_scenario(
-        self, members: List[Tuple[object, str]], now: datetime
-    ) -> None:
+    async def _create_l2_scenario(self, members: List[Tuple[object, str]], now: datetime) -> None:
         entities = [e for e, _ in members]
         # dominant tag for a readable title; fall back to "scenario".
         tag_counts: dict[str, int] = defaultdict(int)
@@ -925,9 +924,7 @@ class DistillationService:
         """Aggregate stable L1 facts into one per-project L3 persona. Returns 0/1."""
         tunables = await self.load_skill_tunables()
         min_conf = float(tunables["l3_min_confidence"])
-        facts = await self.entity_repository.list_by_entity_type(
-            FACT_ENTITY_TYPE, limit=100000
-        )
+        facts = await self.entity_repository.list_by_entity_type(FACT_ENTITY_TYPE, limit=100000)
         stable = [
             f
             for f in facts
@@ -949,15 +946,15 @@ class DistillationService:
         rel_lines: List[str] = ["## Relations"]
         for f in stable:
             category = (f.entity_metadata or {}).get("category") or "fact"
-            fact_obs = next(
-                (o for o in (f.observations or []) if o.category == "fact"), None
-            )
+            fact_obs = next((o for o in (f.observations or []) if o.category == "fact"), None)
             text = (fact_obs.content if fact_obs else f.title) or ""
             obs_lines.append(f"- [{category}] {text}")
             rel_lines.append(f"- {DERIVED_FROM_RELATION_TYPE} [[{f.permalink}]]")
             sources.append(f"memory://entity/{f.permalink}")
 
-        content = f"# {PERSONA_TITLE}\n\n" + "\n".join(obs_lines) + "\n\n" + "\n".join(rel_lines) + "\n"
+        content = (
+            f"# {PERSONA_TITLE}\n\n" + "\n".join(obs_lines) + "\n\n" + "\n".join(rel_lines) + "\n"
+        )
         metadata = {
             "level": "L3",
             "confidence": 0.90,
@@ -1018,9 +1015,9 @@ class DistillationService:
 class DistillationDispatcher:
     """``DistillationCallback`` impl: build a per-project service and dispatch.
 
-    Fire-and-forget: failures are logged and swallowed so a distillation error
-    can never fail the write that triggered it (the scheduler calls this from the
-    create path's ``asyncio.create_task``).
+    Errors are logged and re-raised so the scheduler can restore its cadence state.
+    The API/watch fire-and-forget boundaries catch these errors so distillation
+    failures never fail the source write.
     """
 
     def __init__(
@@ -1040,6 +1037,7 @@ class DistillationDispatcher:
                 f"distillation pass failed for project {trigger.project_id} "
                 f"({trigger.trigger_type}): {e}"
             )
+            raise
 
 
 # --- The distillation skill template (procedure-of-record) -----------------

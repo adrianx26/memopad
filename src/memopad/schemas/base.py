@@ -1,4 +1,4 @@
-﻿"""Core pydantic models for memopad entities, observations, and relations.
+"""Core pydantic models for memopad entities, observations, and relations.
 
 This module defines the foundational data structures for the knowledge graph system.
 The graph consists of entities (nodes) connected by relations (edges), where each

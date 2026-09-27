@@ -1,4 +1,4 @@
-﻿"""Claude projects import service for Memopad."""
+"""Claude projects import service for Memopad."""
 
 import logging
 from typing import Any, Dict, Optional

@@ -1,4 +1,4 @@
-﻿"""project constraint fix
+"""project constraint fix
 
 Revision ID: 647e7a75e2cd
 Revises: 5fe1ab1ccebe

@@ -1,1 +1,1 @@
-﻿"""MCP server for memopad."""
+"""MCP server for memopad."""

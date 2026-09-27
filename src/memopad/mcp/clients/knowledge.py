@@ -112,6 +112,14 @@ class KnowledgeClient:
         )
         return EntityResponse.model_validate(response.json())
 
+    async def get_extraction_suggestions(self, entity_id: str) -> dict:
+        """Return indexed relation and tag suggestions for an entity."""
+        response = await call_get(
+            self.http_client,
+            f"{self._base_path}/entities/{entity_id}/extraction-suggestions",
+        )
+        return response.json()
+
     async def patch_entity(
         self,
         entity_id: str,
@@ -302,9 +310,7 @@ class KnowledgeClient:
 
     # --- CodeGraph (Tb G2) ---
 
-    async def index_codegraph(
-        self, root: str, *, languages: list[str] | None = None
-    ) -> dict:
+    async def index_codegraph(self, root: str, *, languages: list[str] | None = None) -> dict:
         """Index a source tree into the code graph (entities + relations + search).
 
         Args:
@@ -322,9 +328,7 @@ class KnowledgeClient:
         )
         return response.json()
 
-    async def find_symbol(
-        self, name: str, *, exact: bool = False
-    ) -> dict:
+    async def find_symbol(self, name: str, *, exact: bool = False) -> dict:
         """Find code symbols (functions/classes/modules) by name.
 
         Returns:
@@ -337,9 +341,7 @@ class KnowledgeClient:
         )
         return response.json()
 
-    async def impact_path(
-        self, permalink: str, *, max_hops: int = 5
-    ) -> dict:
+    async def impact_path(self, permalink: str, *, max_hops: int = 5) -> dict:
         """BFS over reverse `calls`: what does changing `permalink` affect?
 
         Returns:
@@ -352,9 +354,7 @@ class KnowledgeClient:
         )
         return response.json()
 
-    async def code_context(
-        self, permalink: str, *, max_tokens: int = 0
-    ) -> dict:
+    async def code_context(self, permalink: str, *, max_tokens: int = 0) -> dict:
         """Definition + direct dependencies + direct callers for a symbol.
 
         Returns:
@@ -388,9 +388,7 @@ class KnowledgeClient:
             Dict with per-level counts (l1_facts, l2_scenarios, l3_persona).
         """
         params = {"level": level, "max_memories": max_memories, "bulk": bulk}
-        response = await call_post(
-            self.http_client, f"{self._base_path}/distill", params=params
-        )
+        response = await call_post(self.http_client, f"{self._base_path}/distill", params=params)
         return response.json()
 
     async def discover_categories(self) -> dict:
@@ -403,9 +401,7 @@ class KnowledgeClient:
             Dict with total_categories, distillable, unknown,
             all_categories_with_counts, current_distillable_config.
         """
-        response = await call_get(
-            self.http_client, f"{self._base_path}/discover-categories"
-        )
+        response = await call_get(self.http_client, f"{self._base_path}/discover-categories")
         return response.json()
 
     async def add_categories(self, categories: list[str] | None = None) -> dict:
@@ -429,17 +425,13 @@ class KnowledgeClient:
     async def list_facts(self, *, limit: int = 200) -> list:
         """List distilled L1 atomic facts (entity_type=fact)."""
         params = {"limit": limit}
-        response = await call_get(
-            self.http_client, f"{self._base_path}/facts", params=params
-        )
+        response = await call_get(self.http_client, f"{self._base_path}/facts", params=params)
         return response.json()
 
     async def list_scenarios(self, *, limit: int = 200) -> list:
         """List distilled L2 scenarios (entity_type=scenario)."""
         params = {"limit": limit}
-        response = await call_get(
-            self.http_client, f"{self._base_path}/scenarios", params=params
-        )
+        response = await call_get(self.http_client, f"{self._base_path}/scenarios", params=params)
         return response.json()
 
     async def get_persona(self) -> dict:

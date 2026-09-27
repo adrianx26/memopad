@@ -1,4 +1,4 @@
-﻿"""Unified project resolution across MCP, API, and CLI.
+"""Unified project resolution across MCP, API, and CLI.
 
 This module provides a single canonical implementation of project resolution
 logic, eliminating duplicated decision trees across the codebase.

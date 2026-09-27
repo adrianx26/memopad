@@ -1,4 +1,4 @@
-﻿"""Base repository implementation."""
+"""Base repository implementation."""
 
 import asyncio
 import functools
@@ -172,7 +172,7 @@ class Repository(Generic[T]):
         :param model: the model to add
         :return: the added model instance
         """
-        async with db.scoped_session(self.session_maker) as session:
+        async with db.scoped_session(self.session_maker, write=True) as session:
             # Set project_id if applicable and not already set
             self._set_project_id_if_needed(model)
 
@@ -199,7 +199,7 @@ class Repository(Generic[T]):
         :param models: the models to add
         :return: the added models instances
         """
-        async with db.scoped_session(self.session_maker) as session:
+        async with db.scoped_session(self.session_maker, write=True) as session:
             # set the project id if not present in models
             for model in models:
                 self._set_project_id_if_needed(model)
@@ -286,7 +286,7 @@ class Repository(Generic[T]):
     async def create(self, data: dict) -> T:
         """Create a new record from a model instance."""
         logger.debug(f"Creating {self.Model.__name__} from entity_data: {data}")
-        async with db.scoped_session(self.session_maker) as session:
+        async with db.scoped_session(self.session_maker, write=True) as session:
             # Only include valid columns that are provided in entity_data
             model_data = self.get_model_data(data)
 
@@ -319,7 +319,7 @@ class Repository(Generic[T]):
         """Create multiple records in a single transaction."""
         logger.debug(f"Bulk creating {len(data_list)} {self.Model.__name__} instances")
 
-        async with db.scoped_session(self.session_maker) as session:
+        async with db.scoped_session(self.session_maker, write=True) as session:
             # Only include valid columns that are provided in entity_data
             model_list = []
             for d in data_list:
@@ -344,7 +344,7 @@ class Repository(Generic[T]):
     async def update(self, entity_id: int, entity_data: dict | T) -> Optional[T]:
         """Update an entity with the given data."""
         logger.debug(f"Updating {self.Model.__name__} {entity_id} with data: {entity_data}")
-        async with db.scoped_session(self.session_maker) as session:
+        async with db.scoped_session(self.session_maker, write=True) as session:
             try:
                 result = await session.execute(
                     select(self.Model).filter(self.primary_key == entity_id)
@@ -374,7 +374,7 @@ class Repository(Generic[T]):
     async def delete(self, entity_id: int) -> bool:
         """Delete an entity from the database."""
         logger.debug(f"Deleting {self.Model.__name__}: {entity_id}")
-        async with db.scoped_session(self.session_maker) as session:
+        async with db.scoped_session(self.session_maker, write=True) as session:
             try:
                 result = await session.execute(
                     select(self.Model).filter(self.primary_key == entity_id)
@@ -392,7 +392,7 @@ class Repository(Generic[T]):
     async def delete_by_ids(self, ids: List[int]) -> int:
         """Delete records matching given IDs."""
         logger.debug(f"Deleting {self.Model.__name__} by ids: {ids}")
-        async with db.scoped_session(self.session_maker) as session:
+        async with db.scoped_session(self.session_maker, write=True) as session:
             conditions = [self.primary_key.in_(ids)]
 
             # Add project_id filter if applicable
@@ -408,7 +408,7 @@ class Repository(Generic[T]):
     async def delete_by_fields(self, **filters: Any) -> bool:
         """Delete records matching given field values."""
         logger.debug(f"Deleting {self.Model.__name__} by fields: {filters}")
-        async with db.scoped_session(self.session_maker) as session:
+        async with db.scoped_session(self.session_maker, write=True) as session:
             conditions = [getattr(self.Model, field) == value for field, value in filters.items()]
 
             # Add project_id filter if applicable

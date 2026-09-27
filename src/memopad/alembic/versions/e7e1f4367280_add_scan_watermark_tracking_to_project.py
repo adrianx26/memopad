@@ -1,4 +1,4 @@
-﻿"""Add scan watermark tracking to Project
+"""Add scan watermark tracking to Project
 
 Revision ID: e7e1f4367280
 Revises: 9d9c1cb7d8f5

@@ -1,4 +1,4 @@
-﻿"""Parser for markdown files into Entity objects.
+"""Parser for markdown files into Entity objects.
 
 Uses markdown-it with plugins to parse structured data from markdown content.
 """

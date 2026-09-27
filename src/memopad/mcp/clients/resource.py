@@ -1,4 +1,4 @@
-﻿"""Typed client for resource API operations.
+"""Typed client for resource API operations.
 
 Encapsulates all /v2/projects/{project_id}/resource/* endpoints.
 """

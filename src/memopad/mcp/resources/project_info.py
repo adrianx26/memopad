@@ -1,4 +1,4 @@
-﻿"""Project info tool for Memopad MCP server."""
+"""Project info tool for Memopad MCP server."""
 
 from typing import Optional
 

@@ -1,4 +1,4 @@
-﻿"""Service for file operations with checksum tracking."""
+"""Service for file operations with checksum tracking."""
 
 import asyncio
 import hashlib

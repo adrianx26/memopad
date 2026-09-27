@@ -1,4 +1,4 @@
-﻿"""PostgreSQL tsvector-based search repository implementation."""
+"""PostgreSQL tsvector-based search repository implementation."""
 
 import json
 import re

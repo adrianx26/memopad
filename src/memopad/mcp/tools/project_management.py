@@ -1,4 +1,4 @@
-﻿"""Project management tools for Memopad MCP server.
+"""Project management tools for Memopad MCP server.
 
 These tools allow users to switch between projects, list available projects,
 and manage project context during conversations.

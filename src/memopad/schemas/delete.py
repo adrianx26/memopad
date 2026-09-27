@@ -1,4 +1,4 @@
-﻿"""Delete operation schemas for the knowledge graph.
+"""Delete operation schemas for the knowledge graph.
 
 This module defines the request schemas for removing entities, relations,
 and observations from the knowledge graph. Each operation has specific

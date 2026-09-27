@@ -1,4 +1,4 @@
-﻿"""Project dependency injection for memopad.
+"""Project dependency injection for memopad.
 
 This module provides project-related dependencies:
 - Project path extraction from URL

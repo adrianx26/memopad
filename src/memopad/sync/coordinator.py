@@ -1,4 +1,4 @@
-﻿"""SyncCoordinator - centralized sync/watch lifecycle management.
+"""SyncCoordinator - centralized sync/watch lifecycle management.
 
 This module provides a single coordinator that manages the lifecycle of
 file synchronization and watch services across all entry points (API, MCP, CLI).

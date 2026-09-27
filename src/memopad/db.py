@@ -1,8 +1,10 @@
-﻿import asyncio
+import asyncio
 import os
+from weakref import WeakKeyDictionary
 from contextlib import asynccontextmanager
 from enum import Enum, auto
 from pathlib import Path
+from threading import Lock
 from typing import AsyncGenerator, Optional
 
 from memopad.config import MemoPadConfig, ConfigManager, DatabaseBackend
@@ -10,7 +12,9 @@ from alembic import command
 from alembic.config import Config
 
 from loguru import logger
+
 from sqlalchemy import text, event
+from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import (
     create_async_engine,
     async_sessionmaker,
@@ -40,6 +44,8 @@ from memopad.repository.sqlite_search_repository import SQLiteSearchRepository
 _engine: Optional[AsyncEngine] = None
 _session_maker: Optional[async_sessionmaker[AsyncSession]] = None
 _stoolap_db = None  # stoolap.AsyncDatabase instance (lazily initialized)
+_sqlite_write_queues: WeakKeyDictionary[Engine, asyncio.Lock] = WeakKeyDictionary()
+_sqlite_write_queues_lock = Lock()
 
 
 class DatabaseType(Enum):
@@ -100,21 +106,38 @@ def get_scoped_session_factory(
 @asynccontextmanager
 async def scoped_session(
     session_maker: async_sessionmaker[AsyncSession],
+    *,
+    write: bool = False,
 ) -> AsyncGenerator[AsyncSession, None]:
     """
     Get a scoped session with proper lifecycle management.
 
     Args:
         session_maker: Session maker to create scoped sessions from
+        write: Serialize this transaction with other in-process SQLite writes.
     """
     factory = get_scoped_session_factory(session_maker)
     session = factory()
+    write_queue = None
+    write_queue_acquired = False
+    if write and session.get_bind().dialect.name == "sqlite":
+        engine = session.get_bind()
+        with _sqlite_write_queues_lock:
+            write_queue = _sqlite_write_queues.get(engine)
+            if write_queue is None:
+                # asyncio.Lock wakes waiters in acquisition order; keeping one per
+                # engine prevents independent databases from blocking each other.
+                write_queue = asyncio.Lock()
+                _sqlite_write_queues[engine] = write_queue
     try:
-        # Only enable foreign keys for SQLite (Postgres has them enabled by default)
-        # Detect database type from session's bind (engine) dialect
         engine = session.get_bind()
         dialect_name = engine.dialect.name
 
+        if write_queue is not None:
+            await write_queue.acquire()
+            write_queue_acquired = True
+
+        # Only enable foreign keys for SQLite (Postgres has them enabled by default).
         if dialect_name == "sqlite":
             await session.execute(text("PRAGMA foreign_keys=ON"))
 
@@ -124,8 +147,12 @@ async def scoped_session(
         await session.rollback()
         raise
     finally:
-        await session.close()
-        await factory.remove()
+        try:
+            await session.close()
+            await factory.remove()
+        finally:
+            if write_queue is not None and write_queue_acquired:
+                write_queue.release()
 
 
 def _configure_sqlite_connection(dbapi_conn, enable_wal: bool = True) -> None:

@@ -1,4 +1,4 @@
-﻿"""API v2 module - ID-based entity references.
+"""API v2 module - ID-based entity references.
 
 Version 2 of the Basic Memory API uses integer entity IDs as the primary
 identifier for improved performance and stability.

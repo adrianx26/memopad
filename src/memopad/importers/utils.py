@@ -1,4 +1,4 @@
-﻿"""Utility functions for import services."""
+"""Utility functions for import services."""
 
 import re
 from datetime import datetime

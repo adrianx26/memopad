@@ -1,4 +1,4 @@
-﻿"""Update search index schema
+"""Update search index schema
 
 Revision ID: cc7172b46608
 Revises: 502b60eaa905

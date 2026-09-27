@@ -1,1 +1,1 @@
-﻿"""CLI tools for memopad"""
+"""CLI tools for memopad"""

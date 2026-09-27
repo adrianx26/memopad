@@ -1,4 +1,4 @@
-﻿"""Doctor command for local consistency checks.
+"""Doctor command for local consistency checks.
 
 Two modes:
   - default: roundtrip test against a throwaway temp project (proves the
@@ -50,7 +50,11 @@ console = Console()
 # (flag attribute, label, hint) for the boolean capability flags.
 _CAPABILITY_FLAGS: tuple[tuple[str, str, str], ...] = (
     ("levels_enabled", "levels_enabled", "L0-L3 levels + provenance (G5)"),
-    ("levels_pipeline_automatic", "levels_pipeline_automatic", "reactive distillation scheduler (G3)"),
+    (
+        "levels_pipeline_automatic",
+        "levels_pipeline_automatic",
+        "reactive distillation scheduler (G3)",
+    ),
     ("skills_enabled", "skills_enabled", "versioned skill assets (G1)"),
     ("codegraph_enabled", "codegraph_enabled", "code indexing in the graph (G2)"),
     ("shortterm_enabled", "shortterm_enabled", "in-task session context layering (G6)"),
@@ -64,7 +68,9 @@ def print_capability_status(config: MemoPadConfig) -> None:
     it can be unit-tested without standing up a server. Called at the start of
     both doctor modes so the user always sees which new capabilities are active.
     """
-    console.print("[blue]Tb-borrowed capabilities[/blue] (feature flags; default off except G6 short-term, on since 0.20.2):")
+    console.print(
+        "[blue]Tb-borrowed capabilities[/blue] (feature flags; default off except G6 short-term, on since 0.20.2):"
+    )
 
     for attr, label, hint in _CAPABILITY_FLAGS:
         # Trigger: getattr over a fixed, declared attribute list (no guessing).
@@ -75,11 +81,40 @@ def print_capability_status(config: MemoPadConfig) -> None:
         state = "[green]on[/green]" if enabled else "[dim]off[/dim]"
         console.print(f"  {label + ':':34} {state}  [dim]({hint})[/dim]")
 
-    # G4 retrieval budget: numeric params, 0 = disabled (current behavior).
+    # G4 retrieval budget: numeric limits, 0 = disabled.
+    recall_token_budget = config.recall_max_tokens
     recall_cap = config.recall_max_chars_per_memory
     recall_timeout = config.recall_timeout_ms
+    token_budget_state = "[green]on[/green]" if recall_token_budget else "[dim]off[/dim]"
     cap_state = "[green]on[/green]" if recall_cap else "[dim]off[/dim]"
     timeout_state = "[green]on[/green]" if recall_timeout else "[dim]off[/dim]"
+    console.print(
+        f"  {'recall_max_tokens:':34} {token_budget_state}  "
+        f"[dim]({recall_token_budget}; total estimated retrieval budget)[/dim]"
+    )
+    console.print(
+        f"  {'recall_min_confidence:':34} "
+        f"[dim]({config.recall_min_confidence:.2f}; distilled-memory threshold)[/dim]"
+    )
+    tier_budgets = {
+        "L3": config.recall_tier_budget_l3,
+        "L2": config.recall_tier_budget_l2,
+        "L1": config.recall_tier_budget_l1,
+        "L0": config.recall_tier_budget_l0,
+    }
+    tier_budgets_state = (
+        "[green]on[/green]"
+        if any(budget is not None for budget in tier_budgets.values())
+        else "[dim]off[/dim]"
+    )
+    tier_budget_summary = " ".join(
+        f"{level}={'uncapped' if budget is None else budget}"
+        for level, budget in tier_budgets.items()
+    )
+    console.print(
+        f"  {'recall_tier_budgets:':34} {tier_budgets_state}  "
+        f"[dim]({tier_budget_summary}; per-tier maximum estimated tokens)[/dim]"
+    )
     console.print(
         f"  {'recall_max_chars_per_memory:':34} {cap_state}  "
         f"[dim]({recall_cap}; per-memory truncation, G4)[/dim]"
@@ -90,9 +125,7 @@ def print_capability_status(config: MemoPadConfig) -> None:
     )
 
 
-async def run_capability_probes(
-    client: object, project_id: str, config: MemoPadConfig
-) -> None:
+async def run_capability_probes(client: object, project_id: str, config: MemoPadConfig) -> None:
     """Best-effort, informational health probes for enabled capabilities.
 
     Runs only in `--project` mode. Does NOT affect the exit code — these are
@@ -144,10 +177,7 @@ async def run_capability_probes(
             if sessions_root.is_dir():
                 session_dirs = [p for p in sessions_root.iterdir() if p.is_dir()]
                 total_size = sum(
-                    f.stat().st_size
-                    for d in session_dirs
-                    for f in d.rglob("*")
-                    if f.is_file()
+                    f.stat().st_size for d in session_dirs for f in d.rglob("*") if f.is_file()
                 )
                 size_kb = total_size / 1024.0
                 console.print(
@@ -383,9 +413,7 @@ async def run_drift_check(project_name: str, fix: bool) -> int:
                 f"/v2/projects/{project_id}/sync?force_full=true&run_in_background=false",
             )
             sync_report = SyncReportResponse.model_validate(sync_response.json())
-            console.print(
-                f"[green]OK[/green] sync reconciled: total={sync_report.total}"
-            )
+            console.print(f"[green]OK[/green] sync reconciled: total={sync_report.total}")
 
         # --- Step 3: surface unresolved relations as warnings ---
         # Trigger: sync resolves [[wikilinks]] when target entities exist.
@@ -393,9 +421,7 @@ async def run_drift_check(project_name: str, fix: bool) -> int:
         #      needs to either fix in the source file or by creating the target.
         # Outcome: report-only — we do NOT rewrite user files automatically.
         try:
-            unresolved_resp = await call_get(
-                client, f"/v2/projects/{project_id}/sync/unresolved"
-            )
+            unresolved_resp = await call_get(client, f"/v2/projects/{project_id}/sync/unresolved")
             unresolved = unresolved_resp.json().get("relations", [])
         except Exception:
             unresolved = []
@@ -419,9 +445,7 @@ async def run_drift_check(project_name: str, fix: bool) -> int:
         await run_capability_probes(client, project_id, app_config)
 
         remaining = (
-            len(new_files) + len(modified) + len(deleted) + len(moves)
-            if not fix
-            else 0
+            len(new_files) + len(modified) + len(deleted) + len(moves) if not fix else 0
         ) + len(unresolved)
         return remaining
 

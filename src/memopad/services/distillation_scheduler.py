@@ -31,9 +31,12 @@ Design
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import asyncio
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
-from typing import Awaitable, Callable, Dict, List, Optional, Protocol
+from typing import Callable, Dict, List, Optional, Protocol
+
+from loguru import logger
 
 from memopad.config import MemoPadConfig
 
@@ -61,6 +64,7 @@ class DistillationTrigger:
     max_memories: int
     fired_at: datetime
     depth: Optional[int] = None
+    consumed_memories: int = 0
 
 
 # --- Config projection ----------------------------------------------------
@@ -191,11 +195,15 @@ class DistillationScheduler:
         self.callback: DistillationCallback = callback or _no_op_callback  # type: ignore[assignment]
         self.clock: Clock = clock or _default_clock
         self._state: Dict[int, ProjectPipelineState] = {}
+        self._project_locks: Dict[int, asyncio.Lock] = {}
 
     # --- state access ---
 
     def state_for(self, project_id: int) -> ProjectPipelineState:
         return self._state.setdefault(project_id, ProjectPipelineState())
+
+    def _lock_for(self, project_id: int) -> asyncio.Lock:
+        return self._project_locks.setdefault(project_id, asyncio.Lock())
 
     def reset(self, project_id: int) -> None:
         """Clear bookkeeping for a project (e.g. on session end)."""
@@ -203,7 +211,9 @@ class DistillationScheduler:
 
     # --- event entry points ---
 
-    async def record_new_memory(self, project_id: int, *, now: Optional[datetime] = None) -> List[DistillationTrigger]:
+    async def record_new_memory(
+        self, project_id: int, *, now: Optional[datetime] = None
+    ) -> List[DistillationTrigger]:
         """Record a new memory ingestion and fire any due triggers.
 
         This is the primary hook (called by the future create/sync integration
@@ -213,36 +223,46 @@ class DistillationScheduler:
         if not self.config.has_any_trigger:
             return []
 
-        ts = now if now is not None else self.clock()
-        state = self.state_for(project_id)
-        state.new_memory_count += 1
-        state.memories_since_persona += 1
-        state.last_activity_at = ts
+        async with self._lock_for(project_id):
+            ts = now if now is not None else self.clock()
+            state = self.state_for(project_id)
+            before = replace(state, warmup_emitted=list(state.warmup_emitted))
+            state.new_memory_count += 1
+            state.memories_since_persona += 1
+            state.last_activity_at = ts
 
-        fired: List[DistillationTrigger] = []
+            fired: List[DistillationTrigger] = []
 
-        # Warmup widens retrieval as the session grows (1 -> 2 -> 4 -> ...).
-        warmup = self._maybe_warmup(project_id, state, ts)
-        if warmup:
-            fired.append(warmup)
+            warmup = self._maybe_warmup(project_id, state, ts)
+            if warmup:
+                fired.append(warmup)
 
-        # L3 persona: regenerate after every N new memories (heaviest, so first
-        # to check conceptually but emitted after warmup for ordering clarity).
-        persona = self._maybe_persona(project_id, state, ts)
-        if persona:
-            fired.append(persona)
+            persona = self._maybe_persona(project_id, state, ts)
+            if persona:
+                fired.append(persona)
 
-        # L1 distill: every N new memories, capped per pass.
-        l1 = self._maybe_l1(project_id, state, ts)
-        if l1:
-            fired.append(l1)
+            l1 = self._maybe_l1(project_id, state, ts)
+            if l1:
+                fired.append(l1)
 
-        # Dispatch to the callback seam (no-op by default).
-        for trig in fired:
-            await self.callback(trig)
-        return fired
+            try:
+                for trig in fired:
+                    await self.callback(trig)
+            except BaseException:
+                state.__dict__.update(before.__dict__)
+                state.new_memory_count += 1
+                state.memories_since_persona += 1
+                state.last_activity_at = ts
+                logger.warning(
+                    f"distillation trigger failed for project {project_id}; "
+                    "kept the new memory pending for an idempotent retry"
+                )
+                raise
+            return fired
 
-    def evaluate_idle(self, project_id: int, *, now: Optional[datetime] = None) -> Optional[DistillationTrigger]:
+    def evaluate_idle(
+        self, project_id: int, *, now: Optional[datetime] = None
+    ) -> Optional[DistillationTrigger]:
         """If the project has been idle past `l1_idle_timeout`, fire an L1 pass.
 
         Called by a periodic tick / watcher heartbeat. Does NOT dispatch to the
@@ -268,11 +288,35 @@ class DistillationScheduler:
             target_level="L1",
             max_memories=self.config.max_memories_per_session,
             fired_at=ts,
+            consumed_memories=state.new_memory_count,
         )
         # An idle pass consumes the pending queue.
         state.new_memory_count = 0
         state.last_l1_at = ts
         return trig
+
+    async def evaluate_idle_and_dispatch(
+        self, project_id: int, *, now: Optional[datetime] = None
+    ) -> Optional[DistillationTrigger]:
+        """Dispatch an idle trigger atomically, restoring pending state on failure."""
+        async with self._lock_for(project_id):
+            state = self._state.get(project_id)
+            if state is None:
+                return None
+            before = replace(state, warmup_emitted=list(state.warmup_emitted))
+            trigger = self.evaluate_idle(project_id, now=now)
+            if trigger is None:
+                return None
+            try:
+                await self.callback(trigger)
+            except BaseException:
+                state.__dict__.update(before.__dict__)
+                logger.warning(
+                    f"idle distillation trigger failed for project {project_id}; "
+                    "restored cadence state for an idempotent retry"
+                )
+                raise
+            return trigger
 
     async def dispatch(self, trigger: DistillationTrigger) -> None:
         """Fire a single trigger through the callback seam."""
@@ -363,4 +407,5 @@ class DistillationScheduler:
             target_level="L1",
             max_memories=self.config.max_memories_per_session,
             fired_at=ts,
+            consumed_memories=consumed,
         )

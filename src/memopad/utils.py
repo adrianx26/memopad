@@ -1,4 +1,4 @@
-﻿"""Utility functions for memopad."""
+"""Utility functions for memopad."""
 
 import logging
 import mimetypes

@@ -1,7 +1,8 @@
-﻿"""Service for syncing files between filesystem and database."""
+"""Service for syncing files between filesystem and database."""
 
 import asyncio
 import os
+import subprocess
 import sys
 import time
 from collections import OrderedDict
@@ -1125,10 +1126,11 @@ class SyncService:
                         logger.debug(f"Could not delete duplicate relation {relation.id}: {e}")
 
     async def _quick_count_files(self, directory: Path) -> int:
-        """Fast file count using find command.
+        """Count files without blocking the event loop.
 
-        Uses subprocess to leverage OS-level file counting which is much faster
-        than Python iteration, especially on network filesystems like TigrisFS.
+        On POSIX, ``find`` preserves the fast native traversal used for large
+        and network-backed projects, but runs in a worker thread so it cannot
+        block async request handling.
 
         On Windows, subprocess is not supported with SelectorEventLoop (which we use
         to avoid aiosqlite cleanup issues), so we fall back to Python-based counting.
@@ -1139,34 +1141,37 @@ class SyncService:
         Returns:
             Number of files in directory (recursive)
         """
-        # Windows with SelectorEventLoop doesn't support subprocess
-        if sys.platform == "win32":
+        async def count_with_scanner() -> int:
             count = 0
             async for _ in self.scan_directory(directory):
                 count += 1
             return count
 
-        process = await asyncio.create_subprocess_shell(
-            f'find "{directory}" -type f | wc -l',
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await process.communicate()
+        # Windows with SelectorEventLoop doesn't support subprocess
+        if sys.platform == "win32":
+            return await count_with_scanner()
 
-        if process.returncode != 0:
-            error_msg = stderr.decode().strip()
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["find", str(directory), "-type", "f"],
+                capture_output=True,
+                check=False,
+            )
+        except FileNotFoundError:
+            logger.warning("find command is unavailable; counting files with the async scanner")
+            return await count_with_scanner()
+
+        if result.returncode != 0:
+            error_msg = result.stderr.decode(errors="replace").strip()
             logger.error(
-                f"FILE COUNT OPTIMIZATION FAILED: find command failed with exit code {process.returncode}, "
+                f"FILE COUNT OPTIMIZATION FAILED: find command failed with exit code {result.returncode}, "
                 f"error: {error_msg}. Falling back to manual count. "
                 f"This will slow down watermark detection!"
             )
-            # Fallback: count using scan_directory
-            count = 0
-            async for _ in self.scan_directory(directory):
-                count += 1
-            return count
+            return await count_with_scanner()
 
-        return int(stdout.strip())
+        return result.stdout.count(b"\n")
 
     async def _scan_directory_modified_since(
         self, directory: Path, since_timestamp: float

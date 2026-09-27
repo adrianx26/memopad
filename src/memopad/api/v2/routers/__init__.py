@@ -1,4 +1,4 @@
-﻿"""V2 API routers."""
+"""V2 API routers."""
 
 from memopad.api.v2.routers.knowledge_router import router as knowledge_router
 from memopad.api.v2.routers.project_router import router as project_router

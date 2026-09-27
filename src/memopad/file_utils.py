@@ -1,4 +1,4 @@
-﻿"""Utilities for file operations."""
+"""Utilities for file operations."""
 
 import asyncio
 import hashlib

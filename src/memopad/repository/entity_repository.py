@@ -1,4 +1,4 @@
-﻿"""Repository for managing entities in the knowledge graph."""
+"""Repository for managing entities in the knowledge graph."""
 
 from datetime import datetime
 from pathlib import Path
@@ -15,7 +15,7 @@ from sqlalchemy.engine import Row
 
 from memopad import db
 from memopad.models.knowledge import Entity, Observation, Relation
-from memopad.repository.repository import Repository
+from memopad.repository.repository import Repository, _retry_on_db_locked
 
 
 class EntityRepository(Repository[Entity]):
@@ -422,6 +422,7 @@ class EntityRepository(Repository[Entity]):
         result = await self.execute_query(query, use_query_options=False)
         return [(row.id, row.permalink) for row in result.all()]
 
+    @_retry_on_db_locked
     async def upsert_entity(self, entity: Entity) -> Entity:
         """Insert or update entity with clean separation of concerns.
 
@@ -431,7 +432,7 @@ class EntityRepository(Repository[Entity]):
         Returns:
             The inserted or updated entity
         """
-        async with db.scoped_session(self.session_maker) as session:
+        async with db.scoped_session(self.session_maker, write=True) as session:
             self._set_project_id_if_needed(entity)
 
             try:

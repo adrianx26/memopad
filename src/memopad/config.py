@@ -1,4 +1,4 @@
-﻿"""Configuration management for memopad."""
+"""Configuration management for memopad."""
 
 import json
 import os
@@ -20,7 +20,7 @@ DEFAULT_PERMALINK_CACHE_SIZE = 1000
 
 DATABASE_NAME = "memory.db"
 APP_DATABASE_NAME = "memory.db"  # Using the same name but in the app directory
-DATA_DIR_NAME = "memopad"          # Changed from ".memopad" (hidden) to "memopad" (visible)
+DATA_DIR_NAME = "memopad"  # Changed from ".memopad" (hidden) to "memopad" (visible)
 LEGACY_DATA_DIR_NAME = ".memopad"  # Old hidden directory — used only for migration
 CONFIG_FILE_NAME = "config.json"
 WATCH_STATUS_JSON = "watch-status.json"
@@ -58,11 +58,11 @@ class MemoPadConfig(BaseSettings):
     env: Environment = Field(default="dev", description="Environment name")
 
     projects: Dict[str, str] = Field(
-        default_factory=lambda: {
-            "main": str(Path(os.getenv("MEMOPAD_HOME", Path.home() / DATA_DIR_NAME)))
-        }
-        if os.getenv("MEMOPAD_HOME")
-        else {},
+        default_factory=lambda: (
+            {"main": str(Path(os.getenv("MEMOPAD_HOME", Path.home() / DATA_DIR_NAME)))}
+            if os.getenv("MEMOPAD_HOME")
+            else {}
+        ),
         description="Mapping of project names to their filesystem paths",
     )
     default_project: str = Field(
@@ -330,12 +330,29 @@ class MemoPadConfig(BaseSettings):
     # Candidate selection: which observation categories are distillable into L1 facts.
     distillable_categories: list[str] = Field(
         default_factory=lambda: [
-            "definition", "rule", "constraint", "preference", "fact", "principle", "summary",
+            "definition",
+            "rule",
+            "constraint",
+            "preference",
+            "fact",
+            "principle",
+            "summary",
+            "architecture",
+            "api",
+            "configuration",
             # Real instances use these free-form L0 categories too; the narrow 7-item
             # default above silently matched nothing for them, so CodeExtractor yielded
             # 0 facts with no crash. Widening the shipped default makes the common case
             # distil automatically. Per-project overrides live in the `distillation` skill.
-            "note", "tag", "topic", "stub", "general", "VERIFIED", "source", "concepts", "algorithms",
+            "note",
+            "tag",
+            "topic",
+            "stub",
+            "general",
+            "VERIFIED",
+            "source",
+            "concepts",
+            "algorithms",
         ],
         description="Observation categories eligible for promotion to L1 atomic facts. Free-form "
         "(MemoPad has no fixed canonical category set); comma-separated compound categories "
@@ -374,6 +391,49 @@ class MemoPadConfig(BaseSettings):
         "time. 0 = disabled (no truncation). Tb-derived: prevents a single large "
         "memory from exhausting the token budget.",
         ge=0,
+    )
+    recall_max_tokens: int = Field(
+        default=4096,
+        description="Approximate total text-token budget for a context-build response. "
+        "Applied after ranking across primary memories, observations, and related results. "
+        "0 = disabled.",
+        ge=0,
+    )
+    recall_tier_budget_l0: Optional[int] = Field(
+        default=None,
+        description="Optional maximum estimated tokens for L0 context items. None = no "
+        "per-tier cap; 0 = omit L0 items from the response. The total recall_max_tokens "
+        "ceiling still applies.",
+        ge=0,
+    )
+    recall_tier_budget_l1: Optional[int] = Field(
+        default=None,
+        description="Optional maximum estimated tokens for L1 context items. None = no "
+        "per-tier cap; 0 = omit L1 items from the response. The total recall_max_tokens "
+        "ceiling still applies.",
+        ge=0,
+    )
+    recall_tier_budget_l2: Optional[int] = Field(
+        default=None,
+        description="Optional maximum estimated tokens for L2 context items. None = no "
+        "per-tier cap; 0 = omit L2 items from the response. The total recall_max_tokens "
+        "ceiling still applies.",
+        ge=0,
+    )
+    recall_tier_budget_l3: Optional[int] = Field(
+        default=None,
+        description="Optional maximum estimated tokens for L3 context items. None = no "
+        "per-tier cap; 0 = omit L3 items from the response. The total recall_max_tokens "
+        "ceiling still applies.",
+        ge=0,
+    )
+    recall_min_confidence: float = Field(
+        default=0.50,
+        description="Minimum confidence for distilled L1-L3 memories to enter context. "
+        "Raw L0 notes requested directly are exempt; other L0 results are excluded while "
+        "levels are enabled.",
+        ge=0.0,
+        le=1.0,
     )
     recall_timeout_ms: int = Field(
         default=0,
@@ -770,6 +830,3 @@ def init_api_logging() -> None:  # pragma: no cover
     """
     log_level = os.getenv("MEMOPAD_LOG_LEVEL", "INFO")
     setup_logging(log_level=log_level, log_to_file=False)
-
-
-

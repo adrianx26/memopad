@@ -1,4 +1,4 @@
-﻿"""V2 routes for memory:// URI operations.
+"""V2 routes for memory:// URI operations.
 
 This router uses external_id UUIDs for stable, API-friendly routing.
 V1 uses string-based project names which are less efficient and less stable.

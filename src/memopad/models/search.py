@@ -1,4 +1,4 @@
-﻿"""Search DDL statements for SQLite and Postgres.
+"""Search DDL statements for SQLite and Postgres.
 
 The search_index table is created via raw DDL, not ORM models, because:
 - SQLite uses FTS5 virtual tables (cannot be represented as ORM)

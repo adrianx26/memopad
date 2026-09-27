@@ -1,4 +1,4 @@
-﻿"""Markdown-it plugins for Basic Memory markdown parsing."""
+"""Markdown-it plugins for Basic Memory markdown parsing."""
 
 from typing import List, Any, Dict
 from markdown_it import MarkdownIt

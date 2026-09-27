@@ -1,4 +1,4 @@
-﻿"""FastAPI application for memopad knowledge graph API."""
+"""FastAPI application for memopad knowledge graph API."""
 
 from contextlib import asynccontextmanager
 

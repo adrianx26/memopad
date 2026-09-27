@@ -1,4 +1,4 @@
-﻿"""Knowledge graph schema exports.
+"""Knowledge graph schema exports.
 
 This module exports all schema classes to simplify imports.
 Rather than importing from individual schema files, you can

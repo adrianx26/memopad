@@ -1,5 +1,6 @@
 """Note builder factory for creating structured notes from crawl results."""
 
+import ast
 import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -18,7 +19,9 @@ class NoteBuilderConfig:
     max_chars: int = DEFAULT_CONFIG.default_note_chars
 
 
-def truncate_content(content: str | None, max_len: int = DEFAULT_CONFIG.max_note_content) -> str | None:
+def truncate_content(
+    content: str | None, max_len: int = DEFAULT_CONFIG.max_note_content
+) -> str | None:
     """Truncate content to max_len with a marker if it exceeds the limit."""
     if content and len(content) > max_len:
         return content[:max_len] + "\n\n[... content truncated to fit size limit ...]"
@@ -39,6 +42,204 @@ def build_note(data: CrawlResult, config: NoteBuilderConfig) -> str | None:
 
     header = f"# {config.title}\n\n- [category] {config.description}\n\n"
     return truncate_content(header + "\n".join(sections))
+
+
+_MAX_CODE_OBSERVATIONS = 200
+_CODE_FILE_SUFFIXES = {
+    ".py",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".go",
+    ".rs",
+    ".java",
+    ".cs",
+    ".rb",
+}
+
+
+def _python_code_observations(path: str, source: str) -> list[str]:
+    """Extract declarations, settings, and assertions without executing source."""
+    try:
+        module = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return []
+
+    observations: list[str] = []
+
+    def api_observation(function: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+        prefix = "async def" if isinstance(function, ast.AsyncFunctionDef) else "def"
+        signature = f"{prefix} {function.name}({ast.unparse(function.args)})"
+        if function.returns:
+            signature += f" -> {ast.unparse(function.returns)}"
+        route = next(
+            (
+                ast.unparse(decorator)
+                for decorator in function.decorator_list
+                if isinstance(decorator, ast.Call)
+                and isinstance(decorator.func, ast.Attribute)
+                and decorator.func.attr.lower() in {"get", "post", "put", "patch", "delete"}
+            ),
+            None,
+        )
+        route_prefix = f"{route} " if route else ""
+        return f"- [api] {path} exposes {route_prefix}{signature[:180]}"
+
+    for node in module.body:
+        if isinstance(node, ast.ClassDef) and not node.name.startswith("_"):
+            bases = ", ".join(ast.unparse(base) for base in node.bases)
+            declaration = f"{path} defines class {node.name}"
+            if bases:
+                declaration += f"({bases})"
+            observations.append(f"- [architecture] {declaration}")
+
+            if any(marker in node.name.lower() for marker in ("config", "settings", "schema")):
+                for member in node.body:
+                    if isinstance(member, ast.AnnAssign) and isinstance(member.target, ast.Name):
+                        value = f" = {ast.unparse(member.value)}" if member.value else ""
+                        observations.append(
+                            "- [configuration] "
+                            f"{node.name}.{member.target.id}: "
+                            f"{ast.unparse(member.annotation)}{value}"
+                        )
+            for member in node.body:
+                if isinstance(
+                    member, (ast.FunctionDef, ast.AsyncFunctionDef)
+                ) and not member.name.startswith("_"):
+                    observations.append(api_observation(member))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and not node.name.startswith(
+            "_"
+        ):
+            observations.append(api_observation(node))
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                value = node.value
+                if (
+                    isinstance(target, ast.Name)
+                    and target.id.isupper()
+                    and re.search(
+                        r"CONFIG|TIMEOUT|LIMIT|DEFAULT|DATABASE|_URL$|_PORT$|_ENABLED$",
+                        target.id,
+                    )
+                    and value is not None
+                ):
+                    observations.append(
+                        f"- [configuration] {path} sets {target.id} = {ast.unparse(value)}"
+                    )
+
+    for node in ast.walk(module):
+        if isinstance(node, ast.Assert):
+            observations.append(f"- [rule] {path} requires: {ast.unparse(node.test)}")
+        elif isinstance(node, ast.If):
+            raised = next(
+                (child for child in ast.walk(node) if isinstance(child, ast.Raise)),
+                None,
+            )
+            if raised:
+                observations.append(
+                    f"- [rule] {path} rejects {ast.unparse(node.test)} with {ast.unparse(raised)}"
+                )
+
+    return observations
+
+
+def _generic_code_observations(path: str, source: str) -> list[str]:
+    """Extract common declarations from non-Python source files."""
+    observations: list[str] = []
+    patterns = (
+        (
+            re.compile(
+                r"^\s*(?:(?:export|public)\s+)?(?:abstract\s+)?"
+                r"(?:class|interface|struct|enum)\s+(\w+)",
+                re.M,
+            ),
+            "architecture",
+            "defines",
+        ),
+        (
+            re.compile(r"^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(([^)]*)\)", re.M),
+            "api",
+            "exposes",
+        ),
+        (
+            re.compile(
+                r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Z][A-Z0-9_]*)"
+                r"\s*(?::\s*[^=]+)?=\s*([^;\n]+)",
+                re.M,
+            ),
+            "configuration",
+            "defines",
+        ),
+        (
+            re.compile(
+                r"^\s*(?:export\s+)?(?:const|let)\s+(\w+)\s*=\s*"
+                r"(?:async\s*)?\([^)]*\)\s*=>",
+                re.M,
+            ),
+            "api",
+            "exposes",
+        ),
+        (
+            re.compile(
+                r"^\s*public\s+(?:(?:static|async|virtual|override|final)\s+)*"
+                r"[\w<>\[\]?]+\s+(\w+)\s*\(([^)]*)\)",
+                re.M,
+            ),
+            "api",
+            "exposes",
+        ),
+        (
+            re.compile(r"^\s*pub\s+(?:async\s+)?fn\s+(\w+)\s*\(([^)]*)\)", re.M),
+            "api",
+            "exposes",
+        ),
+        (
+            re.compile(r"^\s*func\s+([A-Z]\w*)\s*\(([^)]*)\)", re.M),
+            "api",
+            "exposes",
+        ),
+    )
+    for pattern, category, verb in patterns:
+        for match in pattern.finditer(source):
+            signature = match.group(0).strip()
+            observations.append(f"- [{category}] {path} {verb} {signature[:180]}")
+    return observations
+
+
+def build_code_architecture_note(data: CrawlResult) -> str | None:
+    """Turn code declarations into distillable observations during assimilation."""
+    observations: list[str] = []
+    seen: set[str] = set()
+    for page in data["pages"]:
+        path = urlparse(page["url"]).path
+        suffix = re.search(r"\.[^.\/]+$", path)
+        if not suffix or suffix.group(0).lower() not in _CODE_FILE_SUFFIXES:
+            continue
+
+        if suffix.group(0).lower() == ".py":
+            extracted = _python_code_observations(path, page["text"])
+        else:
+            extracted = _generic_code_observations(path, page["text"])
+
+        for observation in extracted:
+            if observation not in seen:
+                seen.add(observation)
+                observations.append(observation)
+            if len(observations) >= _MAX_CODE_OBSERVATIONS:
+                break
+        if len(observations) >= _MAX_CODE_OBSERVATIONS:
+            break
+
+    if not observations:
+        return None
+
+    return truncate_content(
+        "# Code Architecture\n\n"
+        "- [summary] Structural observations extracted from assimilated source files\n\n"
+        + "\n".join(observations)
+    )
 
 
 # Note builder registry
@@ -234,6 +435,10 @@ def build_all_notes(start_url: str, data: CrawlResult) -> list[tuple[str, str]]:
         note = build_note(data, config)
         if note:
             notes.append((config.title, note))
+
+    code_note = build_code_architecture_note(data)
+    if code_note:
+        notes.append(("Code Architecture", code_note))
 
     # Functional diagram
     diagram = build_functional_diagram_note(data)

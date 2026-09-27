@@ -1,4 +1,4 @@
-﻿"""Add structured metadata indexes for entity frontmatter
+"""Add structured metadata indexes for entity frontmatter
 
 Revision ID: d7e8f9a0b1c2
 Revises: g9a0b3c4d5e6

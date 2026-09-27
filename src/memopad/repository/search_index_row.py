@@ -1,4 +1,4 @@
-﻿"""Search index data structures."""
+"""Search index data structures."""
 
 import json
 from dataclasses import dataclass

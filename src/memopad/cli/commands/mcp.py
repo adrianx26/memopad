@@ -1,4 +1,4 @@
-﻿"""MCP server command with streamable HTTP transport."""
+"""MCP server command with streamable HTTP transport."""
 
 # -----------------------------------------------------------------------------
 # Windows Event Loop Fix (MUST be before any other imports)
